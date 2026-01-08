@@ -1,0 +1,5 @@
+packages: hs-raft.cabal
+
+test-show-details: streaming
+tests: True
+benchmarks: True

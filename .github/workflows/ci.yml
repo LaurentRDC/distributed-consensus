@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ghc:
+          - '8.10.7'
+          - '9.0.2'
+          - '9.2.8'
+          - '9.4.8'
+          - '9.6.7'
+          - '9.8.4'
+          - '9.10.3'
+          - '9.12.2'
+          - '9.14.1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: ${{ matrix.ghc }}
+
+      - name: Configure build
+        run: |
+          cabal build --dry-run
+
+      - name: Cache Cabal store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.cabal-store }}
+          key: ${{ runner.os }}-ghc-${{ matrix.ghc }}-${{ hashFiles('**/plan.json') }}
+          restore-keys: |
+            ${{ runner.os }}-ghc-${{ matrix.ghc }}-
+
+      - name: Build dependencies
+        run: cabal build --only-dependencies
+
+      - name: Build library
+        run: cabal build
+
+      - name: Run tests
+        run: cabal test
