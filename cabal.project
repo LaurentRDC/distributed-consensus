@@ -1,5 +1,8 @@
 packages: hs-raft.cabal
 
+-- Temporary until microlens-platform supports GHC 9.14
+allow-newer: template-haskell
+
 test-show-details: streaming
 tests: True
 benchmarks: True
