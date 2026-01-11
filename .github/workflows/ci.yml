@@ -16,7 +16,6 @@ jobs:
           - '9.8.4'
           - '9.10.3'
           - '9.12.2'
-          - '9.14.1'
 
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +27,7 @@ jobs:
 
       - name: Configure build
         run: |
+          # Generate a plan.json
           cabal build --dry-run
 
       - name: Cache Cabal store

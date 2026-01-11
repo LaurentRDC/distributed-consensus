@@ -31,7 +31,6 @@ module Network.Consensus.Raft.Spec
     lastApplied,
 
     -- * Types
-
     RPC (..),
     RPCResult (..),
     Role (..),
@@ -153,6 +152,3 @@ initialRaftState =
       _commitIndex = 0,
       _lastApplied = 0
     }
-
-
-

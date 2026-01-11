@@ -1,0 +1,4 @@
+[[language]]
+name = "haskell"
+formatter = { command = "ormolu" , args = ['--stdin-input-file', '%{buffer_name}']}
+auto-format = true
