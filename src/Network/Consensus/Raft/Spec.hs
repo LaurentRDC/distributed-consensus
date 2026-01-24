@@ -1,4 +1,5 @@
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE ExplicitForAll #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TemplateHaskell #-}
 
@@ -18,6 +19,7 @@ module Network.Consensus.Raft.Spec
     deserializeRPCResult,
     send,
     receive,
+    tracer,
 
     -- * Raft state
     RaftState,
@@ -29,6 +31,8 @@ module Network.Consensus.Raft.Spec
     logEntries,
     commitIndex,
     lastApplied,
+    yesVotes,
+    randomGen,
 
     -- * Types
     RPC (..),
@@ -36,13 +40,17 @@ module Network.Consensus.Raft.Spec
     Role (..),
     LogIndex,
     Term,
+    RaftTrace (..),
   )
 where
 
 import Data.Int (Int64)
 import Data.Sequence (Seq)
+import Data.Set (Set)
 import Data.Vector (Vector)
+import Data.Word (Word64)
 import Lens.Micro.Platform (makeLenses)
+import System.Random (StdGen, mkStdGen64)
 
 newtype LogIndex = LogIndex Int64
   deriving stock (Eq, Ord, Show)
@@ -104,6 +112,10 @@ data RPCResult node result
       -- | Request identifier
       RequestId
 
+data RaftTrace node
+  = LeaderElected node
+  deriving (Eq, Ord, Show)
+
 data RaftSpec entry node result message m = MkRaftSpec
   { _readLogEntry :: LogIndex -> m (Maybe entry),
     _writeLogEntry :: LogIndex -> Term -> entry -> m (),
@@ -117,7 +129,8 @@ data RaftSpec entry node result message m = MkRaftSpec
     _deserializeRPC :: message -> Maybe (RPC node entry),
     _deserializeRPCResult :: message -> Maybe (RPCResult node result),
     _send :: node -> message -> m (),
-    _receive :: m message
+    _receive :: m message,
+    _tracer :: RaftTrace node -> m ()
   }
 
 makeLenses ''RaftSpec
@@ -128,7 +141,6 @@ data Role
   | Candidate
   deriving (Eq, Show, Ord, Enum, Bounded)
 
--- TODO: make some of these fields persistent
 data RaftState node entry = MkRaftState
   { _role :: !Role,
     _term :: !Term,
@@ -136,13 +148,16 @@ data RaftState node entry = MkRaftState
     _currentLeader :: !(Maybe node),
     _logEntries :: !(Seq (Term, entry)),
     _commitIndex :: !LogIndex,
-    _lastApplied :: !LogIndex
+    _lastApplied :: !LogIndex,
+    -- | Set of votes received in the current term
+    _yesVotes :: !(Set node),
+    _randomGen :: !StdGen
   }
 
 makeLenses ''RaftState
 
-initialRaftState :: RaftState node entry
-initialRaftState =
+initialRaftState :: (Ord node) => Word64 -> RaftState node entry
+initialRaftState seed =
   MkRaftState
     { _role = Follower,
       _term = 1,
@@ -150,5 +165,8 @@ initialRaftState =
       _currentLeader = Nothing,
       _logEntries = mempty,
       _commitIndex = 0,
-      _lastApplied = 0
+      _lastApplied = 0,
+      _yesVotes = mempty,
+      -- We use mkStdGen64 for reproducibility across 32-bit and 64-bit architectures
+      _randomGen = mkStdGen64 seed
     }

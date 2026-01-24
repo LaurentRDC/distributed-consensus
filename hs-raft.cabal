@@ -30,7 +30,9 @@ common warnings
 library
     import:           warnings
     exposed-modules:  Network.Consensus.Raft
-    other-modules:    Network.Consensus.Raft.Spec
+    other-modules:    Network.Consensus.Raft.Algorithm
+                      Network.Consensus.Raft.Spec
+                      Network.Consensus.Raft.Timer
                       Network.Consensus.Raft.Trans
     -- GHC 9.6+ (base 4.18+) is required to infer types properly when
     -- using io-classes
@@ -38,6 +40,7 @@ library
                     , containers
                     , io-classes ^>=1.9
                     , microlens-platform ^>=0.4
+                    , random ^>=1.3
                     , transformers ^>=0.6
                     , vector >= 0.10 && <0.14
     hs-source-dirs:   src
@@ -51,8 +54,13 @@ test-suite hs-raft-test
     main-is:          Main.hs
     other-modules:    Test.Network.Consensus.Raft
     build-depends:    base >= 4.18 && <4.23
+                    , bytestring
+                    , containers
                     , hs-raft
+                    , io-classes ^>=1.9
                     , io-sim ^>=1.9
                     , hedgehog ^>=1.7
+                    , random ^>=1.3
                     , tasty ^>=1.5
                     , tasty-hedgehog ^>=1.4
+                    , tasty-hunit ^>=0.10
