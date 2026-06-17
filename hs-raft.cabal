@@ -53,6 +53,7 @@ test-suite hs-raft-test
     hs-source-dirs:   tests
     main-is:          Main.hs
     other-modules:    Test.Network.Consensus.Raft
+    ghc-options:      -threaded +RTS -N
     build-depends:    base >= 4.18 && <4.23
                     , bytestring
                     , containers

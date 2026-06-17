@@ -22,6 +22,7 @@ module Network.Consensus.Raft.Trans
     dequeueEvent,
     enqueueEvent,
     sendRPC,
+    sendRPCResult,
     quorum,
     nextElectionTimeout,
     trace,
@@ -48,7 +49,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word64)
 import Lens.Micro.Platform (makeLenses, use, view, (.=), (^.))
-import Network.Consensus.Raft.Spec (RPC, RPCResult, RaftSpec, RaftState, RaftTrace, initialRaftState, randomGen, send, serializeRPC, tracer)
+import Network.Consensus.Raft.Spec (RPC, RPCResult, RaftSpec, RaftState, RaftTrace, initialRaftState, randomGen, send, serializeRPC, serializeRPCResult, tracer)
 import Network.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
 import System.Random (uniformR)
 
@@ -127,6 +128,11 @@ sendRPC :: (Monad m) => node -> RPC node entry -> RaftT entry node result messag
 sendRPC node rpc = do
   spec <- view specification
   sendMessage node ((spec ^. serializeRPC) rpc)
+
+sendRPCResult :: (Monad m) => node -> RPCResult node result -> RaftT entry node result message m ()
+sendRPCResult node rpc = do
+  spec <- view specification
+  sendMessage node ((spec ^. serializeRPCResult) rpc)
 
 sendMessage :: (Monad m) => node -> message -> RaftT entry node result message m ()
 sendMessage n m = do

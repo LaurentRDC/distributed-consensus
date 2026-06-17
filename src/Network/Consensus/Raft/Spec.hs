@@ -100,6 +100,8 @@ data RPCResult node result
       -- | Whether the following contained entry matching the previous log index and previous log term
       Bool
   | RequestVoteResult
+      -- | Voter node
+      node
       -- | Current term, for leader to update itself
       Term
       -- | Whether vote was granted

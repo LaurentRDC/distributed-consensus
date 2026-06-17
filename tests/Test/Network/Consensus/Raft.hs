@@ -3,7 +3,7 @@
 module Test.Network.Consensus.Raft (tests) where
 
 import Control.Concurrent.Class.MonadSTM (atomically, modifyTVar', newTVarIO, readTVar, retry, writeTVar)
-import Control.Monad.Class.MonadAsync (race_)
+import Control.Monad.Class.MonadAsync (forConcurrently_, race_)
 import Control.Monad.Class.MonadTimer (threadDelay)
 import Control.Monad.IOSim (IOSim, runSimTrace, selectTraceEventsDynamic', traceM, traceResult)
 import Data.ByteString (StrictByteString)
@@ -25,10 +25,10 @@ tests =
   testGroup
     "Raft"
     [ testGroup
-        "Unit tests"
-        [ testSingleNodeElectsLeader
-        ],
-      testGroup "Property tests" []
+        "Property tests"
+        [ testSingleNodeElectsLeader,
+          testClusterElectsLeader
+        ]
     ]
 
 testSingleNodeElectsLeader :: TestTree
@@ -66,6 +66,47 @@ testSingleNodeElectsLeader = testProperty "Single node cluster elects leader" $ 
     Left failed -> footnote (show failed) >> failure
     Right () ->
       selectTraceEventsDynamic' trace === [LeaderElected (0 :: Int)]
+
+testClusterElectsLeader :: TestTree
+testClusterElectsLeader = testProperty "Cluster elects leader" $ property $ do
+  seeds <- forAll $ Gen.set (Range.linear 2 5) $ Gen.word64 (Range.linear minBound maxBound)
+  -- If the heart beats are too frequent, the test cases take a very long time.
+  -- By contrast, since elections are relatively infrequent, their
+  -- timeouts can take on very small values
+  heartbeatTimeout <- forAll $ Gen.int32 (Range.linear 1_000 200_000)
+  electionTimeoutUpperBound <- forAll $ Gen.int32 (Range.linear 2 100_000)
+  electionTimeoutLowerBound <- forAll $ Gen.int32 (Range.linear 1 electionTimeoutUpperBound)
+
+  let configs =
+        IntMap.fromList
+          [ ( ix,
+              MkConfig
+                { nodeId = ix,
+                  otherNodes = mempty,
+                  electionTimeoutRange = (Microseconds electionTimeoutLowerBound, Microseconds electionTimeoutUpperBound),
+                  heartBeatTimeout = Microseconds heartbeatTimeout,
+                  randomSeed = seed
+                }
+            )
+          | (ix, seed) <- zip [0 ..] (Set.toList seeds)
+          ]
+
+  let trace =
+        runSimTrace $
+          race_
+            (threadDelay 1_000_000)
+            ( do
+                specs <- testSpecs (Set.fromList $ IntMap.keys configs)
+                forConcurrently_ (IntMap.toList specs) $ \(ix, spec) ->
+                  runRaftT (configs IntMap.! ix) spec server
+            )
+
+      result = traceResult False trace
+
+  case result of
+    Left failed -> footnote (show failed) >> failure
+    Right () ->
+      Set.fromList (selectTraceEventsDynamic' trace) === Set.fromList [LeaderElected ix | ix <- IntMap.keys configs]
 
 type Node = Int
 

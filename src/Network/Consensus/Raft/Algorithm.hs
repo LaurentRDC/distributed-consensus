@@ -14,12 +14,16 @@ import Control.Monad.Class.MonadTimer (MonadDelay)
 import Control.Monad.Trans.Class (lift)
 import Data.Functor ((<&>))
 import Data.Sequence (Seq (..))
+import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
-import Lens.Micro.Platform (use, view, (+=), (.=), (^.))
+import Lens.Micro.Platform (use, view, (%=), (+=), (.=), (^.))
 import Network.Consensus.Raft.Spec
-  ( RPC (RequestVote),
+  ( LogIndex,
+    RPC (RequestVote),
+    RPCResult (RequestVoteResult),
     RaftTrace (..),
     Role (..),
+    Term,
     currentLeader,
     deserializeRPC,
     deserializeRPCResult,
@@ -46,12 +50,14 @@ import Network.Consensus.Raft.Trans
     nextElectionTimeout,
     quorum,
     sendRPC,
+    sendRPCResult,
     specification,
     trace,
   )
 
 server ::
-  ( MonadMask m,
+  ( Ord node,
+    MonadMask m,
     MonadFork m,
     MonadMVar m,
     MonadAsync m,
@@ -83,7 +89,8 @@ server = do
             Nothing -> pure () -- TODO: debug error message
 
 handleEvent ::
-  ( MonadDelay m,
+  ( Ord node,
+    MonadDelay m,
     MonadMask m,
     MonadFork m,
     MonadAsync m,
@@ -96,8 +103,90 @@ handleEvent EventElectionTimeout = do
 handleEvent EventHeartBeatTimeout = do
   config <- view configuration
   view heartBeatTimer >>= lift . resetTimer config.heartBeatTimeout
+handleEvent (EventRPC (RequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm)) = handleRequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm
 handleEvent (EventRPC rpc) = undefined
+handleEvent (EventRPCResult (RequestVoteResult voter voterTerm votedForUs)) = handleRequestVoteResult voter voterTerm votedForUs
 handleEvent (EventRPCResult result) = undefined
+
+-- | How to handle a term provided by another node. If this term
+-- is larger than ours, this means that we must clear some state from
+-- the previous term.
+handleTermNumber ::
+  ( MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadMVar m,
+    MonadDelay m
+  ) =>
+  Term -> RaftT entry node result message m ()
+handleTermNumber newTerm = do
+  ourTerm <- use term
+  when (newTerm > ourTerm) $ do
+    spec <- view specification
+
+    lift $ (spec ^. writeTerm) newTerm
+    term .= newTerm
+    votedFor .= Nothing
+    becomeFollower
+
+handleRequestVote ::
+  ( Eq node,
+    MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadMVar m,
+    MonadDelay m
+  ) =>
+  Term -> node -> LogIndex -> Term -> RaftT entry node result message m ()
+handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLastLogIndexTerm = do
+  handleTermNumber candidateTerm
+
+  mAlreadyVoted <- use votedFor
+  self <- view configuration <&> nodeId
+  entries <- use logEntries
+  ourTerm <- use term
+  case mAlreadyVoted of
+    -- In any situation, if the candidate's term is old,
+    -- we should not vote for them
+    _
+      | candidateTerm < ourTerm ->
+          sendRPCResult candidateNode (RequestVoteResult self ourTerm False)
+    -- We haven't voted yet
+    Nothing ->
+      if (candidateLastLogIndex, candidateLastLogIndexTerm) >= lastLogInfo entries
+        then do
+          votedFor .= Just candidateNode
+          sendRPCResult candidateNode (RequestVoteResult self ourTerm True)
+        else
+          sendRPCResult candidateNode (RequestVoteResult self ourTerm False)
+    -- We already voted for this candidate
+    Just someCandidate
+      | someCandidate == candidateNode ->
+          sendRPCResult candidateNode (RequestVoteResult self ourTerm True)
+    -- We already voted, for another candidate
+    Just _ ->
+      sendRPCResult candidateNode (RequestVoteResult self ourTerm False)
+  where
+    lastLogInfo :: Seq (Term, entry) -> (LogIndex, Term)
+    lastLogInfo Seq.Empty = (0, 0)
+    lastLogInfo entries@(_ Seq.:|> (lastEntryTerm, _)) = (fromIntegral $ Seq.length entries, lastEntryTerm)
+
+handleRequestVoteResult ::
+  ( Ord node,
+    MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadMVar m,
+    MonadDelay m
+  ) =>
+  node -> Term -> Bool -> RaftT entry node result message m ()
+handleRequestVoteResult voter voterTerm votedForUs = do
+  handleTermNumber voterTerm
+  ourRole <- use role
+  when (ourRole == Candidate) $
+    when votedForUs $ do
+      yesVotes %= Set.insert voter
+      checkElection
 
 becomeCandidate ::
   ( MonadAsync m,
@@ -136,11 +225,19 @@ becomeCandidate = do
         (_ :|> (lastTerm, _)) -> pure lastTerm
     let rpc = RequestVote currentTerm self lastLogIndex lastLogTerm
     mapM_ (`sendRPC` rpc) peers -- TODO: send concurrently
-  where
-    checkElection = do
-      numYes <- Set.size <$> use yesVotes
-      q <- quorum
-      when (numYes >= q) becomeLeader
+
+checkElection ::
+  ( MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadMVar m,
+    MonadDelay m
+  ) =>
+  RaftT entry node result message m ()
+checkElection = do
+  numYes <- Set.size <$> use yesVotes
+  q <- quorum
+  when (numYes >= q) becomeLeader
 
 becomeLeader ::
   ( MonadDelay m,
@@ -160,3 +257,17 @@ becomeLeader = do
 
   config <- view configuration
   view heartBeatTimer >>= lift . resetTimer config.heartBeatTimeout
+
+becomeFollower ::
+  ( MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadMVar m,
+    MonadDelay m
+  ) =>
+  RaftT entry node result message m ()
+becomeFollower = do
+  role .= Follower
+  et <- view electionTimer
+  electionTimeout <- nextElectionTimeout
+  lift $ resetTimer electionTimeout et
