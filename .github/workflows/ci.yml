@@ -6,7 +6,17 @@ on:
   pull_request:
 
 jobs:
+
+  formatting:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/run-ormolu@v18
+        with:
+          mode: check
+  
   build:
+    needs: formatting
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -15,7 +25,7 @@ jobs:
           - '9.6.7'
           - '9.8.4'
           - '9.10.3'
-          - '9.12.2'
+          - '9.12.4'
 
     steps:
       - uses: actions/checkout@v4
