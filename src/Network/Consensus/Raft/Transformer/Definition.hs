@@ -1,0 +1,102 @@
+{-# LANGUAGE TemplateHaskell #-}
+
+module Network.Consensus.Raft.Transformer.Definition
+  ( runRaftT,
+    RaftT,
+    Config (..),
+    RaftEnv,
+    specification,
+    configuration,
+    eventQueue,
+    heartBeatTimer,
+    electionTimer,
+
+    -- * Events
+    Event (..),
+
+    -- * Generic helpers
+    ask,
+    asks,
+    local,
+    state,
+    get,
+    put,
+    modify,
+    gets,
+  )
+where
+
+import Control.Concurrent.Class.MonadMVar (MonadMVar)
+import Control.Concurrent.Class.MonadSTM (TQueue, atomically, newTQueue, writeTQueue)
+import Control.Monad.Class.MonadSTM (MonadSTM)
+import Control.Monad.Trans.RWS.CPS (RWST, ask, asks, evalRWST, get, gets, local, modify, put, state)
+import Data.Set (Set)
+import Data.Word (Word64)
+import Lens.Micro.Platform (makeLenses)
+import Network.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
+import Network.Consensus.Raft.Transformer.Spec (RPC, RPCResult, RaftSpec, RaftState, initialRaftState)
+
+type RaftT entry node result message m =
+  RWST
+    (RaftEnv entry node result message m)
+    ()
+    (RaftState node entry)
+    m
+
+runRaftT ::
+  ( Ord node,
+    MonadSTM m,
+    MonadMVar m
+  ) =>
+  Config node ->
+  RaftSpec entry node result message m ->
+  RaftT entry node result message m a ->
+  m a
+runRaftT c s f = do
+  queue <- atomically newTQueue
+  hbTimer <- newTimer (atomically $ writeTQueue queue EventHeartBeatTimeout)
+  elTimer <- newTimer (atomically $ writeTQueue queue EventElectionTimeout)
+  fst
+    <$> evalRWST
+      f
+      ( MkRaftEnv
+          { _configuration = c,
+            _specification = s,
+            _eventQueue = queue,
+            _heartBeatTimer = hbTimer,
+            _electionTimer = elTimer
+          }
+      )
+      (initialRaftState (randomSeed c))
+
+data Event node entry result
+  = EventRPC (RPC node entry)
+  | EventRPCResult (RPCResult node result)
+  | EventElectionTimeout
+  | EventHeartBeatTimeout
+
+data RaftEnv entry node result message m
+  = MkRaftEnv
+  { _configuration :: !(Config node),
+    _specification :: !(RaftSpec entry node result message m),
+    _eventQueue :: TQueue m (Event node entry result),
+    -- Handle to a thread which will send a heartbeat timeout
+    -- event after the appropriate amount of time.
+    _heartBeatTimer :: Timer m,
+    _electionTimer :: Timer m
+  }
+
+data Config node
+  = MkConfig
+  { nodeId :: !node,
+    otherNodes :: !(Set node),
+    electionTimeoutRange :: !(Microseconds, Microseconds),
+    heartBeatTimeout :: !Microseconds,
+    randomSeed :: !Word64
+    -- TODO: configure the maximum amount of concurrency. For example, we currently
+    --       spawn a new thread to send an RPC to each other node.
+    --       We may want to batch this concurrency via something like
+    --       `Control.Concurrent.Stream.mapConcurrentlyBounded`
+  }
+
+makeLenses ''RaftEnv

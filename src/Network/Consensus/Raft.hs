@@ -1,12 +1,11 @@
 module Network.Consensus.Raft
-  ( module Network.Consensus.Raft.Algorithm,
-    module Network.Consensus.Raft.Trans,
-    module Network.Consensus.Raft.Spec,
+  ( -- TODO: trim exports to minimum interface
+    module Network.Consensus.Raft.Algorithm,
+    module Network.Consensus.Raft.Transformer,
     Microseconds (Microseconds),
   )
 where
 
 import Network.Consensus.Raft.Algorithm
-import Network.Consensus.Raft.Spec
 import Network.Consensus.Raft.Timer (Microseconds (..))
-import Network.Consensus.Raft.Trans
+import Network.Consensus.Raft.Transformer

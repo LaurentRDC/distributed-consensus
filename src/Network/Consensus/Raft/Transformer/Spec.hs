@@ -1,9 +1,10 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE ExplicitForAll #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TemplateHaskell #-}
 
-module Network.Consensus.Raft.Spec
+module Network.Consensus.Raft.Transformer.Spec
   ( -- * Protocol specification
     RaftSpec (..),
     readLogEntry,
@@ -23,6 +24,7 @@ module Network.Consensus.Raft.Spec
 
     -- * Raft state
     RaftState,
+    initialTerm,
     initialRaftState,
     role,
     term,
@@ -40,6 +42,7 @@ module Network.Consensus.Raft.Spec
     Role (..),
     LogIndex,
     Term,
+    RequestId,
     RaftTrace (..),
   )
 where
@@ -47,21 +50,23 @@ where
 import Data.Int (Int64)
 import Data.Sequence (Seq)
 import Data.Set (Set)
+import Data.Text (Text)
 import Data.Vector (Vector)
 import Data.Word (Word64)
+import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
 import System.Random (StdGen, mkStdGen64)
 
 newtype LogIndex = LogIndex Int64
-  deriving stock (Eq, Ord, Show)
+  deriving stock (Generic, Eq, Ord, Show)
   deriving newtype (Real, Enum, Num, Integral)
 
 newtype Term = Term Int64
-  deriving stock (Eq, Ord, Show)
+  deriving stock (Generic, Eq, Ord, Show)
   deriving newtype (Real, Enum, Num, Integral)
 
 newtype RequestId = RequestId Int64
-  deriving stock (Eq, Ord, Show)
+  deriving stock (Generic, Eq, Ord, Show)
   deriving newtype (Real, Enum, Num, Integral)
 
 data RPC node entry
@@ -74,6 +79,15 @@ data RPC node entry
       LogIndex
       -- | Entries (empty for heartbeat)
       (Vector entry)
+      -- | Commit index
+      LogIndex
+  | HeartBeat
+      -- | Leader's term
+      Term
+      -- | Identification of the leader
+      node
+      -- | Previous log index
+      LogIndex
       -- | Commit index
       LogIndex
   | RequestVote
@@ -92,6 +106,7 @@ data RPC node entry
       entry
       -- | Request identifier
       RequestId
+  deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
 
 data RPCResult node result
   = AppendEntriesResult
@@ -113,9 +128,48 @@ data RPCResult node result
       result
       -- | Request identifier
       RequestId
+  deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
 
-data RaftTrace node
-  = LeaderElected node
+data RaftTrace entry node
+  = LeaderElected Term node
+  | VotedFor
+      -- | Our term
+      Term
+      -- | Our node
+      node
+      -- | Their term
+      Term
+      -- | Their node
+      node
+  | VoteRequestedBy
+      -- | Our term
+      Term
+      -- | Our node
+      node
+      -- | Their term
+      Term
+      -- | Their node
+      node
+  | VoteGrantedFrom
+      -- | Our term
+      Term
+      -- | Our node
+      node
+      -- | Their node
+      node
+  | VoteDeniedFrom
+      -- | Our term
+      Term
+      -- | Our node
+      node
+      -- | Their node
+      node
+  | BecameCandidate Term node
+  | BecameFollower Term node
+  | RPCReceived Term node (RPC entry node)
+  | SplitElection Term node
+  | ElectionTriggered Term node
+  | DeserializationError node Text
   deriving (Eq, Ord, Show)
 
 data RaftSpec entry node result message m = MkRaftSpec
@@ -128,11 +182,14 @@ data RaftSpec entry node result message m = MkRaftSpec
     _applyLogEntry :: entry -> m result,
     _serializeRPC :: RPC node entry -> message,
     _serializeRPCResult :: RPCResult node result -> message,
-    _deserializeRPC :: message -> Maybe (RPC node entry),
-    _deserializeRPCResult :: message -> Maybe (RPCResult node result),
+    -- We use 'Text' to represent deserialization errors because this is
+    -- easiest to represent to the user. I don't think it's worth adding
+    -- yet another type variable to the spec.
+    _deserializeRPC :: message -> Either Text (RPC node entry),
+    _deserializeRPCResult :: message -> Either Text (RPCResult node result),
     _send :: node -> message -> m (),
     _receive :: m message,
-    _tracer :: RaftTrace node -> m ()
+    _tracer :: RaftTrace entry node -> m ()
   }
 
 makeLenses ''RaftSpec
@@ -158,11 +215,14 @@ data RaftState node entry = MkRaftState
 
 makeLenses ''RaftState
 
+initialTerm :: Term
+initialTerm = 1
+
 initialRaftState :: (Ord node) => Word64 -> RaftState node entry
 initialRaftState seed =
   MkRaftState
     { _role = Follower,
-      _term = 1,
+      _term = initialTerm,
       _votedFor = Nothing,
       _currentLeader = Nothing,
       _logEntries = mempty,

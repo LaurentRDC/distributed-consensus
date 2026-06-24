@@ -1,24 +1,36 @@
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Test.Network.Consensus.Raft (tests) where
 
 import Control.Concurrent.Class.MonadSTM (atomically, modifyTVar', newTVarIO, readTVar, retry, writeTVar)
 import Control.Monad.Class.MonadAsync (forConcurrently_, race_)
 import Control.Monad.Class.MonadTimer (threadDelay)
-import Control.Monad.IOSim (IOSim, runSimTrace, selectTraceEventsDynamic', traceM, traceResult)
-import Data.ByteString (StrictByteString)
+import Control.Monad.IOSim (IOSim, SimEvent, SimEventType (EventLog), Trace, exploreSimTrace, selectTraceEvents', traceM)
+import Data.Dynamic (fromDynamic)
 import Data.IntMap (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import Data.Sequence (Seq (..))
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Hedgehog
-import qualified Hedgehog.Gen as Gen
-import qualified Hedgehog.Range as Range
-import Network.Consensus.Raft (Config (..), Microseconds (Microseconds), RaftSpec (..), RaftTrace (..), runRaftT, server)
+import Data.Text (Text)
+import Network.Consensus.Raft
+  ( Config (..),
+    Microseconds (Microseconds),
+    RPC,
+    RPCResult,
+    RaftSpec (..),
+    RaftTrace (..),
+    initialTerm,
+    runRaftT,
+    server,
+  )
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.Hedgehog (testProperty)
+import Test.Tasty.QuickCheck
 
 tests :: TestTree
 tests =
@@ -26,91 +38,77 @@ tests =
     "Raft"
     [ testGroup
         "Property tests"
-        [ testSingleNodeElectsLeader,
-          testClusterElectsLeader
+        [ testClusterElections
         ]
     ]
 
-testSingleNodeElectsLeader :: TestTree
-testSingleNodeElectsLeader = testProperty "Single node cluster elects leader" $ property $ do
-  seed <- forAll $ Gen.word64 (Range.linear minBound maxBound)
-  -- If the heart beats are too frequent, the test cases take a very long time.
-  -- By contrast, since elections are relatively infrequent, their
-  -- timeouts can take on very small values
-  heartbeatTimeout <- forAll $ Gen.int32 (Range.linear 1_000 200_000)
-  electionTimeoutUpperBound <- forAll $ Gen.int32 (Range.linear 2 100_000)
-  electionTimeoutLowerBound <- forAll $ Gen.int32 (Range.linear 1 electionTimeoutUpperBound)
+testClusterElections :: TestTree
+testClusterElections =
+  testProperty "Cluster elects leader" $
+    property $
+      -- Only odd cluster sizes have an easy-to-clear quorum
+      forAll (elements [1, 3, 5]) $ \clusterSize ->
+        -- The following timings ensure that once election happens,
+        -- the heartbeat will be sent early enough to ensure the leader
+        -- remains a leader.
+        -- TODO: play with timing to allow the possibility for an election to be triggered.
+        --       How does one formulate a good property to check in this case?
+        forAll (vectorOf clusterSize (chooseBoundedIntegral (0, 1_000_000))) $ \seeds ->
+          forAll (chooseBoundedIntegral (1_000, 200_000)) $ \heartbeatTimeout ->
+            forAll (chooseBoundedIntegral (heartbeatTimeout, 2 * heartbeatTimeout)) $ \electionTimeoutLowerBound ->
+              forAll (chooseBoundedIntegral (electionTimeoutLowerBound, 2 * electionTimeoutLowerBound)) $ \electionTimeoutUpperBound ->
+                exploreSimTrace
+                  id
+                  (scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound (Set.fromList seeds))
+                  ( \_ trace -> do
+                      let evs = raftTrace trace
+                          elections = [ev | ev@LeaderElected {} <- evs]
+                      counterexample ("failed with trace: " ++ show evs) $
+                        elections
+                          `Set.member` Set.fromList
+                            [[LeaderElected (initialTerm + 1) n] | n <- [0 .. length seeds - 1]]
+                  )
+  where
+    mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds =
+      let nodes = Set.fromList [0 .. length seeds - 1]
+       in IntMap.fromList
+            [ ( ix,
+                MkConfig
+                  { nodeId = ix,
+                    otherNodes = nodes `Set.difference` Set.singleton ix,
+                    electionTimeoutRange = (Microseconds electionTimeoutLowerBound, Microseconds electionTimeoutUpperBound),
+                    heartBeatTimeout = Microseconds heartbeatTimeout,
+                    randomSeed = seed
+                  }
+              )
+            | (ix, seed) <- zip [0 ..] (Set.toList seeds)
+            ]
 
-  let config =
-        MkConfig
-          { nodeId = 0 :: Int,
-            otherNodes = mempty,
-            electionTimeoutRange = (Microseconds electionTimeoutLowerBound, Microseconds electionTimeoutUpperBound),
-            heartBeatTimeout = Microseconds heartbeatTimeout,
-            randomSeed = seed
-          }
-  let trace =
-        runSimTrace $
-          race_
-            (threadDelay 1_000_000)
-            ( do
-                specs <- testSpecs (Set.singleton 0)
-                case IntMap.lookup 0 specs of
-                  Nothing -> pure ()
-                  Just spec -> runRaftT config spec server
-            )
+    scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds = do
+      let configs = mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds
+      (specs :: IntMap (RaftSpec () Node () TestMessage (IOSim s))) <- testSpecs (Set.fromList $ IntMap.keys configs)
+      -- The scenario must give enough time for an election to be triggered,
+      -- hence why we race against 2 * electionTimeoutUpperBound
+      race_ (threadDelay (2 * fromIntegral electionTimeoutUpperBound)) $ do
+        forConcurrently_ (IntMap.toList specs) $ \(ix, spec) ->
+          runRaftT (configs IntMap.! ix) spec server
 
-      result = traceResult False trace
-
-  case result of
-    Left failed -> footnote (show failed) >> failure
-    Right () ->
-      selectTraceEventsDynamic' trace === [LeaderElected (0 :: Int)]
-
-testClusterElectsLeader :: TestTree
-testClusterElectsLeader = testProperty "Cluster elects leader" $ property $ do
-  seeds <- forAll $ Gen.set (Range.linear 2 5) $ Gen.word64 (Range.linear minBound maxBound)
-  -- If the heart beats are too frequent, the test cases take a very long time.
-  -- By contrast, since elections are relatively infrequent, their
-  -- timeouts can take on very small values
-  heartbeatTimeout <- forAll $ Gen.int32 (Range.linear 1_000 200_000)
-  electionTimeoutUpperBound <- forAll $ Gen.int32 (Range.linear 2 100_000)
-  electionTimeoutLowerBound <- forAll $ Gen.int32 (Range.linear 1 electionTimeoutUpperBound)
-
-  let configs =
-        IntMap.fromList
-          [ ( ix,
-              MkConfig
-                { nodeId = ix,
-                  otherNodes = mempty,
-                  electionTimeoutRange = (Microseconds electionTimeoutLowerBound, Microseconds electionTimeoutUpperBound),
-                  heartBeatTimeout = Microseconds heartbeatTimeout,
-                  randomSeed = seed
-                }
-            )
-          | (ix, seed) <- zip [0 ..] (Set.toList seeds)
-          ]
-
-  let trace =
-        runSimTrace $
-          race_
-            (threadDelay 1_000_000)
-            ( do
-                specs <- testSpecs (Set.fromList $ IntMap.keys configs)
-                forConcurrently_ (IntMap.toList specs) $ \(ix, spec) ->
-                  runRaftT (configs IntMap.! ix) spec server
-            )
-
-      result = traceResult False trace
-
-  case result of
-    Left failed -> footnote (show failed) >> failure
-    Right () ->
-      Set.fromList (selectTraceEventsDynamic' trace) === Set.fromList [LeaderElected ix | ix <- IntMap.keys configs]
+raftTrace :: Trace a SimEvent -> [RaftTrace () Node]
+raftTrace =
+  selectTraceEvents'
+    ( \_ ev -> case ev of
+        EventLog dyn -> fromDynamic dyn
+        _ -> Nothing -- internal io-sim event
+    )
 
 type Node = Int
 
-testSpecs :: Set Node -> IOSim s (IntMap (RaftSpec entry Node result StrictByteString (IOSim s)))
+type Entry = ()
+
+type Result = ()
+
+testSpecs ::
+  Set Node -> IOSim s (IntMap (RaftSpec Entry Node Result TestMessage (IOSim s)))
 testSpecs nodes = do
   mailbox <- newTVarIO mempty
   pure $ IntMap.fromList [(node, nodeSpec mailbox node) | node <- Set.toList nodes]
@@ -124,10 +122,10 @@ testSpecs nodes = do
           _readVotedFor = pure Nothing,
           _voteFor = \_ -> pure (),
           _applyLogEntry = \_ -> pure undefined,
-          _serializeRPC = undefined,
-          _serializeRPCResult = undefined,
-          _deserializeRPC = undefined,
-          _deserializeRPCResult = undefined,
+          _serializeRPC = TestRPC,
+          _serializeRPCResult = TestRPCResult,
+          _deserializeRPC = fromRPC,
+          _deserializeRPCResult = fromRPCResult,
           _send = send mailbox,
           _receive = receive mailbox node,
           _tracer = traceM
@@ -143,3 +141,15 @@ testSpecs nodes = do
         Just (next :<| rest) ->
           writeTVar mailbox (IntMap.insert node rest mail)
             >> pure next
+
+data TestMessage
+  = TestRPC (RPC Node ())
+  | TestRPCResult (RPCResult Node ())
+
+fromRPC :: TestMessage -> Either Text (RPC Node ())
+fromRPC (TestRPC rpc) = Right rpc
+fromRPC (TestRPCResult _) = Left "unexpected failure"
+
+fromRPCResult :: TestMessage -> Either Text (RPCResult Node ())
+fromRPCResult (TestRPCResult result) = Right result
+fromRPCResult (TestRPC _) = Left "Unexpected failure"
