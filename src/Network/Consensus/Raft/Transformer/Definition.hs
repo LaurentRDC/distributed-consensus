@@ -36,11 +36,11 @@ import Lens.Micro.Platform (makeLenses)
 import Network.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
 import Network.Consensus.Raft.Transformer.Spec (RPC, RPCResult, RaftSpec, RaftState, initialRaftState)
 
-type RaftT entry node result message m =
+type RaftT entry node state result message m =
   RWST
-    (RaftEnv entry node result message m)
+    (RaftEnv entry node state result message m)
     ()
-    (RaftState node entry)
+    (RaftState node entry state)
     m
 
 runRaftT ::
@@ -49,10 +49,11 @@ runRaftT ::
     MonadMVar m
   ) =>
   Config node ->
-  RaftSpec entry node result message m ->
-  RaftT entry node result message m a ->
+  state ->
+  RaftSpec entry node state result message m ->
+  RaftT entry node state result message m a ->
   m a
-runRaftT c s f = do
+runRaftT c i s f = do
   queue <- atomically newTQueue
   hbTimer <- newTimer (atomically $ writeTQueue queue EventHeartBeatTimeout)
   elTimer <- newTimer (atomically $ writeTQueue queue EventElectionTimeout)
@@ -67,7 +68,7 @@ runRaftT c s f = do
             _electionTimer = elTimer
           }
       )
-      (initialRaftState (randomSeed c))
+      (initialRaftState (randomSeed c) i)
 
 data Event node entry result
   = EventRPC (RPC node entry)
@@ -75,10 +76,10 @@ data Event node entry result
   | EventElectionTimeout
   | EventHeartBeatTimeout
 
-data RaftEnv entry node result message m
+data RaftEnv entry node state result message m
   = MkRaftEnv
   { _configuration :: !(Config node),
-    _specification :: !(RaftSpec entry node result message m),
+    _specification :: !(RaftSpec entry node state result message m),
     _eventQueue :: TQueue m (Event node entry result),
     -- Handle to a thread which will send a heartbeat timeout
     -- event after the appropriate amount of time.

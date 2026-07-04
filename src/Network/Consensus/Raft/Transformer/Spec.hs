@@ -28,15 +28,22 @@ module Network.Consensus.Raft.Transformer.Spec
     initialRaftState,
     role,
     term,
+    internalState,
     votedFor,
     currentLeader,
     logEntries,
     commitIndex,
     lastApplied,
+    nextIndex,
+    matchIndex,
     yesVotes,
     randomGen,
 
     -- * Types
+    Command (..),
+    CommandResponse (..),
+    AppendEntries (..),
+    AppendEntriesResult (..),
     RPC (..),
     RPCResult (..),
     Role (..),
@@ -48,6 +55,7 @@ module Network.Consensus.Raft.Transformer.Spec
 where
 
 import Data.Int (Int64)
+import Data.Map.Strict (Map)
 import Data.Sequence (Seq)
 import Data.Set (Set)
 import Data.Text (Text)
@@ -69,18 +77,45 @@ newtype RequestId = RequestId Int64
   deriving stock (Generic, Eq, Ord, Show)
   deriving newtype (Real, Enum, Num, Integral)
 
+data Command node entry
+  = MkCommand
+      -- | Client node ID, to reply
+      !node
+      !entry
+      -- | A 'RequestId' allows a client to correlate a command with its response,
+      -- in the event that a client issues multiple commands
+      !RequestId
+  deriving (Eq, Show, Ord, Generic)
+
+data CommandResponse node result
+  = MkCommandResponse
+      -- | Leader node ID, for further requests
+      !node
+      !result
+      !RequestId
+  deriving (Eq, Show, Ord, Generic)
+
+data AppendEntries node entry = AppendEntries
+  { aeLeaderTerm :: !Term,
+    aeLeaderNode :: !node,
+    aePreviousLogIndex :: !LogIndex,
+    aePreviousLogTerm :: !Term,
+    aeEntries :: !(Vector (Term, Command node entry)),
+    aeCommitIndex :: !LogIndex
+  }
+  deriving (Eq, Show, Ord, Generic)
+
+data AppendEntriesResult node result = AppendEntriesResult
+  { aerCurrentTerm :: !Term,
+    aerNode :: !node,
+    aerMatch :: !Bool,
+    aerNewEntryLogIndex :: !LogIndex
+  }
+  deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
+
 data RPC node entry
-  = AppendEntries
-      -- | Leader's term
-      Term
-      -- | Identification of the leader
-      node
-      -- | Previous log index
-      LogIndex
-      -- | Entries (empty for heartbeat)
-      (Vector entry)
-      -- | Commit index
-      LogIndex
+  = ClientRequest (Command node entry)
+  | AE (AppendEntries node entry)
   | HeartBeat
       -- | Leader's term
       Term
@@ -99,21 +134,11 @@ data RPC node entry
       LogIndex
       -- | Term of candidate's last log entry
       Term
-  | Command
-      -- | Client
-      node
-      -- | Command
-      entry
-      -- | Request identifier
-      RequestId
   deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
 
 data RPCResult node result
-  = AppendEntriesResult
-      -- | Current term, for leader to update itself
-      Term
-      -- | Whether the following contained entry matching the previous log index and previous log term
-      Bool
+  = ClientRequestResult (CommandResponse node result)
+  | AER (AppendEntriesResult node result)
   | RequestVoteResult
       -- | Voter node
       node
@@ -121,16 +146,9 @@ data RPCResult node result
       Term
       -- | Whether vote was granted
       Bool
-  | CommandResult
-      -- | Leader
-      node
-      -- | Result
-      result
-      -- | Request identifier
-      RequestId
   deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
 
-data RaftTrace entry node
+data RaftTrace entry result node
   = LeaderElected Term node
   | VotedFor
       -- | Our term
@@ -166,20 +184,26 @@ data RaftTrace entry node
       node
   | BecameCandidate Term node
   | BecameFollower Term node
-  | RPCReceived Term node (RPC entry node)
+  | RPCReceived Term node (RPC node entry)
+  | RPCResultReceived Term node (RPCResult node result)
   | SplitElection Term node
   | ElectionTriggered Term node
   | DeserializationError node Text
+  | -- | Command received by the leader node. If the command needs to be redirected
+    -- to another node, this event is not emitted
+    CommandReceived Term node (Command node entry)
+  | CommitIndexIncreasedTo Term node LogIndex
+  | LogEntryApplied Term node entry
   deriving (Eq, Ord, Show)
 
-data RaftSpec entry node result message m = MkRaftSpec
+data RaftSpec entry node state result message m = MkRaftSpec
   { _readLogEntry :: LogIndex -> m (Maybe entry),
     _writeLogEntry :: LogIndex -> Term -> entry -> m (),
     _readTerm :: m Term,
     _writeTerm :: Term -> m (),
     _readVotedFor :: m (Maybe node),
     _voteFor :: Maybe node -> m (),
-    _applyLogEntry :: entry -> m result,
+    _applyLogEntry :: state -> entry -> (state, result),
     _serializeRPC :: RPC node entry -> message,
     _serializeRPCResult :: RPCResult node result -> message,
     -- We use 'Text' to represent deserialization errors because this is
@@ -189,7 +213,7 @@ data RaftSpec entry node result message m = MkRaftSpec
     _deserializeRPCResult :: message -> Either Text (RPCResult node result),
     _send :: node -> message -> m (),
     _receive :: m message,
-    _tracer :: RaftTrace entry node -> m ()
+    _tracer :: RaftTrace entry result node -> m ()
   }
 
 makeLenses ''RaftSpec
@@ -200,14 +224,17 @@ data Role
   | Candidate
   deriving (Eq, Show, Ord, Enum, Bounded)
 
-data RaftState node entry = MkRaftState
+data RaftState node entry state = MkRaftState
   { _role :: !Role,
     _term :: !Term,
+    _internalState :: !state,
     _votedFor :: !(Maybe node),
     _currentLeader :: !(Maybe node),
-    _logEntries :: !(Seq (Term, entry)),
+    _logEntries :: !(Seq (Term, Command node entry)),
     _commitIndex :: !LogIndex,
     _lastApplied :: !LogIndex,
+    _nextIndex :: Map node LogIndex,
+    _matchIndex :: Map node LogIndex,
     -- | Set of votes received in the current term
     _yesVotes :: !(Set node),
     _randomGen :: !StdGen
@@ -218,16 +245,19 @@ makeLenses ''RaftState
 initialTerm :: Term
 initialTerm = 1
 
-initialRaftState :: (Ord node) => Word64 -> RaftState node entry
-initialRaftState seed =
+initialRaftState :: (Ord node) => Word64 -> state -> RaftState node entry state
+initialRaftState seed initialState =
   MkRaftState
     { _role = Follower,
       _term = initialTerm,
+      _internalState = initialState,
       _votedFor = Nothing,
       _currentLeader = Nothing,
       _logEntries = mempty,
       _commitIndex = 0,
       _lastApplied = 0,
+      _nextIndex = mempty,
+      _matchIndex = mempty,
       _yesVotes = mempty,
       -- We use mkStdGen64 for reproducibility across 32-bit and 64-bit architectures
       _randomGen = mkStdGen64 seed

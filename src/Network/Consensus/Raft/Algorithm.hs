@@ -6,6 +6,7 @@
 
 module Network.Consensus.Raft.Algorithm (server) where
 
+import Control.Arrow ((&&&))
 import Control.Concurrent.Class.MonadMVar (MonadMVar)
 import Control.Concurrent.Class.MonadSTM (atomically, writeTQueue)
 import Control.Monad (forever, unless, when)
@@ -14,22 +15,31 @@ import Control.Monad.Class.MonadFork (MonadFork, forkIO, labelThisThread)
 import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay)
 import Control.Monad.Trans.Class (lift)
+import Data.Foldable (traverse_)
+import Data.Function ((&))
 import Data.Functor ((<&>))
-import Data.Sequence (Seq (..))
+import qualified Data.Map.Strict as Map
+import Data.Sequence (Seq (..), ViewR ((:>)), (|>))
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
-import Lens.Micro.Platform (use, view, (%=), (+=), (.=), (^.))
+import qualified Data.Vector as Vector
+import Lens.Micro.Platform (at, use, view, (%=), (+=), (.=), (^.))
 import Network.Consensus.Raft.Timer (resetTimer)
 import Network.Consensus.Raft.Transformer
-  ( Config (..),
+  ( AppendEntries (..),
+    AppendEntriesResult (..),
+    Command,
+    Config (..),
     Event (..),
     LogIndex,
     RPC (..),
-    RPCResult (RequestVoteResult),
+    RPCResult (..),
     RaftT,
     RaftTrace (..),
     Role (..),
     Term,
+    applyLogEntries,
+    commitIndex,
     configuration,
     currentLeader,
     dequeueEvent,
@@ -40,11 +50,15 @@ import Network.Consensus.Raft.Transformer
     heartBeatTimer,
     lastApplied,
     logEntries,
+    matchIndex,
     nextElectionTimeout,
+    nextIndex,
     quorum,
     receive,
     role,
+    sendAppendEntriesTo,
     sendHeartbeat,
+    sendRPC,
     sendRPCConcurrently,
     sendRPCResult,
     specification,
@@ -66,7 +80,7 @@ server ::
     MonadAsync m,
     MonadDelay m
   ) =>
-  RaftT entry node result message m ()
+  RaftT entry node state result message m ()
 server = do
   spec <- view specification
   queue <- view eventQueue
@@ -77,9 +91,21 @@ server = do
         let trace' makeTrace = spec ^. tracer $ makeTrace self
          in receiveMessages spec queue trace'
 
+  -- There are some initialization steps which require the configuration.
+  -- Instead of coupling 'initialRaftState' with the configuration,
+  -- we perform some initialization here.
+  peers <- view configuration <&> otherNodes
+  nextIndex .= Map.fromSet (const 0) peers
+
   resetHeartBeatTimer
   resetElectionTimer
-  forever (dequeueEvent >>= handleEvent)
+  forever $ do
+    ev <- dequeueEvent
+    case ev of
+      EventRPC rpc -> trace (\t n -> RPCReceived t n rpc)
+      EventRPCResult result -> trace (\t n -> RPCResultReceived t n result)
+      _ -> pure ()
+    handleEvent ev
   where
     receiveMessages spec queue trace' = do
       labelThisThread "receiveMessages"
@@ -89,8 +115,7 @@ server = do
       forever $ do
         message <- recv
         case decodeRPC message of
-          Right rpc -> do
-            atomically $ writeTQueue queue (EventRPC rpc)
+          Right rpc -> atomically $ writeTQueue queue (EventRPC rpc)
           Left rpcErrorMessage -> case decodeRPCResult message of
             Right result -> atomically $ writeTQueue queue (EventRPCResult result)
             Left rpcResultErrorMessage ->
@@ -105,7 +130,7 @@ handleEvent ::
     MonadAsync m,
     MonadMVar m
   ) =>
-  Event node entry result -> RaftT entry node result message m ()
+  Event node entry result -> RaftT entry node state result message m ()
 handleEvent EventElectionTimeout = do
   r <- use role
   when (r /= Leader) $ do
@@ -115,14 +140,139 @@ handleEvent EventElectionTimeout = do
       trace ElectionTriggered
     becomeCandidate
 handleEvent EventHeartBeatTimeout = sendHeartbeat
+handleEvent (EventRPC (ClientRequest command)) =
+  handleClientRequest command
 handleEvent (EventRPC (RequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm)) =
   handleRequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm
-handleEvent (EventRPC (HeartBeat aeTerm senderNodeId lastLogIndex aeCommitIndedx)) =
+handleEvent (EventRPC (HeartBeat aeTerm senderNodeId _lastLogIndex _aeCommitIndex)) =
   handleHeartBeat aeTerm senderNodeId
-handleEvent (EventRPC rpc) = error "rpc"
+handleEvent (EventRPC (AE appendEntries)) = handleAppendEntries appendEntries
 handleEvent (EventRPCResult (RequestVoteResult voter voterTerm votedForUs)) =
   handleRequestVoteResult voter voterTerm votedForUs
+handleEvent (EventRPCResult (AER appendEntriesResult)) =
+  handleAppendEntriesResult appendEntriesResult
 handleEvent (EventRPCResult result) = error "eventRPCResult"
+
+handleClientRequest ::
+  (Ord node, MonadAsync m) =>
+  Command node entry -> RaftT entry node state result message m ()
+handleClientRequest command =
+  use role >>= \case
+    Candidate ->
+      -- TODO: We have two options here:
+      --   1. Re-queue the command, hoping that the next time this event is processed,
+      --      we'll know the leader.
+      --   2. Reply to the client to retry later
+      pure ()
+    Follower -> do
+      -- If the leader is known, forward the command.
+      -- If the leader is NOT known, the command is swallowed.
+      -- TODO: create an appropriate response to clients
+      use currentLeader >>= traverse_ (`sendRPC` ClientRequest command)
+    Leader -> do
+      trace (\t n -> CommandReceived t n command)
+      ourTerm <- use term
+      logEntries %= (|> (ourTerm, command))
+      peers <- view configuration <&> otherNodes
+      -- TODO: sendAppendEntriesTo in parallel
+      traverse_ sendAppendEntriesTo peers
+
+handleAppendEntries ::
+  ( MonadMVar m,
+    MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadDelay m
+  ) =>
+  AppendEntries node entry ->
+  RaftT entry node state result message m ()
+handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLogTerm newEntries leaderCommitIndex) = do
+  termComparison <- handleTermNumber leaderTerm
+
+  use role >>= \case
+    Leader -> pure ()
+    Candidate -> pure ()
+    Follower -> do
+      -- TODO: I believe the next line is redundant because we have a separate
+      -- heartbeat mechanism.
+      when (termComparison == EQ) resetElectionTimer
+      currentLeader .= Just leaderNode
+
+      -- Consistency check
+      entries <- use logEntries
+      let logIsConsistent = case entries Seq.!? fromIntegral prevLogIndex of
+            Nothing -> prevLogIndex == 0
+            Just (t, _) -> t == previousLogTerm
+
+      let oldLastEntry = fromIntegral $ Seq.length entries - 1
+          newLastEntry = prevLogIndex + fromIntegral (length newEntries)
+
+      ourTerm <- use term
+      self <- view configuration <&> nodeId
+      if leaderTerm < ourTerm || not logIsConsistent
+        then sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm self False oldLastEntry))
+        else do
+          logEntries
+            %= (Seq.>< (Seq.fromList $ Vector.toList newEntries))
+            . Seq.take (fromIntegral $ succ prevLogIndex)
+          sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm self True newLastEntry))
+          ourCommitIndex <- use commitIndex
+          when (leaderCommitIndex > ourCommitIndex) $ do
+            commitIndex .= min leaderCommitIndex newLastEntry
+            applyLogEntries
+
+handleAppendEntriesResult ::
+  (Ord node, MonadMVar m) =>
+  AppendEntriesResult node result ->
+  RaftT entry node state result message m ()
+handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode responderSuccess responderLogIndex) = do
+  termComp <- handleTermNumber responderTerm
+  ourRole <- use role
+  when (ourRole == Leader && termComp == EQ) $
+    if responderSuccess
+      then do
+        matchIndex . at responderNode .= Just responderLogIndex
+        nextIndex . at responderNode .= Just (succ responderLogIndex)
+        isTimeToCommit <- hasEntriesToCommit
+        when isTimeToCommit applyLogEntries
+      else do
+        nextIndex %= Map.adjust pred responderNode
+        sendAppendEntriesTo responderNode -- Retry
+  where
+    hasEntriesToCommit = do
+      commitIndex' <- use commitIndex
+      entries <- use logEntries
+      ourTerm <- use term
+      matchIndices <- use matchIndex
+      quorumSize <- quorum
+
+      -- Fetch the indices, starting from the log index after the commit index, such that:
+      -- 1. the entry is associated with the current term
+      -- 2. a quorum of nodes have committed this index
+      let quorumIndices =
+            Seq.zip
+              ( Seq.fromFunction
+                  (Seq.length entries)
+                  -- The initial commit index is 0, hence the first entry to be committed
+                  -- should have index 1
+                  succ
+              )
+              entries
+              & Seq.drop (fromIntegral commitIndex')
+              & Seq.filter ((== ourTerm) . fst . snd)
+              & fmap fst
+              -- By definition of the Raft algorithm, only a contiguous subset of
+              -- indices can have been accepted with a quorum, hence the use of
+              -- takeWhileL
+              & Seq.takeWhileL (\i -> Map.size (Map.filter (>= fromIntegral i) matchIndices) >= quorumSize)
+              & fmap fromIntegral
+
+      case Seq.viewr quorumIndices of
+        Seq.EmptyR -> pure False
+        _ :> lastIndex -> do
+          commitIndex .= lastIndex
+          trace (\n t -> CommitIndexIncreasedTo n t lastIndex)
+          pure True
 
 -- | How to handle a term provided by another node. If this term
 -- is larger than ours, this means that we must clear some state from
@@ -133,7 +283,7 @@ handleEvent (EventRPCResult result) = error "eventRPCResult"
 -- our term.
 handleTermNumber ::
   (MonadMVar m) =>
-  Term -> RaftT entry node result message m Ordering
+  Term -> RaftT entry node state result message m Ordering
 handleTermNumber newTerm = do
   (currTerm, _newTerm) <- updateTerm (const newTerm)
 
@@ -149,7 +299,11 @@ handleRequestVote ::
     MonadFork m,
     MonadDelay m
   ) =>
-  Term -> node -> LogIndex -> Term -> RaftT entry node result message m ()
+  Term ->
+  node ->
+  LogIndex ->
+  Term ->
+  RaftT entry node state result message m ()
 handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLastLogIndexTerm = do
   _ <- handleTermNumber candidateTerm
   ourTerm <- use term
@@ -192,7 +346,7 @@ handleHeartBeat ::
     MonadFork m,
     MonadDelay m
   ) =>
-  Term -> node -> RaftT entry node result message m ()
+  Term -> node -> RaftT entry node state result message m ()
 handleHeartBeat aeTerm senderNodeId =
   handleTermNumber aeTerm >>= \case
     GT -> becomeFollower senderNodeId >> resetElectionTimer
@@ -207,7 +361,7 @@ handleRequestVoteResult ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  node -> Term -> Bool -> RaftT entry node result message m ()
+  node -> Term -> Bool -> RaftT entry node state result message m ()
 handleRequestVoteResult voter voterTerm votedForUs = do
   handleTermNumber voterTerm >>= \case
     LT -> pure () -- Vote request for an old term
@@ -223,16 +377,20 @@ handleRequestVoteResult voter voterTerm votedForUs = do
             trace (\ourTerm ourNode -> VoteDeniedFrom ourTerm ourNode voter)
 
 becomeCandidate ::
-  ( MonadAsync m,
+  ( Ord node,
+    MonadAsync m,
     MonadMask m,
     MonadFork m,
     MonadMVar m,
     MonadDelay m
   ) =>
-  RaftT entry node result message m ()
+  RaftT entry node state result message m ()
 becomeCandidate = do
   trace BecameCandidate
   role .= Candidate
+  -- The following pieces of state are only useful to leaders
+  nextIndex .= mempty
+  matchIndex .= mempty
 
   term += 1
   w <- view (specification . writeTerm)
@@ -268,7 +426,7 @@ checkElection ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  RaftT entry node result message m ()
+  RaftT entry node state result message m ()
 checkElection = do
   numYes <- Set.size <$> use yesVotes
   q <- quorum
@@ -281,12 +439,16 @@ becomeLeader ::
     MonadMask m,
     MonadAsync m
   ) =>
-  RaftT entry node result message m ()
+  RaftT entry node state result message m ()
 becomeLeader = do
   role .= Leader
-  self <- view configuration <&> nodeId
+  (self, peers) <- view configuration <&> (nodeId &&& otherNodes)
   currentLeader .= Just self
   yesVotes .= Set.empty
+
+  lastLogIndex <- use logEntries <&> Seq.length
+  nextIndex .= Map.fromSet (const (fromIntegral lastLogIndex + 1)) peers
+
   trace LeaderElected
 
   -- TODO: send append all entries messages to all followers
@@ -296,7 +458,7 @@ becomeFollower ::
   (MonadMVar m) =>
   -- | Leader node ID
   node ->
-  RaftT entry node result message m ()
+  RaftT entry node state result message m ()
 becomeFollower leaderNodeId = do
   r <- use role
   unless (r == Follower) $ do
@@ -311,7 +473,7 @@ resetHeartBeatTimer ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  RaftT entry node result message m ()
+  RaftT entry node state result message m ()
 resetHeartBeatTimer = do
   config <- view configuration
   view heartBeatTimer >>= lift . resetTimer config.heartBeatTimeout
@@ -323,7 +485,7 @@ resetElectionTimer ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  RaftT entry node result message m ()
+  RaftT entry node state result message m ()
 resetElectionTimer = do
   electionTimeout <- nextElectionTimeout
   view electionTimer >>= lift . resetTimer electionTimeout
