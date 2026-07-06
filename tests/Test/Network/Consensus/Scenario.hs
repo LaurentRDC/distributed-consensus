@@ -18,11 +18,12 @@ where
 import Control.Monad.IOSim (SimEvent, SimEventType (EventLog), Trace, selectTraceEvents')
 import Control.Monitor
 import Data.Dynamic (Typeable, fromDynamic)
+import qualified Data.Text as Text
 import Network.Consensus.Raft (Command, LogIndex, RPC (..), RPCResult, RaftTrace (..), Term)
 import Test.Tasty.QuickCheck
 
 type Scenario entry result node =
-  Monitor (RaftTrace entry result node) String ()
+  Monitor (RaftTrace entry result node) ()
 
 -- | Run a scenario over a 'SimTrace', returning 'True' if the trace matches
 -- the scenario, and 'False' otherwise.
@@ -42,7 +43,7 @@ checkScenario ::
 checkScenario scenario trace' =
   let evs = raftTrace trace'
    in counterexample ("Failed with trace: " ++ show evs) $ case runMonitor scenario evs of
-        Left errs -> counterexample (show errs) False
+        Left errs -> counterexample (Text.unpack $ ppReasonWithTrace Text.show 3 (zip [0 ..] evs) errs) False
         Right _ -> True === True
 
 raftTrace ::

@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Test.Network.Consensus.Raft (tests) where
@@ -70,11 +71,11 @@ testClusterElections =
     expectation :: Scenario Entry Result Node
     expectation = whenever leaderElected $ \(term, _) ->
       never
-        ( -- another leader elected for the same term
-          \case
-            LeaderElected t _ | t == term -> Just "Leader elected for the same term"
+        ( \case
+            LeaderElected t _ | t == term -> Just ()
             _ -> Nothing
         )
+        <?> "Another leader elected for the same term"
 
     mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds =
       let nodes = Set.fromList [0 .. length seeds - 1]
@@ -138,16 +139,16 @@ testClusterProcessesCommands =
 
     expectation :: Int -> Scenario Entry Result Node
     expectation numNodes = do
-      (electionTerm, leaderNode) <- eventually leaderElected
-      (_, commandNode, MkCommand _ command _) <- eventually commandReceived
+      (electionTerm, leaderNode) <- eventually leaderElected <?> "Leader elected"
+      (_, commandNode, MkCommand _ command _) <- eventually commandReceived <?> "Command received"
       -- The command should end up at the leader
-      expect
-        (leaderNode == commandNode)
+      assert
         ( "Unexpected command node: "
-            <> show commandNode
+            <> Text.show commandNode
             <> " instead of "
-            <> show leaderNode
+            <> Text.show leaderNode
         )
+        (leaderNode == commandNode)
 
       (appendEntries, (_, _, commitIndex)) <-
         collectUntil
@@ -156,15 +157,16 @@ testClusterProcessesCommands =
               _ -> Nothing
           )
           commitIndexIncreased
+          <?> "Enough entries appended until leader's commit index increased"
 
       let quorumSize = numNodes `div` 2 + 1
-      expect (length appendEntries >= quorumSize) "Quorum not reached"
-      expect (commitIndex == 1) "Unexpected commit index"
+      assert "Quorum not reached" (length appendEntries >= quorumSize)
+      assert "Unexpected commit index" (commitIndex == 1)
 
-      (appliedTerm, appliedNode, entry) <- eventually logEntryApplied
-      expect (appliedTerm == electionTerm) mempty
-      expect (appliedNode == leaderNode) mempty
-      expect (command == entry) mempty
+      (appliedTerm, appliedNode, entry) <- eventually logEntryApplied <?> "Log entry applied"
+      assert mempty (appliedTerm == electionTerm)
+      assert mempty (appliedNode == leaderNode)
+      assert mempty (command == entry)
 
     scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds = do
       let configs = mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds
