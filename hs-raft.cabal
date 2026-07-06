@@ -26,6 +26,7 @@ common warnings
                  -Wredundant-constraints
                  -fhide-source-paths
                  -Wpartial-fields
+                 -Wunused-packages
 
 library
     import:           warnings
@@ -60,14 +61,10 @@ test-suite hs-raft-test
                       Test.Network.Consensus.Scenario
     ghc-options:      -threaded +RTS -N
     build-depends:    base >= 4.18 && <4.23
-                    , bytestring
                     , containers
                     , hs-raft
                     , io-classes
                     , io-sim
-                    , megaparsec ^>=9.7
-                    , random ^>=1.3
                     , tasty ^>=1.5
-                    , tasty-hunit ^>=0.10
                     , tasty-quickcheck ^>=0.11
                     , text
