@@ -16,16 +16,26 @@ module Control.Monitor
     label,
     (<?>),
 
-    -- * Combinators
-    assert,
+    -- * Predicates
+    module Control.Monitor.Predicate,
+
+    -- * Algebra
+
+    -- ** Unary operators
+    next,
     eventually,
-    never,
     always,
+
+    -- ** Binary operators
     until,
     weakUntil,
+    release,
+
+    -- * Combinators
+    assert,
+    never,
     collectUntil,
     scanUntil,
-    next,
     whenever,
 
     -- * Concurrent combinators
@@ -33,13 +43,12 @@ module Control.Monitor
     race,
     anyOf,
     allOf,
-    -- TODO:
-    -- within :: DiffTime -> Monitor (Time, e) failure result -> Monitor (Time, e) failure result
   )
 where
 
 import Control.Applicative (Alternative (..), asum, (<|>))
 import Control.Monad (unless, (>=>))
+import Control.Monitor.Predicate
 import Control.Monitor.Reason
   ( Reason (..),
     Reasons (..),
@@ -52,7 +61,9 @@ import Control.Monitor.Reason
   )
 import Data.Bifunctor (first)
 import Data.Foldable (traverse_)
+import Data.Maybe (isJust)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Prelude hiding (until)
 
 data Monitor e a
@@ -64,6 +75,11 @@ data Monitor e a
       -- | How to continue
       (e -> Monitor e a)
   deriving (Functor)
+
+nonEmptyStep ::
+  (e -> Monitor e a) ->
+  Monitor e a
+nonEmptyStep = Step (Left (oneReason unexpectedEnd))
 
 label :: Text -> Monitor e a -> Monitor e a
 label l = mapReason (\r -> r {reasonLabels = l : reasonLabels r})
@@ -136,45 +152,53 @@ instance Monad (Monitor e) where
       (end >>= \a -> onEnd (f a))
       (continue >=> f)
 
+instance MonadFail (Monitor e) where
+  fail = Fail . oneReason . simpleReason . Text.pack
+
 assert :: Text -> Bool -> Monitor e ()
 assert msg cond = unless cond (Fail (oneReason $ simpleReason msg))
 
 -- | Succeeds if the provided filter succeeds at any point
-eventually :: (e -> Maybe a) -> Monitor e a
+eventually :: Predicate e a -> Monitor e a
 eventually f = go
   where
-    go = Step (Left $ oneReason unexpectedEnd) (maybe go Done . f)
+    go = nonEmptyStep (maybe go Done . runPredicate f)
 
 -- | Succeeds if the provided filter never matches for the
 -- rest of the sequence
-never :: (e -> Maybe a) -> Monitor e ()
+never :: Predicate e a -> Monitor e ()
 never f = go
   where
     go =
       Step
         (Right ())
-        (\ev -> maybe go (\_ -> Fail (oneReason $ unexpectedEvent ev)) (f ev))
+        ( \ev ->
+            maybe
+              go
+              (\_ -> Fail (oneReason $ unexpectedEvent ev))
+              (runPredicate f ev)
+        )
 
-always :: (e -> Bool) -> Monitor e ()
+always :: Predicate e a -> Monitor e ()
 always f = go
   where
     go =
       Step
         (Right ())
-        (\e -> if f e then go else Fail $ oneReason unexpectedEnd)
+        (\e -> if isJust (runPredicate f e) then go else Fail $ oneReason unexpectedEnd)
 
 -- | @'until' p q@ says that @q@ must eventually occur, and before it does,
 -- @p@ must hold for every e.
 --
 -- For a weaker expectation, see 'weakUntil'.
-until :: (e -> Bool) -> (e -> Maybe a) -> Monitor e a
-until predicate f = go
+until :: (e -> Maybe b) -> Predicate e a -> Monitor e a
+until pred' f = go
   where
-    go = Step (Left $ oneReason unexpectedEnd) $ \ev ->
-      case f ev of
+    go = nonEmptyStep $ \ev ->
+      case runPredicate f ev of
         Just result -> Done result
         Nothing
-          | predicate ev -> go
+          | isJust (pred' ev) -> go
           | otherwise -> Fail (oneReason $ unexpectedEvent ev)
 
 -- | @'weakUntil' p q@ says that @q@ might eventually occur, and before it does,
@@ -182,23 +206,23 @@ until predicate f = go
 --
 -- For a stronger expectation, see 'until'.
 weakUntil ::
-  (e -> Bool) ->
-  (e -> Maybe result) ->
-  Monitor e (Maybe result)
-weakUntil predicate f = go
+  (e -> Maybe b) ->
+  Predicate e a ->
+  Monitor e (Maybe a)
+weakUntil pred' f = go
   where
     go = Step (Right Nothing) $ \ev ->
-      case f ev of
+      case runPredicate f ev of
         Just result -> Done (Just result)
         Nothing
-          | predicate ev -> go
+          | isJust (pred' ev) -> go
           | otherwise -> Fail (oneReason $ unexpectedEvent ev)
 
 -- | 'collectUntil p q' collects the results of @p@,
 -- until @q@ is satisfied.
 collectUntil ::
-  (e -> Maybe collect) ->
-  (e -> Maybe end) ->
+  Predicate e collect ->
+  Predicate e end ->
   Monitor e ([collect], end)
 collectUntil collect isEnd =
   first reverse <$> scanUntil [] (flip (:)) collect isEnd
@@ -208,39 +232,50 @@ collectUntil collect isEnd =
 scanUntil ::
   s ->
   (s -> a -> s) ->
-  (e -> Maybe a) ->
-  (e -> Maybe end) ->
+  Predicate e a ->
+  Predicate e end ->
   Monitor e (s, end)
 scanUntil start accumulate collect isEnd = go start
   where
     go !acc =
-      Step
-        (Left $ oneReason unexpectedEnd)
-        ( \ev -> case (isEnd ev, collect ev) of
-            (Nothing, Just toCollect) -> go (accumulate acc toCollect)
-            (Nothing, Nothing) -> go acc
-            (Just end, _) -> Done (acc, end)
-        )
+      nonEmptyStep $ \ev -> case (runPredicate isEnd ev, runPredicate collect ev) of
+        (Nothing, Just toCollect) -> go (accumulate acc toCollect)
+        (Nothing, Nothing) -> go acc
+        (Just end, _) -> Done (acc, end)
 
 -- | @'next' f@ asserts that an e satisfying @f@ must immediately
 -- follow.
-next :: (e -> Maybe a) -> Monitor e a
+next :: Predicate e a -> Monitor e a
 next f =
   Step
     (Left $ oneReason unexpectedEnd)
-    (\ev -> maybe (Fail (oneReason $ unexpectedEvent ev)) Done (f ev))
+    (\ev -> maybe (Fail (oneReason $ unexpectedEvent ev)) Done (runPredicate f ev))
+
+-- | @'release' p q@ asserts that @p@ must hold until @q@ does,
+-- and then @q@ holds forever.
+release ::
+  Predicate e a ->
+  Predicate e a ->
+  Monitor e ()
+release pred' f = go
+  where
+    go = nonEmptyStep $ \ev ->
+      case (runPredicate pred' ev, runPredicate f ev) of
+        (Just _, Just _) -> always f
+        (Just _, Nothing) -> go
+        (Nothing, _) -> Fail (oneReason $ unexpectedEvent ev)
 
 -- | @'whenever' p q@ says that once @p@ is satisfied,
 -- @q@ should hold.
 whenever ::
-  (e -> Maybe result) ->
-  (result -> Monitor e ()) ->
+  Predicate e a ->
+  (a -> Monitor e ()) ->
   Monitor e ()
 whenever trigger afterTrigger = go []
   where
     go kids = Step (traverse_ onEnd kids) $ \ev ->
       let kids' = [k' | Step _ k <- kids, k' <- [k ev]]
-          kids'' = maybe kids' (\a -> afterTrigger a : kids') (trigger ev)
+          kids'' = maybe kids' (\a -> afterTrigger a : kids') (runPredicate trigger ev)
        in case [r | Fail r <- kids''] of
             (r : _) -> Fail r
             [] -> go [k | k@Step {} <- kids'']

@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Test.Network.Consensus.Scenario
@@ -53,26 +54,32 @@ raftTrace =
         _ -> Nothing -- internal io-sim event
     )
 
-leaderElected :: RaftTrace entry result node -> Maybe (Term, node)
-leaderElected (LeaderElected t n) = Just (t, n)
-leaderElected _ = Nothing
+leaderElected :: Predicate (RaftTrace entry result node) (Term, node)
+leaderElected = predicate $ \case
+  (LeaderElected t n) -> Just (t, n)
+  _ -> Nothing
 
-commandReceived :: RaftTrace entry result node -> Maybe (Term, node, Command node entry)
-commandReceived (CommandReceived t n command) = Just (t, n, command)
-commandReceived _ = Nothing
+commandReceived :: Predicate (RaftTrace entry result node) (Term, node, Command node entry)
+commandReceived = predicate $ \case
+  (CommandReceived t n command) -> Just (t, n, command)
+  _ -> Nothing
 
-rpcReceived :: RaftTrace entry result node -> Maybe (Term, node, RPC node entry)
-rpcReceived (RPCReceived t n rpc) = Just (t, n, rpc)
-rpcReceived _ = Nothing
+rpcReceived :: Predicate (RaftTrace entry result node) (Term, node, RPC node entry)
+rpcReceived = predicate $ \case
+  (RPCReceived t n rpc) -> Just (t, n, rpc)
+  _ -> Nothing
 
-rpcResultReceived :: RaftTrace entry result node -> Maybe (Term, node, RPCResult node result)
-rpcResultReceived (RPCResultReceived t n resp) = Just (t, n, resp)
-rpcResultReceived _ = Nothing
+rpcResultReceived :: Predicate (RaftTrace entry result node) (Term, node, RPCResult node result)
+rpcResultReceived = predicate $ \case
+  (RPCResultReceived t n resp) -> Just (t, n, resp)
+  _ -> Nothing
 
-commitIndexIncreased :: RaftTrace entry result node -> Maybe (Term, node, LogIndex)
-commitIndexIncreased (CommitIndexIncreasedTo t n logIndex) = Just (t, n, logIndex)
-commitIndexIncreased _ = Nothing
+commitIndexIncreased :: Predicate (RaftTrace entry result node) (Term, node, LogIndex)
+commitIndexIncreased = predicate $ \case
+  (CommitIndexIncreasedTo t n logIndex) -> Just (t, n, logIndex)
+  _ -> Nothing
 
-logEntryApplied :: RaftTrace entry result node -> Maybe (Term, node, entry)
-logEntryApplied (LogEntryApplied t n entry) = Just (t, n, entry)
-logEntryApplied _ = Nothing
+logEntryApplied :: Predicate (RaftTrace entry result node) (Term, node, entry)
+logEntryApplied = predicate $ \case
+  (LogEntryApplied t n entry) -> Just (t, n, entry)
+  _ -> Nothing

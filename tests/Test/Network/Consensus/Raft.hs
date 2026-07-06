@@ -8,7 +8,6 @@
 module Test.Network.Consensus.Raft (tests) where
 
 import Control.Concurrent.Class.MonadSTM (atomically, modifyTVar', newTVarIO, readTVar, retry, writeTVar)
-import Control.Monad ((>=>))
 import Control.Monad.Class.MonadAsync (concurrently, forConcurrently_, race_)
 import Control.Monad.Class.MonadTimer (threadDelay)
 import Control.Monad.IOSim (IOSim, exploreSimTrace, traceM)
@@ -71,7 +70,7 @@ testClusterElections =
     expectation :: Scenario Entry Result Node
     expectation = whenever leaderElected $ \(term, _) ->
       never
-        ( \case
+        ( predicate $ \case
             LeaderElected t _ | t == term -> Just ()
             _ -> Nothing
         )
@@ -152,9 +151,9 @@ testClusterProcessesCommands =
 
       (appendEntries, (_, _, commitIndex)) <-
         collectUntil
-          ( rpcReceived >=> \case
-              (_, _, AE AppendEntries {}) -> Just ()
-              _ -> Nothing
+          ( do
+              (_, _, AE AppendEntries {}) <- rpcReceived
+              pure ()
           )
           commitIndexIncreased
           <?> "Enough entries appended until leader's commit index increased"
