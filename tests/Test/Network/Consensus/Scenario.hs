@@ -25,10 +25,7 @@ import Test.Tasty.QuickCheck
 type Scenario entry result node =
   Monitor (RaftTrace entry result node) ()
 
--- | Run a scenario over a 'SimTrace', returning 'True' if the trace matches
--- the scenario, and 'False' otherwise.
---
--- Note that the scenario will only pass if it fully consumes the input trace.
+-- | Check a scenario over a 'Trace'.
 checkScenario ::
   ( Show entry,
     Show result,
@@ -43,7 +40,7 @@ checkScenario ::
 checkScenario scenario trace' =
   let evs = raftTrace trace'
    in counterexample ("Failed with trace: " ++ show evs) $ case runMonitor scenario evs of
-        Left errs -> counterexample (Text.unpack $ ppReasonWithTrace Text.show 3 (zip [0 ..] evs) errs) False
+        Left errs -> counterexample (Text.unpack $ ppReasonsWithTrace Text.show 3 (zip [0 ..] evs) errs) False
         Right _ -> True === True
 
 raftTrace ::

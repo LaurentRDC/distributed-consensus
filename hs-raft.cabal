@@ -57,6 +57,7 @@ test-suite hs-raft-test
     hs-source-dirs:   tests
     main-is:          Main.hs
     other-modules:    Control.Monitor
+                      Control.Monitor.Reason
                       Test.Network.Consensus.Raft
                       Test.Network.Consensus.Scenario
     ghc-options:      -threaded +RTS -N
