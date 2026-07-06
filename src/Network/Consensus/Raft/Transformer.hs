@@ -35,6 +35,8 @@ import Data.Foldable (for_)
 import qualified Data.Foldable as Foldable
 import Data.Function ((&))
 import Data.Functor ((<&>))
+import qualified Data.Map.Strict as Map
+import Data.Sequence (ViewR (..))
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -82,6 +84,15 @@ sendMessage n m = do
   spec <- view specification
   lift $ (spec ^. send) n m
 
+whenRole ::
+  (Monad m) =>
+  Role ->
+  RaftT entry node state result message m () ->
+  RaftT entry node state result message m ()
+whenRole r action = do
+  ourRole <- use role
+  when (ourRole == r) action
+
 -- | Send a heartbeat RPC concurrently to all other nodes.
 --
 -- This function also resets the heartbeat timer.
@@ -93,9 +104,8 @@ sendHeartbeat ::
     MonadAsync m
   ) =>
   RaftT entry node state result message m ()
-sendHeartbeat = do
-  r <- use role
-  when (r == Leader) $ do
+sendHeartbeat =
+  whenRole Leader $ do
     config <- view configuration
     thisTerm <- use term
     let peers = config.otherNodes
@@ -152,26 +162,76 @@ applyCommand (MkCommand sender entry requestId) = do
   internalState .= newState
   pure (MkCommandResponse sender result requestId)
 
+-- | Updates the commit index. Returns 'True' if some log entries can be applied,
+-- and 'False' otherwise.
+updateCommitIndex :: (Monad m) => RaftT entry node state result message m Bool
+updateCommitIndex = do
+  commitIndex' <- use commitIndex
+  entries <- use logEntries
+  ourTerm <- use term
+  matchIndices <- use matchIndex
+  quorumSize <- quorum
+
+  -- Fetch the indices, starting from the log index after the commit index, such that:
+  -- 1. the entry is associated with the current term
+  -- 2. a quorum of nodes have committed this index
+  let quorumIndices =
+        Seq.zip
+          ( Seq.fromFunction
+              (Seq.length entries)
+              -- The initial commit index is 0, hence the first entry to be committed
+              -- should have index 1
+              succ
+          )
+          entries
+          & Seq.drop (fromIntegral commitIndex')
+          & Seq.filter ((== ourTerm) . fst . snd)
+          & fmap fst
+          -- By definition of the Raft algorithm, only a contiguous subset of
+          -- indices can have been accepted with a quorum, hence the use of
+          -- takeWhileL
+          & Seq.takeWhileL
+            ( \i ->
+                Map.size (Map.filter (>= fromIntegral i) matchIndices)
+                  -- Note that 'matchIndices' do not include the leader,
+                  -- so we take the leader into account by ensuring that there are
+                  -- at least 'pred quorumSize' other nodes that have accepted the
+                  -- entries, rather than 'quorumsize'
+                  >= pred quorumSize
+            )
+          & fmap fromIntegral
+
+  case Seq.viewr quorumIndices of
+    Seq.EmptyR -> pure False
+    _ :> lastIndex -> do
+      commitIndex .= lastIndex
+      trace (\n t -> CommitIndexIncreasedTo n t lastIndex)
+      pure True
+
+-- | Update the commit index, and apply log entries if there are
+-- any log entries that /can/ be applied.
 applyLogEntries :: (Monad m) => RaftT entry node state result message m ()
 applyLogEntries = do
-  lastAppliedIndex <- use lastApplied
-  currentCommitIndex <- use commitIndex
-  entries <- use logEntries
-  let unAppliedEntries =
-        entries
-          & Seq.take (fromIntegral currentCommitIndex)
-          & Seq.drop (fromIntegral lastAppliedIndex)
-          & fmap snd
+  isTimeToCommit <- updateCommitIndex
+  when isTimeToCommit $ do
+    lastAppliedIndex <- use lastApplied
+    currentCommitIndex <- use commitIndex
+    unless (lastAppliedIndex == currentCommitIndex) $ do
+      entries <- use logEntries
+      let unAppliedEntries =
+            entries
+              & Seq.take (fromIntegral currentCommitIndex)
+              & Seq.drop (fromIntegral lastAppliedIndex)
+              & fmap snd
 
-  results <- mapM applyCommand unAppliedEntries
+      results <- mapM applyCommand unAppliedEntries
 
-  ourRole <- use role
-  when (ourRole == Leader) $
-    for_ results $
-      \response@(MkCommandResponse client _ _) ->
-        sendRPCResult client (ClientRequestResult response)
+      whenRole Leader $
+        for_ results $
+          \response@(MkCommandResponse client _ _) ->
+            sendRPCResult client (ClientRequestResult response)
 
-  lastApplied .= currentCommitIndex
+      lastApplied .= currentCommitIndex
 
 nextElectionTimeout :: (Monad m) => RaftT entry node state result message m Microseconds
 nextElectionTimeout = do

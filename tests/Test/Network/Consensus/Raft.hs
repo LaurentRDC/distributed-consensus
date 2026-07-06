@@ -8,6 +8,7 @@
 module Test.Network.Consensus.Raft (tests) where
 
 import Control.Concurrent.Class.MonadSTM (atomically, modifyTVar', newTVarIO, readTVar, retry, writeTVar)
+import Control.Monad (void)
 import Control.Monad.Class.MonadAsync (concurrently, forConcurrently_, race_)
 import Control.Monad.Class.MonadTimer (threadDelay)
 import Control.Monad.IOSim (IOSim, exploreSimTrace, traceM)
@@ -51,30 +52,35 @@ testClusterElections :: TestTree
 testClusterElections =
   testProperty "Cluster elects leader" $
     property $
-      -- Only odd cluster sizes have an easy-to-clear quorum
-      forAll (elements [1, 3, 5]) $ \clusterSize ->
+      forAll (elements [1 .. 5]) $ \clusterSize ->
         -- The following timings ensure that once election happens,
         -- the heartbeat will be sent early enough to ensure the leader
         -- remains a leader.
-        -- TODO: play with timing to allow the possibility for an election to be triggered.
-        --       How does one formulate a good property to check in this case?
         forAll (vectorOf clusterSize (chooseBoundedIntegral (0, 1_000_000))) $ \seeds ->
           forAll (chooseBoundedIntegral (1_000, 200_000)) $ \heartbeatTimeout ->
-            forAll (chooseBoundedIntegral (heartbeatTimeout, 2 * heartbeatTimeout)) $ \electionTimeoutLowerBound ->
-              forAll (chooseBoundedIntegral (electionTimeoutLowerBound, 2 * electionTimeoutLowerBound)) $ \electionTimeoutUpperBound ->
+            forAll (chooseBoundedIntegral (heartbeatTimeout `div` 2, 2 * heartbeatTimeout)) $ \electionTimeoutLowerBound ->
+              forAll (chooseBoundedIntegral (electionTimeoutLowerBound `div` 2, 2 * electionTimeoutLowerBound)) $ \electionTimeoutUpperBound ->
                 exploreSimTrace
                   id
                   (scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound (Set.fromList seeds))
                   (\_ trace -> checkScenario expectation trace)
   where
     expectation :: Scenario Entry Result Node
-    expectation = whenever leaderElected $ \(term, _) ->
-      never
-        ( predicate $ \case
-            LeaderElected t _ | t == term -> Just ()
-            _ -> Nothing
-        )
-        <?> "Another leader elected for the same term"
+    expectation = go
+      where
+        anotherLeaderIn term = predicate $ \case
+          LeaderElected t _ | t == term -> Just ()
+          _ -> Nothing
+
+        -- Whenever a leader is elected, there should not be another
+        -- leader during this term.
+        --
+        -- In order to allow the test to span multiple terms, we need to recursively
+        -- apply the expectation using 'both'
+        go = whenever leaderElected $ \(term, _) ->
+          void
+            (both go (never (anotherLeaderIn term)))
+            <?> "Another leader elected for the same term"
 
     mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds =
       let nodes = Set.fromList [0 .. length seeds - 1]
@@ -94,9 +100,8 @@ testClusterElections =
     scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds = do
       let configs = mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds
       (specs :: IntMap (RaftSpec Entry Node State Result TestMessage (IOSim s))) <- testSpecs (Set.fromList $ IntMap.keys configs)
-      -- The scenario must give enough time for an election to be triggered,
-      -- hence why we race against 2 * electionTimeoutUpperBound
-      race_ (threadDelay (2 * fromIntegral electionTimeoutUpperBound)) $ do
+      -- The scenario must give enough time for potentially multiple elections to be triggered
+      race_ (threadDelay (5 * fromIntegral electionTimeoutUpperBound)) $ do
         forConcurrently_ (IntMap.toList specs) $ \(ix, spec) ->
           runRaftT (configs IntMap.! ix) () spec server
 
@@ -104,9 +109,7 @@ testClusterProcessesCommands :: TestTree
 testClusterProcessesCommands =
   testProperty "Cluster processes commands" $
     property $
-      -- Only odd cluster sizes have an easy-to-clear quorum
-      -- TODO: processing commands for a single-node cluster
-      forAll (elements [3, 5]) $ \clusterSize ->
+      forAll (elements [1 .. 5]) $ \clusterSize ->
         -- The following timings ensure that once election happens,
         -- the heartbeat will be sent early enough to ensure the leader
         -- remains a leader.
@@ -159,7 +162,7 @@ testClusterProcessesCommands =
           <?> "Enough entries appended until leader's commit index increased"
 
       let quorumSize = numNodes `div` 2 + 1
-      assert "Quorum not reached" (length appendEntries >= quorumSize)
+      assert "Quorum not reached" (length appendEntries >= pred quorumSize) -- 'pred' because we don't count the leader
       assert "Unexpected commit index" (commitIndex == 1)
 
       (appliedTerm, appliedNode, entry) <- eventually logEntryApplied <?> "Log entry applied"

@@ -16,10 +16,9 @@ import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay)
 import Control.Monad.Trans.Class (lift)
 import Data.Foldable (traverse_)
-import Data.Function ((&))
 import Data.Functor ((<&>))
 import qualified Data.Map.Strict as Map
-import Data.Sequence (Seq (..), ViewR ((:>)), (|>))
+import Data.Sequence (Seq (..), (|>))
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import qualified Data.Vector as Vector
@@ -177,6 +176,10 @@ handleClientRequest command =
       -- TODO: sendAppendEntriesTo in parallel
       traverse_ sendAppendEntriesTo peers
 
+      -- In a single-node cluster, we would already have
+      -- quorum to update our commit index
+      applyLogEntries
+
 handleAppendEntries ::
   ( MonadMVar m,
     MonadAsync m,
@@ -233,46 +236,10 @@ handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode respo
       then do
         matchIndex . at responderNode .= Just responderLogIndex
         nextIndex . at responderNode .= Just (succ responderLogIndex)
-        isTimeToCommit <- hasEntriesToCommit
-        when isTimeToCommit applyLogEntries
+        applyLogEntries
       else do
         nextIndex %= Map.adjust pred responderNode
         sendAppendEntriesTo responderNode -- Retry
-  where
-    hasEntriesToCommit = do
-      commitIndex' <- use commitIndex
-      entries <- use logEntries
-      ourTerm <- use term
-      matchIndices <- use matchIndex
-      quorumSize <- quorum
-
-      -- Fetch the indices, starting from the log index after the commit index, such that:
-      -- 1. the entry is associated with the current term
-      -- 2. a quorum of nodes have committed this index
-      let quorumIndices =
-            Seq.zip
-              ( Seq.fromFunction
-                  (Seq.length entries)
-                  -- The initial commit index is 0, hence the first entry to be committed
-                  -- should have index 1
-                  succ
-              )
-              entries
-              & Seq.drop (fromIntegral commitIndex')
-              & Seq.filter ((== ourTerm) . fst . snd)
-              & fmap fst
-              -- By definition of the Raft algorithm, only a contiguous subset of
-              -- indices can have been accepted with a quorum, hence the use of
-              -- takeWhileL
-              & Seq.takeWhileL (\i -> Map.size (Map.filter (>= fromIntegral i) matchIndices) >= quorumSize)
-              & fmap fromIntegral
-
-      case Seq.viewr quorumIndices of
-        Seq.EmptyR -> pure False
-        _ :> lastIndex -> do
-          commitIndex .= lastIndex
-          trace (\n t -> CommitIndexIncreasedTo n t lastIndex)
-          pure True
 
 -- | How to handle a term provided by another node. If this term
 -- is larger than ours, this means that we must clear some state from
