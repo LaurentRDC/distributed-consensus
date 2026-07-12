@@ -15,6 +15,7 @@ import Control.Monad.IOSim (IOSim, exploreSimTrace, traceM)
 import Control.Monitor
 import Data.IntMap (IntMap)
 import qualified Data.IntMap.Strict as IntMap
+import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq (..))
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
@@ -48,6 +49,44 @@ tests =
         ]
     ]
 
+-- | Ensure that in each term where a leader is elected, no other leader
+-- is elected
+electionMonitor :: Scenario Entry Result Node
+electionMonitor = go
+  where
+    anotherLeaderIn term = predicate $ \case
+      LeaderElected t _ | t == term -> Just ()
+      _ -> Nothing
+
+    -- Whenever a leader is elected, there should not be another
+    -- leader during this term.
+    --
+    -- In order to allow the test to span multiple terms, we need to recursively
+    -- apply the expectation using 'both'
+    go = whenever leaderElected $ \(term, _) ->
+      void
+        (both go (never (anotherLeaderIn term)))
+        <?> "Another leader elected for the same term"
+
+-- | Ensure that each node witnesses terms that increase monotonically
+termMonitor :: (Ord node) => Scenario entry result node
+termMonitor = go mempty
+  where
+    go latestKnownTerms =
+      whenever (predicate roleTerm) $ \(node, newTerm) -> do
+        case Map.lookup node latestKnownTerms of
+          Nothing -> pure ()
+          Just latestTerm ->
+            assert
+              "Expecting terms to increase monotonically"
+              (latestTerm <= newTerm)
+        go (Map.insert node newTerm latestKnownTerms)
+
+    roleTerm (LeaderElected t n) = Just (n, t)
+    roleTerm (BecameCandidate t n) = Just (n, t)
+    roleTerm (BecameFollower t n) = Just (n, t)
+    roleTerm _ = Nothing
+
 testClusterElections :: TestTree
 testClusterElections =
   testProperty "Cluster elects leader" $
@@ -63,25 +102,8 @@ testClusterElections =
                 exploreSimTrace
                   id
                   (scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound (Set.fromList seeds))
-                  (\_ trace -> checkScenario expectation trace)
+                  (\_ trace -> checkScenario (void $ both electionMonitor termMonitor) trace)
   where
-    expectation :: Scenario Entry Result Node
-    expectation = go
-      where
-        anotherLeaderIn term = predicate $ \case
-          LeaderElected t _ | t == term -> Just ()
-          _ -> Nothing
-
-        -- Whenever a leader is elected, there should not be another
-        -- leader during this term.
-        --
-        -- In order to allow the test to span multiple terms, we need to recursively
-        -- apply the expectation using 'both'
-        go = whenever leaderElected $ \(term, _) ->
-          void
-            (both go (never (anotherLeaderIn term)))
-            <?> "Another leader elected for the same term"
-
     mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds =
       let nodes = Set.fromList [0 .. length seeds - 1]
        in IntMap.fromList
