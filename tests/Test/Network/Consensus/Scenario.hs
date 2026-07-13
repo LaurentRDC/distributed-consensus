@@ -40,7 +40,7 @@ checkScenario ::
   Property
 checkScenario scenario trace' =
   let evs = raftTrace trace'
-   in counterexample ("Failed with trace: " ++ show evs) $ case runMonitor scenario evs of
+   in case runMonitor scenario evs of
         Left errs -> counterexample (Text.unpack $ ppReasonsWithTrace Text.show 3 (zip [0 ..] evs) errs) False
         Right _ -> True === True
 

@@ -63,16 +63,15 @@ electionMonitor = go
     --
     -- In order to allow the test to span multiple terms, we need to recursively
     -- apply the expectation using 'both'
-    go = whenever leaderElected $ \(term, _) ->
-      void
-        (both go (never (anotherLeaderIn term)))
+    go = void $ whenever leaderElected $ \(term, _) ->
+      both go (never (anotherLeaderIn term))
         <?> "Another leader elected for the same term"
 
 -- | Ensure that each node witnesses terms that increase monotonically
 termMonitor :: (Ord node) => Scenario entry result node
 termMonitor = go mempty
   where
-    go latestKnownTerms =
+    go latestKnownTerms = void $ do
       whenever (predicate roleTerm) $ \(node, newTerm) -> do
         case Map.lookup node latestKnownTerms of
           Nothing -> pure ()

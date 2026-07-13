@@ -60,7 +60,6 @@ import Control.Monitor.Reason
     unexpectedEvent,
   )
 import Data.Bifunctor (first)
-import Data.Foldable (traverse_)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -71,9 +70,9 @@ data Monitor e a
   | Fail !(Reasons e)
   | Step
       -- | What to do on end-of-input
-      (Either (Reasons e) a)
+      !(Either (Reasons e) a)
       -- | How to continue
-      (e -> Monitor e a)
+      !(e -> Monitor e a)
   deriving (Functor)
 
 nonEmptyStep ::
@@ -267,18 +266,21 @@ release pred' f = go
 
 -- | @'whenever' p q@ says that once @p@ is satisfied,
 -- @q@ should hold.
+--
+-- This function returns @Nothing@ if the predicate @p@ is
+-- never satisfied.
 whenever ::
   Predicate e a ->
-  (a -> Monitor e ()) ->
-  Monitor e ()
-whenever trigger afterTrigger = go []
+  (a -> Monitor e b) ->
+  Monitor e (Maybe b)
+whenever trigger afterTrigger = go
   where
-    go kids = Step (traverse_ onEnd kids) $ \ev ->
-      let kids' = [k' | Step _ k <- kids, k' <- [k ev]]
-          kids'' = maybe kids' (\a -> afterTrigger a : kids') (runPredicate trigger ev)
-       in case [r | Fail r <- kids''] of
-            (r : _) -> Fail r
-            [] -> go [k | k@Step {} <- kids'']
+    go =
+      Step
+        (Right Nothing)
+        ( maybe go (fmap Just . afterTrigger)
+            . runPredicate trigger
+        )
 
 newtype Concurrently e a
   = Concurrently {runConcurrently :: Monitor e a}
