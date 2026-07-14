@@ -8,6 +8,7 @@ module Test.Network.Consensus.Scenario
 
     -- * Helpers
     leaderElected,
+    votedFor,
     commandReceived,
     commitIndexIncreased,
     logEntryApplied,
@@ -57,6 +58,11 @@ raftTrace =
 leaderElected :: Predicate (RaftTrace entry result node) (Term, node)
 leaderElected = predicate $ \case
   (LeaderElected t n) -> Just (t, n)
+  _ -> Nothing
+
+votedFor :: Predicate (RaftTrace entry result node) (Term, node, Term, node)
+votedFor = predicate $ \case
+  VotedFor voterTerm voterNode candidateTerm candidateNode -> Just (voterTerm, voterNode, candidateTerm, candidateNode)
   _ -> Nothing
 
 commandReceived :: Predicate (RaftTrace entry result node) (Term, node, Command node entry)

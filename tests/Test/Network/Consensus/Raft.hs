@@ -8,7 +8,7 @@
 module Test.Network.Consensus.Raft (tests) where
 
 import Control.Concurrent.Class.MonadSTM (atomically, modifyTVar', newTVarIO, readTVar, retry, writeTVar)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Control.Monad.Class.MonadAsync (concurrently, forConcurrently_, race_)
 import Control.Monad.Class.MonadTimer (threadDelay)
 import Control.Monad.IOSim (IOSim, exploreSimTrace, traceM)
@@ -34,7 +34,7 @@ import Network.Consensus.Raft
     runRaftT,
     server,
   )
-import Test.Network.Consensus.Scenario (Scenario, checkScenario, commandReceived, commitIndexIncreased, leaderElected, logEntryApplied, rpcReceived)
+import Test.Network.Consensus.Scenario (Scenario, checkScenario, commandReceived, commitIndexIncreased, leaderElected, logEntryApplied, rpcReceived, votedFor)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck
 
@@ -66,6 +66,15 @@ electionMonitor = go
     go = void $ whenever leaderElected $ \(term, _) ->
       both go (never (anotherLeaderIn term))
         <?> "Another leader elected for the same term"
+
+-- | Ensure that a node casts at most one vote per term
+singleVoteMonitor :: Scenario Entry Result Node
+singleVoteMonitor = go mempty
+  where
+    go votes = void $ whenever votedFor $ \(voterTerm, voterNode, _, _) -> do
+      when (Set.member (voterTerm, voterNode) votes) $ fail "Node cast more than one vote in term"
+
+      go (Set.insert (voterTerm, voterNode) votes)
 
 -- | Ensure that each node witnesses terms that increase monotonically
 termMonitor :: (Ord node) => Scenario entry result node
@@ -101,7 +110,7 @@ testClusterElections =
                 exploreSimTrace
                   id
                   (scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound (Set.fromList seeds))
-                  (\_ trace -> checkScenario (void $ both electionMonitor termMonitor) trace)
+                  (\_ trace -> checkScenario (void $ allOf [electionMonitor, singleVoteMonitor, termMonitor]) trace)
   where
     mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds =
       let nodes = Set.fromList [0 .. length seeds - 1]
