@@ -68,6 +68,7 @@ test-suite hs-raft-test
                     , hs-raft
                     , io-classes
                     , io-sim
+                    , random
                     , tasty ^>=1.5
                     , tasty-quickcheck ^>=0.11
                     , text

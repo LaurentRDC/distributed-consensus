@@ -1,10 +1,15 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Test.Network.Consensus.Scenario
   ( Scenario,
     checkScenario,
     module Control.Monitor,
+
+    -- * Injecting faults
+    faultInjector,
 
     -- * Helpers
     leaderElected,
@@ -18,11 +23,20 @@ module Test.Network.Consensus.Scenario
   )
 where
 
+import Control.Concurrent.Class.MonadMVar (MonadMVar, modifyMVarMasked_, newMVar, readMVar)
+import Control.Exception (Exception)
+import Control.Monad.Class.MonadAsync (MonadAsync, forConcurrently_, race_)
+import Control.Monad.Class.MonadFork (MonadFork, myThreadId, throwTo)
+import Control.Monad.Class.MonadThrow (MonadThrow)
+import Control.Monad.Class.MonadTimer (MonadDelay (..))
 import Control.Monad.IOSim (SimEvent, SimEventType (EventLog), Trace, selectTraceEvents')
 import Control.Monitor
 import Data.Dynamic (Typeable, fromDynamic)
 import qualified Data.Text as Text
+import Data.Word (Word64)
+import qualified Debug.Trace as Debug
 import Network.Consensus.Raft (Command, CommandResponse, LogIndex, RPC (..), RPCResult, RaftTrace (..), Term)
+import System.Random.Stateful (mkStdGen64, uniformR, uniformShuffleList)
 import Test.Tasty.QuickCheck
 
 type Scenario entry result node =
@@ -45,6 +59,50 @@ checkScenario scenario trace' =
    in case runMonitor scenario evs of
         Left errs -> counterexample (Text.unpack $ ppReasonsWithTrace Text.show 3 (zip [0 ..] evs) errs) False
         Right _ -> True === True
+
+data TestFault = TestFault
+  deriving (Show)
+
+instance Exception TestFault
+
+-- | Given a bunch of threads, inject crashes in said threads
+-- TODO: exceptions thrown from this function don't appear to register, despite
+-- inserting 'yield' basically everywhere...
+faultInjector ::
+  (MonadThrow m, MonadMVar m, MonadAsync m, MonadDelay m, MonadFork m) =>
+  -- | Run function, which will be executed in parallel
+  (a -> m ()) ->
+  [a] ->
+  -- | Probability of a crash in any thread, every 10ms
+  -- This number will be clamped to the [0, 1] range.
+  Double ->
+  Word64 ->
+  m ()
+faultInjector f initials faultProbability seed = do
+  threadIds <- newMVar []
+
+  let gen = mkStdGen64 seed
+  race_ (faultInjectorThread threadIds gen) $
+    forConcurrently_ initials $ \x -> do
+      tid <- myThreadId
+      modifyMVarMasked_ threadIds (pure . (tid :))
+      f x
+  where
+    faultProbabilityClamped = Debug.traceShowId $ max (min 1 faultProbability) 0
+    faultInjectorThread threadIds gen = do
+      threadDelay 10_000
+      let (num, newGen) = uniformR @Double (0.0, 1.0) gen
+      Debug.traceShowM num
+      if num > faultProbabilityClamped
+        then faultInjectorThread threadIds newGen
+        else do
+          threads <- readMVar threadIds
+          Debug.traceShowM threads
+          let (shuffled, newGen') = uniformShuffleList threads newGen
+          case shuffled of
+            [] -> pure ()
+            (tid : _) -> throwTo tid TestFault
+          faultInjectorThread threadIds newGen'
 
 raftTrace ::
   (Typeable entry, Typeable result, Typeable node) =>
