@@ -14,9 +14,22 @@ jobs:
       - uses: haskell-actions/run-ormolu@v18
         with:
           mode: check
+
+  # Enable linting when the repository is public
+  # linting:
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     security-events: write
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: haskell-actions/hlint-scan@v1
+  #       with:
+  #         fail-on: note
   
   build:
-    needs: formatting
+    needs:
+      - formatting
+      # - linting # Public repo needed
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
