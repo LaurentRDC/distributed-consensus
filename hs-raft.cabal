@@ -60,6 +60,7 @@ test-suite hs-raft-test
                       Control.Monitor.Predicate
                       Control.Monitor.Reason
                       Test.Network.Consensus.Raft
+                      Test.Network.Consensus.Raft.Properties
                       Test.Network.Consensus.Scenario
     ghc-options:      -threaded +RTS -N
     build-depends:    base >= 4.18 && <4.23

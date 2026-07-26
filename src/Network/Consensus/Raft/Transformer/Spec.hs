@@ -192,6 +192,7 @@ data RaftTrace entry result node
   | -- | Command received by the leader node. If the command needs to be redirected
     -- to another node, this event is not emitted
     CommandReceived Term node (Command node entry)
+  | CommandResultResponded Term node (CommandResponse node result)
   | CommitIndexIncreasedTo Term node LogIndex
   | LogEntryApplied Term node entry
   deriving (Eq, Ord, Show)

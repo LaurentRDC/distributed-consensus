@@ -228,8 +228,9 @@ applyLogEntries = do
 
       whenRole Leader $
         for_ results $
-          \response@(MkCommandResponse client _ _) ->
+          \response@(MkCommandResponse client _ _) -> do
             sendRPCResult client (ClientRequestResult response)
+            trace (\t n -> CommandResultResponded t n response)
 
       lastApplied .= currentCommitIndex
 

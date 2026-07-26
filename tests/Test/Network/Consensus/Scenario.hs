@@ -10,6 +10,7 @@ module Test.Network.Consensus.Scenario
     leaderElected,
     votedFor,
     commandReceived,
+    commandResponded,
     commitIndexIncreased,
     logEntryApplied,
     rpcReceived,
@@ -21,7 +22,7 @@ import Control.Monad.IOSim (SimEvent, SimEventType (EventLog), Trace, selectTrac
 import Control.Monitor
 import Data.Dynamic (Typeable, fromDynamic)
 import qualified Data.Text as Text
-import Network.Consensus.Raft (Command, LogIndex, RPC (..), RPCResult, RaftTrace (..), Term)
+import Network.Consensus.Raft (Command, CommandResponse, LogIndex, RPC (..), RPCResult, RaftTrace (..), Term)
 import Test.Tasty.QuickCheck
 
 type Scenario entry result node =
@@ -68,6 +69,11 @@ votedFor = predicate $ \case
 commandReceived :: Predicate (RaftTrace entry result node) (Term, node, Command node entry)
 commandReceived = predicate $ \case
   (CommandReceived t n command) -> Just (t, n, command)
+  _ -> Nothing
+
+commandResponded :: Predicate (RaftTrace entry result node) (Term, node, CommandResponse node result)
+commandResponded = predicate $ \case
+  (CommandResultResponded t n response) -> Just (t, n, response)
   _ -> Nothing
 
 rpcReceived :: Predicate (RaftTrace entry result node) (Term, node, RPC node entry)
