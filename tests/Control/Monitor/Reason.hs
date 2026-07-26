@@ -97,48 +97,6 @@ ppReasons ppEvent (Reasons rs) =
           (c : _) -> "  (in: " <> Text.show c <> ")"
           [] -> ""
 
--- | Render a failure together with a window of the trace around the
--- offending event, gutter-marked like a source excerpt.
---
--- The full trace (or any suffix-aligned excerpt: pass the events paired
--- with their true indices) is supplied; @radius@ events are shown on
--- each side of the failure position.
---
--- > recent events:
--- >   4180 | ElectionTimeout n2 (Term 7)
--- >   4181 | RequestVoteSent n2 (Term 7)
--- > > 4182 | BecameLeader n2 (Term 7)
--- >   4183 | HeartbeatSent n2 (Term 7)
-ppReasonWithTrace ::
-  (e -> Text) ->
-  -- | radius
-  Int ->
-  -- | indexed trace (or excerpt)
-  [(Int, e)] ->
-  Reason e ->
-  Text
-ppReasonWithTrace ppEvent radius trace r =
-  ppReason ppEvent r <> case window of
-    [] -> mempty
-    _ -> "\n\nRecent events:\n" <> Text.intercalate "\n" (map row window)
-  where
-    focus = case reasonIndex r of
-      Just i -> i
-      Nothing -> case trace of [] -> 0; _ -> fst (last trace)
-    window =
-      [ (i, e)
-      | (i, e) <- trace,
-        i >= focus - radius,
-        i <= focus + radius
-      ]
-    width = case window of
-      [] -> 1
-      _ -> Text.length (Text.show (maximum (map fst window)))
-    row (i, e) = gutter <> pad (Text.show i) <> " | " <> ppEvent e
-      where
-        gutter = if Just i == reasonIndex r then "> " else "  "
-    pad s = Text.replicate (width - Text.length s) " " <> s
-
 indent :: Int -> Text -> Text
 indent n = (Text.replicate n " " <>)
 
