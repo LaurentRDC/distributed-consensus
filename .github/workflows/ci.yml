@@ -38,6 +38,7 @@ jobs:
 
       - name: Configure build
         run: |
+          cabal configure --disable-optimization --semaphore -j
           # Generate a plan.json
           cabal build --dry-run
 
