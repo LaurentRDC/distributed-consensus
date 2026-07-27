@@ -267,19 +267,23 @@ release pred' f = go
 -- | @'whenever' p q@ says that once @p@ is satisfied,
 -- @q@ should hold.
 --
--- This function returns @Nothing@ if the predicate @p@ is
--- never satisfied.
+-- This function returns the result of the inner monitor
+-- every time it was executed. This means that a return
+-- values of @[]@ means that the predicate @p@ never fired.
 whenever ::
   Predicate e a ->
   (a -> Monitor e b) ->
-  Monitor e (Maybe b)
+  Monitor e [b]
 whenever trigger afterTrigger = go
   where
     go =
       Step
-        (Right Nothing)
-        ( maybe go (fmap Just . afterTrigger)
-            . runPredicate trigger
+        (Right [])
+        ( \e -> case runPredicate trigger e of
+            Nothing -> go
+            Just x -> do
+              (y, ys) <- both (afterTrigger x) go
+              pure $ y : ys
         )
 
 newtype Concurrently e a
