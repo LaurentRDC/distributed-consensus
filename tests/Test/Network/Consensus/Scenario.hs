@@ -124,7 +124,7 @@ votedFor = predicate $ \case
   VotedFor voterTerm voterNode candidateTerm candidateNode -> Just (voterTerm, voterNode, candidateTerm, candidateNode)
   _ -> Nothing
 
-commandReceived :: Predicate (RaftTrace entry result node) (Term, node, Command node entry)
+commandReceived :: Predicate (RaftTrace entry result node) (Term, node, Command entry)
 commandReceived = predicate $ \case
   (CommandReceived t n command) -> Just (t, n, command)
   _ -> Nothing

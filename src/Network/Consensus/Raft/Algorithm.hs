@@ -23,11 +23,12 @@ import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import qualified Data.Vector as Vector
 import Lens.Micro.Platform (at, use, view, (%=), (+=), (.=), (^.))
+import Network.Consensus.Raft.Client (Request (..), Response (..))
 import Network.Consensus.Raft.Timer (resetTimer)
 import Network.Consensus.Raft.Transformer
   ( AppendEntries (..),
     AppendEntriesResult (..),
-    Command,
+    Command (..),
     Config (..),
     Event (..),
     LogIndex,
@@ -37,11 +38,13 @@ import Network.Consensus.Raft.Transformer
     RaftTrace (..),
     Role (..),
     Term,
+    acceptClientRequest,
     applyLogEntries,
     commitIndex,
     configuration,
     currentLeader,
     dequeueEvent,
+    deserializeClientRequest,
     deserializeRPC,
     deserializeRPCResult,
     electionTimer,
@@ -56,8 +59,8 @@ import Network.Consensus.Raft.Transformer
     receive,
     role,
     sendAppendEntriesTo,
+    sendClientResponse,
     sendHeartbeat,
-    sendRPC,
     sendRPCConcurrently,
     sendRPCResult,
     specification,
@@ -110,16 +113,25 @@ server = do
       labelThisThread "receiveMessages"
       let decodeRPC = spec ^. deserializeRPC
           decodeRPCResult = spec ^. deserializeRPCResult
+          decodeClientReq = spec ^. deserializeClientRequest
           recv = spec ^. receive
       forever $ do
         message <- recv
-        case decodeRPC message of
-          Right rpc -> atomically $ writeTQueue queue (EventRPC rpc)
-          Left rpcErrorMessage -> case decodeRPCResult message of
-            Right result -> atomically $ writeTQueue queue (EventRPCResult result)
-            Left rpcResultErrorMessage ->
-              let errMsg = "Failure to deserialize. RPC: " <> rpcErrorMessage <> ", RPCResult: " <> rpcResultErrorMessage
-               in trace' (`DeserializationError` errMsg)
+        case decodeClientReq message of
+          Right clientReq -> atomically $ writeTQueue queue (EventIncomingClientRequest clientReq)
+          Left clientReqErrorMessage -> case decodeRPC message of
+            Right rpc -> atomically $ writeTQueue queue (EventRPC rpc)
+            Left rpcErrorMessage -> case decodeRPCResult message of
+              Right result -> atomically $ writeTQueue queue (EventRPCResult result)
+              Left rpcResultErrorMessage ->
+                let errMsg =
+                      "Failure to deserialize. Client request: "
+                        <> clientReqErrorMessage
+                        <> "RPC: "
+                        <> rpcErrorMessage
+                        <> ", RPCResult: "
+                        <> rpcResultErrorMessage
+                 in trace' (`DeserializationError` errMsg)
 
 handleEvent ::
   ( Ord node,
@@ -139,8 +151,7 @@ handleEvent EventElectionTimeout = do
       trace ElectionTriggered
     becomeCandidate
 handleEvent EventHeartBeatTimeout = sendHeartbeat
-handleEvent (EventRPC (ClientRequest command)) =
-  handleClientRequest command
+handleEvent (EventIncomingClientRequest request) = handleClientRequest request
 handleEvent (EventRPC (RequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm)) =
   handleRequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm
 handleEvent (EventRPC (HeartBeat aeTerm senderNodeId _lastLogIndex _aeCommitIndex)) =
@@ -150,25 +161,20 @@ handleEvent (EventRPCResult (RequestVoteResult voter voterTerm votedForUs)) =
   handleRequestVoteResult voter voterTerm votedForUs
 handleEvent (EventRPCResult (AER appendEntriesResult)) =
   handleAppendEntriesResult appendEntriesResult
-handleEvent (EventRPCResult result) = error "eventRPCResult"
+handleEvent (EventRPCResult (ClientRequestResult _commandResponse)) = pure () -- only meant for clients to handle
 
 handleClientRequest ::
-  (Ord node, MonadAsync m) =>
-  Command node entry -> RaftT entry node state result message m ()
-handleClientRequest command =
+  (Ord node, MonadFork m, MonadMVar m) =>
+  Request node entry -> RaftT entry node state result message m ()
+handleClientRequest (MkRequest clientId entry) =
   use role >>= \case
     Candidate ->
-      -- TODO: We have two options here:
-      --   1. Re-queue the command, hoping that the next time this event is processed,
-      --      we'll know the leader.
-      --   2. Reply to the client to retry later
-      pure ()
-    Follower -> do
-      -- If the leader is known, forward the command.
-      -- If the leader is NOT known, the command is swallowed.
-      -- TODO: create an appropriate response to clients
-      use currentLeader >>= traverse_ (`sendRPC` ClientRequest command)
+      sendClientResponse clientId (NotLeader Nothing)
+    Follower ->
+      use currentLeader >>= sendClientResponse clientId . NotLeader
     Leader -> do
+      reqId <- acceptClientRequest clientId
+      let command = MkCommand entry reqId
       trace (\t n -> CommandReceived t n command)
       ourTerm <- use term
       logEntries %= (|> (ourTerm, command))

@@ -16,8 +16,10 @@ module Network.Consensus.Raft.Transformer.Spec
     applyLogEntry,
     serializeRPC,
     serializeRPCResult,
+    serializeClientResponse,
     deserializeRPC,
     deserializeRPCResult,
+    deserializeClientRequest,
     send,
     receive,
     tracer,
@@ -37,6 +39,7 @@ module Network.Consensus.Raft.Transformer.Spec
     nextIndex,
     matchIndex,
     yesVotes,
+    nextRequestId,
     randomGen,
 
     -- * Types
@@ -63,6 +66,7 @@ import Data.Vector (Vector)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
+import Network.Consensus.Raft.Client (Request, Response)
 import System.Random (StdGen, mkStdGen64)
 
 newtype LogIndex = LogIndex Int64
@@ -77,20 +81,17 @@ newtype RequestId = RequestId Int64
   deriving stock (Generic, Eq, Ord, Show)
   deriving newtype (Real, Enum, Num, Integral)
 
-data Command node entry
+data Command entry
   = MkCommand
-      -- | Client node ID, to reply
-      !node
       !entry
-      -- | A 'RequestId' allows a client to correlate a command with its response,
-      -- in the event that a client issues multiple commands
+      -- | A 'RequestId' allows a leader to wait for a message
+      -- before answering the client. This allows a leader to
+      -- allow connections from multiple clients.
       !RequestId
   deriving (Eq, Show, Ord, Generic)
 
 data CommandResponse node result
   = MkCommandResponse
-      -- | Leader node ID, for further requests
-      !node
       !result
       !RequestId
   deriving (Eq, Show, Ord, Generic)
@@ -100,7 +101,7 @@ data AppendEntries node entry = AppendEntries
     aeLeaderNode :: !node,
     aePreviousLogIndex :: !LogIndex,
     aePreviousLogTerm :: !Term,
-    aeEntries :: !(Vector (Term, Command node entry)),
+    aeEntries :: !(Vector (Term, Command entry)),
     aeCommitIndex :: !LogIndex
   }
   deriving (Eq, Show, Ord, Generic)
@@ -114,8 +115,7 @@ data AppendEntriesResult node result = AppendEntriesResult
   deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
 
 data RPC node entry
-  = ClientRequest (Command node entry)
-  | AE (AppendEntries node entry)
+  = AE (AppendEntries node entry)
   | HeartBeat
       -- | Leader's term
       Term
@@ -191,7 +191,7 @@ data RaftTrace entry result node
   | DeserializationError node Text
   | -- | Command received by the leader node. If the command needs to be redirected
     -- to another node, this event is not emitted
-    CommandReceived Term node (Command node entry)
+    CommandReceived Term node (Command entry)
   | CommandResultResponded Term node (CommandResponse node result)
   | CommitIndexIncreasedTo Term node LogIndex
   | LogEntryApplied Term node entry
@@ -207,11 +207,13 @@ data RaftSpec entry node state result message m = MkRaftSpec
     _applyLogEntry :: state -> entry -> (state, result),
     _serializeRPC :: RPC node entry -> message,
     _serializeRPCResult :: RPCResult node result -> message,
+    _serializeClientResponse :: Response node result -> message,
     -- We use 'Text' to represent deserialization errors because this is
     -- easiest to represent to the user. I don't think it's worth adding
     -- yet another type variable to the spec.
     _deserializeRPC :: message -> Either Text (RPC node entry),
     _deserializeRPCResult :: message -> Either Text (RPCResult node result),
+    _deserializeClientRequest :: message -> Either Text (Request node entry),
     _send :: node -> message -> m (),
     _receive :: m message,
     _tracer :: RaftTrace entry result node -> m ()
@@ -231,13 +233,14 @@ data RaftState node entry state = MkRaftState
     _internalState :: !state,
     _votedFor :: !(Maybe node),
     _currentLeader :: !(Maybe node),
-    _logEntries :: !(Seq (Term, Command node entry)),
+    _logEntries :: !(Seq (Term, Command entry)),
     _commitIndex :: !LogIndex,
     _lastApplied :: !LogIndex,
     _nextIndex :: Map node LogIndex,
     _matchIndex :: Map node LogIndex,
     -- | Set of votes received in the current term
     _yesVotes :: !(Set node),
+    _nextRequestId :: !RequestId,
     _randomGen :: !StdGen
   }
 
@@ -260,6 +263,7 @@ initialRaftState seed initialState =
       _nextIndex = mempty,
       _matchIndex = mempty,
       _yesVotes = mempty,
+      _nextRequestId = 0,
       -- We use mkStdGen64 for reproducibility across 32-bit and 64-bit architectures
       _randomGen = mkStdGen64 seed
     }

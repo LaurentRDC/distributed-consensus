@@ -84,8 +84,8 @@ monotonicallyIncreasingTermProperty = go mempty
 allAcceptedCommandReceiveResponseProperty :: Scenario entry result node
 allAcceptedCommandReceiveResponseProperty = go
   where
-    go = void $ whenever commandReceived $ \(_, _, MkCommand _node _entry reqId) ->
+    go = void $ whenever commandReceived $ \(_, _, MkCommand _entry reqId) ->
       let thisCommandResponded =
-            commandResponded >>= \(_, _, MkCommandResponse _node' _result' reqId') ->
+            commandResponded >>= \(_, _, MkCommandResponse _result' reqId') ->
               predicate $ \_ -> unless (reqId == reqId') Nothing
        in eventually thisCommandResponded

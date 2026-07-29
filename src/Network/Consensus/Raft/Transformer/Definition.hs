@@ -8,6 +8,7 @@ module Network.Consensus.Raft.Transformer.Definition
     specification,
     configuration,
     eventQueue,
+    currentClientRequests,
     heartBeatTimer,
     electionTimer,
 
@@ -26,13 +27,15 @@ module Network.Consensus.Raft.Transformer.Definition
   )
 where
 
-import Control.Concurrent.Class.MonadMVar (MonadMVar)
+import Control.Concurrent.Class.MonadMVar (MVar, MonadMVar, newMVar)
 import Control.Concurrent.Class.MonadSTM (TQueue, atomically, newTQueue, writeTQueue)
 import Control.Monad.Class.MonadSTM (MonadSTM)
 import Control.Monad.Trans.RWS.CPS (RWST, ask, asks, evalRWST, get, gets, local, modify, put, state)
+import Data.IntMap.Strict (IntMap)
 import Data.Set (Set)
 import Data.Word (Word64)
 import Lens.Micro.Platform (makeLenses)
+import Network.Consensus.Raft.Client (Request)
 import Network.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
 import Network.Consensus.Raft.Transformer.Spec (RPC, RPCResult, RaftSpec, RaftState, initialRaftState)
 
@@ -55,6 +58,7 @@ runRaftT ::
   m a
 runRaftT c i s f = do
   queue <- atomically newTQueue
+  requests <- newMVar mempty
   hbTimer <- newTimer (atomically $ writeTQueue queue EventHeartBeatTimeout)
   elTimer <- newTimer (atomically $ writeTQueue queue EventElectionTimeout)
   fst
@@ -64,6 +68,7 @@ runRaftT c i s f = do
           { _configuration = c,
             _specification = s,
             _eventQueue = queue,
+            _currentClientRequests = requests,
             _heartBeatTimer = hbTimer,
             _electionTimer = elTimer
           }
@@ -71,16 +76,18 @@ runRaftT c i s f = do
       (initialRaftState (randomSeed c) i)
 
 data Event node entry result
-  = EventRPC (RPC node entry)
-  | EventRPCResult (RPCResult node result)
-  | EventElectionTimeout
+  = EventElectionTimeout
   | EventHeartBeatTimeout
+  | EventIncomingClientRequest (Request node entry)
+  | EventRPC (RPC node entry)
+  | EventRPCResult (RPCResult node result)
 
 data RaftEnv entry node state result message m
   = MkRaftEnv
   { _configuration :: !(Config node),
     _specification :: !(RaftSpec entry node state result message m),
     _eventQueue :: TQueue m (Event node entry result),
+    _currentClientRequests :: MVar m (IntMap (MVar m result)),
     -- Handle to a thread which will send a heartbeat timeout
     -- event after the appropriate amount of time.
     _heartBeatTimer :: Timer m,

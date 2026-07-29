@@ -12,6 +12,7 @@ module Network.Consensus.Raft.Transformer
     sendRPC,
     sendRPCConcurrently,
     sendRPCResult,
+    sendClientResponse,
     sendHeartbeat,
     sendAppendEntriesTo,
     quorum,
@@ -19,14 +20,15 @@ module Network.Consensus.Raft.Transformer
     nextElectionTimeout,
     updateTerm,
     trace,
+    acceptClientRequest,
   )
 where
 
-import Control.Concurrent.Class.MonadMVar (MonadMVar)
+import Control.Concurrent.Class.MonadMVar (MonadMVar, modifyMVar_, newEmptyMVar, putMVar, readMVar, withMVar)
 import Control.Concurrent.Class.MonadSTM (atomically, readTQueue, writeTQueue)
-import Control.Monad (unless, when)
+import Control.Monad (unless, void, when)
 import Control.Monad.Class.MonadAsync (MonadAsync, mapConcurrently_)
-import Control.Monad.Class.MonadFork (MonadFork)
+import Control.Monad.Class.MonadFork (MonadFork, forkFinally, labelThisThread)
 import Control.Monad.Class.MonadSTM (MonadSTM)
 import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay)
@@ -34,14 +36,17 @@ import Control.Monad.Trans.Class (lift)
 import Data.Foldable (for_)
 import qualified Data.Foldable as Foldable
 import Data.Function ((&))
-import Data.Functor ((<&>))
+import Data.Functor (($>), (<&>))
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import Data.Sequence (ViewR (..))
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Traversable (for)
 import qualified Data.Vector as Vector
-import Lens.Micro.Platform (at, use, view, (.=), (^.))
+import Lens.Micro.Platform (at, use, view, (.=), (<%=), (^.))
+import Network.Consensus.Raft.Client (Response (..))
 import Network.Consensus.Raft.Timer (Microseconds, resetTimer)
 import Network.Consensus.Raft.Transformer.Definition
 import Network.Consensus.Raft.Transformer.Spec
@@ -78,6 +83,11 @@ sendRPCResult :: (Monad m) => node -> RPCResult node result -> RaftT entry node 
 sendRPCResult node rpc = do
   spec <- view specification
   sendMessage node ((spec ^. serializeRPCResult) rpc)
+
+sendClientResponse :: (Monad m) => node -> Response node result -> RaftT entry node state result message m ()
+sendClientResponse node response = do
+  spec <- view specification
+  sendMessage node ((spec ^. serializeClientResponse) response)
 
 sendMessage :: (Monad m) => node -> message -> RaftT entry node state result message m ()
 sendMessage n m = do
@@ -153,14 +163,14 @@ quorum = do
       then numNodesInCluster `div` 2 + 1
       else (numNodesInCluster - 1) `div` 2 + 1
 
-applyCommand :: (Monad m) => Command node entry -> RaftT entry node state result message m (CommandResponse node result)
-applyCommand (MkCommand sender entry requestId) = do
+applyCommand :: (Monad m) => Command entry -> RaftT entry node state result message m (CommandResponse node result)
+applyCommand (MkCommand entry requestId) = do
   apply <- view (specification . applyLogEntry)
   (newState, result) <- use internalState <&> flip apply entry
   trace (\n t -> LogEntryApplied n t entry)
 
   internalState .= newState
-  pure (MkCommandResponse sender result requestId)
+  pure (MkCommandResponse result requestId)
 
 -- | Updates the commit index. Returns 'True' if some log entries can be applied,
 -- and 'False' otherwise.
@@ -210,7 +220,7 @@ updateCommitIndex = do
 
 -- | Update the commit index, and apply log entries if there are
 -- any log entries that /can/ be applied.
-applyLogEntries :: (Monad m) => RaftT entry node state result message m ()
+applyLogEntries :: (MonadMVar m) => RaftT entry node state result message m ()
 applyLogEntries = do
   isTimeToCommit <- updateCommitIndex
   when isTimeToCommit $ do
@@ -226,11 +236,19 @@ applyLogEntries = do
 
       results <- mapM applyCommand unAppliedEntries
 
-      whenRole Leader $
-        for_ results $
-          \response@(MkCommandResponse client _ _) -> do
-            sendRPCResult client (ClientRequestResult response)
-            trace (\t n -> CommandResultResponded t n response)
+      requestsVar <- view currentClientRequests
+      whenRole Leader $ do
+        responsesQueued <- lift $
+          withMVar requestsVar $ \requests ->
+            for results $
+              \(MkCommandResponse result requestId) ->
+                traverse
+                  (\r -> r `putMVar` result $> MkCommandResponse result requestId)
+                  (IntMap.lookup (fromIntegral requestId) requests)
+
+        for_ responsesQueued $ \case
+          Nothing -> pure ()
+          Just r -> trace (\t n -> CommandResultResponded t n r)
 
       lastApplied .= currentCommitIndex
 
@@ -263,3 +281,37 @@ updateTerm update = do
     lift $ (spec ^. writeTerm) newTerm
     term .= newTerm
   pure (currTerm, newTerm)
+
+-- | Set up a callback for a client request
+acceptClientRequest ::
+  (MonadMVar m, MonadFork m) =>
+  -- | Client node
+  node ->
+  RaftT entry node state result message m RequestId
+acceptClientRequest clientId = do
+  requests <- view currentClientRequests
+  spec <- view specification
+  let serializeResponse = view serializeClientResponse spec
+      sendResponse = spec ^. send
+  requestId <- nextRequestId <%= succ
+  resultVar <- lift newEmptyMVar
+  leaderId <- view configuration <&> nodeId
+  lift $
+    modifyMVar_ requests $
+      pure . IntMap.insert (fromIntegral requestId) resultVar
+
+  void
+    $ lift
+    $ forkFinally
+      ( do
+          -- TODO: define some timeout after which this thread is filled,
+          -- and the cleanup deletes the data associated with the request ID
+          labelThisThread $ "Client request handler for request ID " <> show requestId
+          result <- readMVar resultVar
+          sendResponse clientId (serializeResponse (Success leaderId result))
+      )
+    $ \_ ->
+      modifyMVar_ requests $
+        pure . IntMap.delete (fromIntegral requestId)
+
+  pure requestId

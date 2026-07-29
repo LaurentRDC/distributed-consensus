@@ -1,7 +1,9 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -31,6 +33,7 @@ import Network.Consensus.Raft
     runRaftT,
     server,
   )
+import Network.Consensus.Raft.Client (RaftClientSpec (..), RaftClientT, Request (..), Response, request, runRaftClientT)
 import Test.Network.Consensus.Raft.Properties (allProperties)
 import Test.Network.Consensus.Scenario (Scenario, checkScenario, commandReceived, commitIndexIncreased, leaderElected, logEntryApplied, rpcReceived)
 import Test.Tasty (TestTree, testGroup)
@@ -85,10 +88,10 @@ testClusterElections =
 
     scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds = do
       let configs = mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds
-      (specs :: IntMap (RaftSpec Entry Node State Result TestMessage (IOSim s))) <- testSpecs (Set.fromList $ IntMap.keys configs)
+      MkHarness serverSpecs _clientSpec <- testHarness (Set.fromList $ IntMap.keys configs)
       -- The scenario must give enough time for potentially multiple elections to be triggered
       race_ (threadDelay (5 * fromIntegral electionTimeoutUpperBound)) $ do
-        forConcurrently_ (IntMap.toList specs) $ \(ix, spec) ->
+        forConcurrently_ (IntMap.toList serverSpecs) $ \(ix, spec) ->
           runRaftT (configs IntMap.! ix) () spec server
 
 testClusterProcessesCommands :: TestTree
@@ -128,7 +131,7 @@ testClusterProcessesCommands =
     expectation :: Int -> Scenario Entry Result Node
     expectation numNodes = do
       (electionTerm, leaderNode) <- eventually leaderElected <?> "Leader elected"
-      (_, commandNode, MkCommand _ command _) <- eventually commandReceived <?> "Command received"
+      (_, commandNode, MkCommand command _) <- eventually commandReceived <?> "Command received"
       -- The command should end up at the leader
       assert
         ( "Unexpected command node: "
@@ -158,7 +161,7 @@ testClusterProcessesCommands =
 
     scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds = do
       let configs = mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds
-      (specs :: IntMap (RaftSpec Entry Node State Result TestMessage (IOSim s))) <- testSpecs (Set.fromList $ IntMap.keys configs)
+      MkHarness serverSpecs runClient <- testHarness (Set.fromList $ IntMap.keys configs)
       -- The scenario must give enough time for an election to be triggered,
       -- hence why we race against 2 * electionTimeoutUpperBound
       --
@@ -167,15 +170,17 @@ testClusterProcessesCommands =
       race_ (threadDelay (3 * fromIntegral electionTimeoutUpperBound)) $
         concurrently
           -- Normal cluster
-          ( forConcurrently_ (IntMap.toList specs) $ \(ix, spec) ->
+          ( forConcurrently_ (IntMap.toList serverSpecs) $ \(ix, spec) ->
               runRaftT (configs IntMap.! ix) () spec server
           )
-          -- Client request after a certain delay
-          ( do
-              threadDelay $ fromIntegral electionTimeoutUpperBound
-              case IntMap.lookup 0 specs of
-                Nothing -> error "Unexpected"
-                Just spec -> _send spec 0 (TestRPC (ClientRequest (MkCommand 199_999 () 0)))
+          -- Client request.
+          -- If the cluster is in an election, the response will be "Left ...",
+          -- and so we retry a little bit later.
+          ( let f =
+                  runClient (request 0 ()) >>= \case
+                    Left _ -> threadDelay (fromIntegral heartbeatTimeout) >> f
+                    Right r -> pure $ Right r
+             in f
           )
 
 type Node = Int
@@ -186,13 +191,26 @@ type Result = ()
 
 type State = ()
 
-testSpecs ::
-  Set Node -> IOSim s (IntMap (RaftSpec Entry Node State Result TestMessage (IOSim s)))
-testSpecs nodes = do
+data Harness s
+  = MkHarness
+  { serverSpecifications :: IntMap (RaftSpec Entry Node State Result TestMessage (IOSim s)),
+    runClientAction :: forall a. RaftClientT Entry Node Result (IOSim s) a -> IOSim s a
+  }
+
+testHarness ::
+  Set Node ->
+  IOSim s (Harness s)
+testHarness serverNodes = do
   mailbox <- newTVarIO mempty
-  pure $ IntMap.fromList [(node, nodeSpec mailbox node) | node <- Set.toList nodes]
+  pure $
+    MkHarness
+      { serverSpecifications = IntMap.fromList [(node, serverSpec mailbox node) | node <- Set.toList serverNodes],
+        runClientAction = \action -> runRaftClientT action clientNode (clientSpec mailbox)
+      }
   where
-    nodeSpec mailbox node =
+    clientNode = maybe 0 succ (Set.lookupMax serverNodes)
+
+    serverSpec mailbox node =
       MkRaftSpec
         { _readLogEntry = \_ -> pure Nothing,
           _writeLogEntry = \_ _ _ -> pure (),
@@ -203,12 +221,24 @@ testSpecs nodes = do
           _applyLogEntry = \_ _ -> (() :: State, () :: Result),
           _serializeRPC = TestRPC,
           _serializeRPCResult = TestRPCResult,
+          _serializeClientResponse = TestClientResponse,
           _deserializeRPC = fromRPC,
           _deserializeRPCResult = fromRPCResult,
+          _deserializeClientRequest = fromClientReq,
           _send = send mailbox,
           _receive = receive mailbox node,
           _tracer = traceM
         }
+
+    clientSpec mailbox =
+      MkRaftClientSpec
+        { sendRequest = \n req -> send mailbox n (TestClientRequest req),
+          receiveResponse =
+            receive mailbox clientNode >>= \case
+              TestClientResponse resp -> pure $ Right resp
+              _ -> pure $ Left "Unexpected message type"
+        }
+
     send mailbox node message =
       atomically $ modifyTVar' mailbox (IntMap.insertWith (<>) node (Seq.singleton message))
 
@@ -222,14 +252,20 @@ testSpecs nodes = do
             >> pure nextMessage
 
 data TestMessage
-  = TestRPC (RPC Node ())
+  = TestClientRequest (Request Node ())
+  | TestClientResponse (Response Node ())
+  | TestRPC (RPC Node ())
   | TestRPCResult (RPCResult Node ())
   deriving (Show)
 
+fromClientReq :: TestMessage -> Either Text (Request Node ())
+fromClientReq (TestClientRequest req) = Right req
+fromClientReq _ = Left (Text.pack "unexpected failure")
+
 fromRPC :: TestMessage -> Either Text (RPC Node ())
 fromRPC (TestRPC rpc) = Right rpc
-fromRPC (TestRPCResult _) = Left (Text.pack "unexpected failure")
+fromRPC _ = Left (Text.pack "unexpected failure")
 
 fromRPCResult :: TestMessage -> Either Text (RPCResult Node ())
 fromRPCResult (TestRPCResult result) = Right result
-fromRPCResult (TestRPC _) = Left (Text.pack "Unexpected failure")
+fromRPCResult _ = Left (Text.pack "Unexpected failure")
