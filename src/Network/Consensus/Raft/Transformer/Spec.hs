@@ -14,14 +14,12 @@ module Network.Consensus.Raft.Transformer.Spec
     readVotedFor,
     voteFor,
     applyLogEntry,
-    serializeRPC,
-    serializeRPCResult,
-    serializeClientResponse,
-    deserializeRPC,
-    deserializeRPCResult,
-    deserializeClientRequest,
-    send,
-    receive,
+    sendRPC,
+    sendRPCResult,
+    sendClientResponse,
+    receiveRPC,
+    receiveRPCResult,
+    receiveClientRequest,
     tracer,
 
     -- * Raft state
@@ -85,8 +83,8 @@ data Command entry
   = MkCommand
       !entry
       -- | A 'RequestId' allows a leader to wait for a message
-      -- before answering the client. This allows a leader to
-      -- allow connections from multiple clients.
+      --      before answering the client. This allows a leader to
+      --      allow connections from multiple clients.
       !RequestId
   deriving (Eq, Show, Ord, Generic)
 
@@ -190,14 +188,14 @@ data RaftTrace entry result node
   | ElectionTriggered Term node
   | DeserializationError node Text
   | -- | Command received by the leader node. If the command needs to be redirected
-    -- to another node, this event is not emitted
+    --    to another node, this event is not emitted
     CommandReceived Term node (Command entry)
   | CommandResultResponded Term node (CommandResponse node result)
   | CommitIndexIncreasedTo Term node LogIndex
   | LogEntryApplied Term node entry
   deriving (Eq, Ord, Show)
 
-data RaftSpec entry node state result message m = MkRaftSpec
+data RaftSpec entry node state result m = MkRaftSpec
   { _readLogEntry :: LogIndex -> m (Maybe entry),
     _writeLogEntry :: LogIndex -> Term -> entry -> m (),
     _readTerm :: m Term,
@@ -205,17 +203,15 @@ data RaftSpec entry node state result message m = MkRaftSpec
     _readVotedFor :: m (Maybe node),
     _voteFor :: Maybe node -> m (),
     _applyLogEntry :: state -> entry -> (state, result),
-    _serializeRPC :: RPC node entry -> message,
-    _serializeRPCResult :: RPCResult node result -> message,
-    _serializeClientResponse :: Response node result -> message,
+    _sendRPC :: node -> RPC node entry -> m (),
+    _sendRPCResult :: node -> RPCResult node result -> m (),
+    _sendClientResponse :: node -> Response node result -> m (),
     -- We use 'Text' to represent deserialization errors because this is
     -- easiest to represent to the user. I don't think it's worth adding
     -- yet another type variable to the spec.
-    _deserializeRPC :: message -> Either Text (RPC node entry),
-    _deserializeRPCResult :: message -> Either Text (RPCResult node result),
-    _deserializeClientRequest :: message -> Either Text (Request node entry),
-    _send :: node -> message -> m (),
-    _receive :: m message,
+    _receiveRPC :: m (Either Text (RPC node entry)),
+    _receiveRPCResult :: m (Either Text (RPCResult node result)),
+    _receiveClientRequest :: m (Either Text (Request node entry)),
     _tracer :: RaftTrace entry result node -> m ()
   }
 

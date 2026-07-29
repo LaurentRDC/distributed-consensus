@@ -1,4 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
@@ -49,15 +48,16 @@ import Lens.Micro.Platform (at, use, view, (.=), (<%=), (^.))
 import Network.Consensus.Raft.Client (Response (..))
 import Network.Consensus.Raft.Timer (Microseconds, resetTimer)
 import Network.Consensus.Raft.Transformer.Definition
-import Network.Consensus.Raft.Transformer.Spec
+import Network.Consensus.Raft.Transformer.Spec hiding (sendClientResponse, sendRPC, sendRPCResult)
+import qualified Network.Consensus.Raft.Transformer.Spec as Spec
 import System.Random (uniformR)
 
-dequeueEvent :: (MonadSTM m) => RaftT entry node state result message m (Event node entry result)
+dequeueEvent :: (MonadSTM m) => RaftT entry node state result m (Event node entry result)
 dequeueEvent = do
   queue <- view eventQueue
   lift $ atomically $ readTQueue queue
 
-enqueueEvent :: (MonadSTM m) => Event node entry result -> RaftT entry node state result message m ()
+enqueueEvent :: (MonadSTM m) => Event node entry result -> RaftT entry node state result m ()
 enqueueEvent event = do
   queue <- view eventQueue
   lift $ atomically $ writeTQueue queue event
@@ -65,40 +65,34 @@ enqueueEvent event = do
 -- | Send a 'RPC' to another node.
 --
 -- To send a 'RPC' to multiple other nodes, concurrently, see 'sendRPCConcurrently'
-sendRPC :: (Monad m) => node -> RPC node entry -> RaftT entry node state result message m ()
+sendRPC :: (Monad m) => node -> RPC node entry -> RaftT entry node state result m ()
 sendRPC node rpc = do
   spec <- view specification
-  sendMessage node ((spec ^. serializeRPC) rpc)
+  lift $ (spec ^. Spec.sendRPC) node rpc
 
 -- | Send a 'RPC' concurrently to other nodes.
 --
 -- To send a 'RPC' to a single node, see 'sendRPC'
-sendRPCConcurrently :: (MonadAsync m) => Set node -> RPC node entry -> RaftT entry node state result message m ()
+sendRPCConcurrently :: (MonadAsync m) => Set node -> RPC node entry -> RaftT entry node state result m ()
 sendRPCConcurrently nodes rpc = do
   spec <- view specification
-  let !message = spec ^. serializeRPC $ rpc
-  lift $ mapConcurrently_ (flip (spec ^. send) message) nodes
+  lift $ mapConcurrently_ (flip (spec ^. Spec.sendRPC) rpc) nodes
 
-sendRPCResult :: (Monad m) => node -> RPCResult node result -> RaftT entry node state result message m ()
+sendRPCResult :: (Monad m) => node -> RPCResult node result -> RaftT entry node state result m ()
 sendRPCResult node rpc = do
   spec <- view specification
-  sendMessage node ((spec ^. serializeRPCResult) rpc)
+  lift $ (spec ^. Spec.sendRPCResult) node rpc
 
-sendClientResponse :: (Monad m) => node -> Response node result -> RaftT entry node state result message m ()
+sendClientResponse :: (Monad m) => node -> Response node result -> RaftT entry node state result m ()
 sendClientResponse node response = do
   spec <- view specification
-  sendMessage node ((spec ^. serializeClientResponse) response)
-
-sendMessage :: (Monad m) => node -> message -> RaftT entry node state result message m ()
-sendMessage n m = do
-  spec <- view specification
-  lift $ (spec ^. send) n m
+  lift $ (spec ^. Spec.sendClientResponse) node response
 
 whenRole ::
   (Monad m) =>
   Role ->
-  RaftT entry node state result message m () ->
-  RaftT entry node state result message m ()
+  RaftT entry node state result m () ->
+  RaftT entry node state result m ()
 whenRole r action = do
   ourRole <- use role
   when (ourRole == r) action
@@ -113,7 +107,7 @@ sendHeartbeat ::
     MonadMask m,
     MonadAsync m
   ) =>
-  RaftT entry node state result message m ()
+  RaftT entry node state result m ()
 sendHeartbeat =
   whenRole Leader $ do
     config <- view configuration
@@ -127,7 +121,7 @@ sendHeartbeat =
 
 -- | For a given destination node, look up which of the entries
 -- in our log should be replicated, and send an appropriate 'AppendEntries' RPC.
-sendAppendEntriesTo :: (Ord node, Monad m) => node -> RaftT entry node state result message m ()
+sendAppendEntriesTo :: (Ord node, Monad m) => node -> RaftT entry node state result m ()
 sendAppendEntriesTo destination = do
   entries <- use logEntries
   (previousLogIndex, previousLogTerm) <-
@@ -154,7 +148,7 @@ sendAppendEntriesTo destination = do
     )
 
 -- | Number of votes required for a decision to be majority.
-quorum :: (Monad m) => RaftT entry node state result message m Int
+quorum :: (Monad m) => RaftT entry node state result m Int
 quorum = do
   conf <- view configuration
   let numNodesInCluster = 1 + Set.size (otherNodes conf)
@@ -163,7 +157,7 @@ quorum = do
       then numNodesInCluster `div` 2 + 1
       else (numNodesInCluster - 1) `div` 2 + 1
 
-applyCommand :: (Monad m) => Command entry -> RaftT entry node state result message m (CommandResponse node result)
+applyCommand :: (Monad m) => Command entry -> RaftT entry node state result m (CommandResponse node result)
 applyCommand (MkCommand entry requestId) = do
   apply <- view (specification . applyLogEntry)
   (newState, result) <- use internalState <&> flip apply entry
@@ -174,7 +168,7 @@ applyCommand (MkCommand entry requestId) = do
 
 -- | Updates the commit index. Returns 'True' if some log entries can be applied,
 -- and 'False' otherwise.
-updateCommitIndex :: (Monad m) => RaftT entry node state result message m Bool
+updateCommitIndex :: (Monad m) => RaftT entry node state result m Bool
 updateCommitIndex = do
   commitIndex' <- use commitIndex
   entries <- use logEntries
@@ -220,7 +214,7 @@ updateCommitIndex = do
 
 -- | Update the commit index, and apply log entries if there are
 -- any log entries that /can/ be applied.
-applyLogEntries :: (MonadMVar m) => RaftT entry node state result message m ()
+applyLogEntries :: (MonadMVar m) => RaftT entry node state result m ()
 applyLogEntries = do
   isTimeToCommit <- updateCommitIndex
   when isTimeToCommit $ do
@@ -252,7 +246,7 @@ applyLogEntries = do
 
       lastApplied .= currentCommitIndex
 
-nextElectionTimeout :: (Monad m) => RaftT entry node state result message m Microseconds
+nextElectionTimeout :: (Monad m) => RaftT entry node state result m Microseconds
 nextElectionTimeout = do
   gen <- use randomGen
   (lowerBound, upperBound) <- view configuration <&> electionTimeoutRange
@@ -260,7 +254,7 @@ nextElectionTimeout = do
   randomGen .= nextGen
   pure timeout
 
-trace :: (Monad m) => (Term -> node -> RaftTrace entry result node) -> RaftT entry node state result message m ()
+trace :: (Monad m) => (Term -> node -> RaftTrace entry result node) -> RaftT entry node state result m ()
 trace makeTrace = do
   ourTerm <- use term
   node <- view configuration <&> nodeId
@@ -270,7 +264,7 @@ trace makeTrace = do
 -- | Update the internal term state, returning the previous and new 'Term's.
 --
 -- If the update function returns the current term, this function does nothing.
-updateTerm :: (Monad m) => (Term -> Term) -> RaftT entry node state result message m (Term, Term)
+updateTerm :: (Monad m) => (Term -> Term) -> RaftT entry node state result m (Term, Term)
 updateTerm update = do
   currTerm <- use term
   let newTerm = update currTerm
@@ -287,12 +281,10 @@ acceptClientRequest ::
   (MonadMVar m, MonadFork m) =>
   -- | Client node
   node ->
-  RaftT entry node state result message m RequestId
+  RaftT entry node state result m RequestId
 acceptClientRequest clientId = do
   requests <- view currentClientRequests
   spec <- view specification
-  let serializeResponse = view serializeClientResponse spec
-      sendResponse = spec ^. send
   requestId <- nextRequestId <%= succ
   resultVar <- lift newEmptyMVar
   leaderId <- view configuration <&> nodeId
@@ -308,7 +300,7 @@ acceptClientRequest clientId = do
           -- and the cleanup deletes the data associated with the request ID
           labelThisThread $ "Client request handler for request ID " <> show requestId
           result <- readMVar resultVar
-          sendResponse clientId (serializeResponse (Success leaderId result))
+          (spec ^. Spec.sendClientResponse) clientId (Success leaderId result)
       )
     $ \_ ->
       modifyMVar_ requests $

@@ -44,9 +44,6 @@ import Network.Consensus.Raft.Transformer
     configuration,
     currentLeader,
     dequeueEvent,
-    deserializeClientRequest,
-    deserializeRPC,
-    deserializeRPCResult,
     electionTimer,
     eventQueue,
     heartBeatTimer,
@@ -56,7 +53,9 @@ import Network.Consensus.Raft.Transformer
     nextElectionTimeout,
     nextIndex,
     quorum,
-    receive,
+    receiveClientRequest,
+    receiveRPC,
+    receiveRPCResult,
     role,
     sendAppendEntriesTo,
     sendClientResponse,
@@ -82,16 +81,17 @@ server ::
     MonadAsync m,
     MonadDelay m
   ) =>
-  RaftT entry node state result message m ()
+  RaftT entry node state result m ()
 server = do
   spec <- view specification
   queue <- view eventQueue
   self <- view configuration <&> nodeId
-  _ <-
-    lift $
-      forkIO $
-        let trace' makeTrace = spec ^. tracer $ makeTrace self
-         in receiveMessages spec queue trace'
+
+  let trace' makeTrace = spec ^. tracer $ makeTrace self
+  -- TODO: link these threads to this thread
+  _ <- lift $ forkIO $ receiveRPCs spec queue trace'
+  _ <- lift $ forkIO $ receiveRPCResults spec queue trace'
+  _ <- lift $ forkIO $ receiveClientRequests spec queue trace'
 
   -- There are some initialization steps which require the configuration.
   -- Instead of coupling 'initialRaftState' with the configuration,
@@ -109,29 +109,27 @@ server = do
       _ -> pure ()
     handleEvent ev
   where
-    receiveMessages spec queue trace' = do
-      labelThisThread "receiveMessages"
-      let decodeRPC = spec ^. deserializeRPC
-          decodeRPCResult = spec ^. deserializeRPCResult
-          decodeClientReq = spec ^. deserializeClientRequest
-          recv = spec ^. receive
+    receiveRPCs spec queue trace' = do
+      labelThisThread "receiceRPCs"
+      let recv = spec ^. receiveRPC
       forever $ do
-        message <- recv
-        case decodeClientReq message of
-          Right clientReq -> atomically $ writeTQueue queue (EventIncomingClientRequest clientReq)
-          Left clientReqErrorMessage -> case decodeRPC message of
-            Right rpc -> atomically $ writeTQueue queue (EventRPC rpc)
-            Left rpcErrorMessage -> case decodeRPCResult message of
-              Right result -> atomically $ writeTQueue queue (EventRPCResult result)
-              Left rpcResultErrorMessage ->
-                let errMsg =
-                      "Failure to deserialize. Client request: "
-                        <> clientReqErrorMessage
-                        <> "RPC: "
-                        <> rpcErrorMessage
-                        <> ", RPCResult: "
-                        <> rpcResultErrorMessage
-                 in trace' (`DeserializationError` errMsg)
+        recv >>= \case
+          Left errMsg -> trace' (`DeserializationError` errMsg)
+          Right rpc -> atomically $ writeTQueue queue (EventRPC rpc)
+    receiveRPCResults spec queue trace' = do
+      labelThisThread "receiceRPCResults"
+      let recv = spec ^. receiveRPCResult
+      forever $ do
+        recv >>= \case
+          Left errMsg -> trace' (`DeserializationError` errMsg)
+          Right rpcResult -> atomically $ writeTQueue queue (EventRPCResult rpcResult)
+    receiveClientRequests spec queue trace' = do
+      labelThisThread "receiceClientRequests"
+      let recv = spec ^. receiveClientRequest
+      forever $ do
+        recv >>= \case
+          Left errMsg -> trace' (`DeserializationError` errMsg)
+          Right request -> atomically $ writeTQueue queue (EventIncomingClientRequest request)
 
 handleEvent ::
   ( Ord node,
@@ -141,7 +139,7 @@ handleEvent ::
     MonadAsync m,
     MonadMVar m
   ) =>
-  Event node entry result -> RaftT entry node state result message m ()
+  Event node entry result -> RaftT entry node state result m ()
 handleEvent EventElectionTimeout = do
   r <- use role
   when (r /= Leader) $ do
@@ -165,7 +163,7 @@ handleEvent (EventRPCResult (ClientRequestResult _commandResponse)) = pure () --
 
 handleClientRequest ::
   (Ord node, MonadFork m, MonadMVar m) =>
-  Request node entry -> RaftT entry node state result message m ()
+  Request node entry -> RaftT entry node state result m ()
 handleClientRequest (MkRequest clientId entry) =
   use role >>= \case
     Candidate ->
@@ -194,7 +192,7 @@ handleAppendEntries ::
     MonadDelay m
   ) =>
   AppendEntries node entry ->
-  RaftT entry node state result message m ()
+  RaftT entry node state result m ()
 handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLogTerm newEntries leaderCommitIndex) = do
   termComparison <- handleTermNumber leaderTerm
 
@@ -233,7 +231,7 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
 handleAppendEntriesResult ::
   (Ord node, MonadMVar m) =>
   AppendEntriesResult node result ->
-  RaftT entry node state result message m ()
+  RaftT entry node state result m ()
 handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode responderSuccess responderLogIndex) = do
   termComp <- handleTermNumber responderTerm
   ourRole <- use role
@@ -256,7 +254,7 @@ handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode respo
 -- our term.
 handleTermNumber ::
   (MonadMVar m) =>
-  Term -> RaftT entry node state result message m Ordering
+  Term -> RaftT entry node state result m Ordering
 handleTermNumber newTerm = do
   (currTerm, _newTerm) <- updateTerm (const newTerm)
 
@@ -276,7 +274,7 @@ handleRequestVote ::
   node ->
   LogIndex ->
   Term ->
-  RaftT entry node state result message m ()
+  RaftT entry node state result m ()
 handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLastLogIndexTerm = do
   _ <- handleTermNumber candidateTerm
   ourTerm <- use term
@@ -319,7 +317,7 @@ handleHeartBeat ::
     MonadFork m,
     MonadDelay m
   ) =>
-  Term -> node -> RaftT entry node state result message m ()
+  Term -> node -> RaftT entry node state result m ()
 handleHeartBeat aeTerm senderNodeId =
   handleTermNumber aeTerm >>= \case
     GT -> becomeFollower senderNodeId >> resetElectionTimer
@@ -334,7 +332,7 @@ handleRequestVoteResult ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  node -> Term -> Bool -> RaftT entry node state result message m ()
+  node -> Term -> Bool -> RaftT entry node state result m ()
 handleRequestVoteResult voter voterTerm votedForUs = do
   handleTermNumber voterTerm >>= \case
     LT -> pure () -- Vote request for an old term
@@ -357,7 +355,7 @@ becomeCandidate ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  RaftT entry node state result message m ()
+  RaftT entry node state result m ()
 becomeCandidate = do
   trace BecameCandidate
   role .= Candidate
@@ -399,7 +397,7 @@ checkElection ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  RaftT entry node state result message m ()
+  RaftT entry node state result m ()
 checkElection = do
   numYes <- Set.size <$> use yesVotes
   q <- quorum
@@ -412,7 +410,7 @@ becomeLeader ::
     MonadMask m,
     MonadAsync m
   ) =>
-  RaftT entry node state result message m ()
+  RaftT entry node state result m ()
 becomeLeader = do
   role .= Leader
   (self, peers) <- view configuration <&> (nodeId &&& otherNodes)
@@ -431,7 +429,7 @@ becomeFollower ::
   (MonadMVar m) =>
   -- | Leader node ID
   node ->
-  RaftT entry node state result message m ()
+  RaftT entry node state result m ()
 becomeFollower leaderNodeId = do
   r <- use role
   unless (r == Follower) $ do
@@ -446,7 +444,7 @@ resetHeartBeatTimer ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  RaftT entry node state result message m ()
+  RaftT entry node state result m ()
 resetHeartBeatTimer = do
   config <- view configuration
   view heartBeatTimer >>= lift . resetTimer config.heartBeatTimeout
@@ -458,7 +456,7 @@ resetElectionTimer ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  RaftT entry node state result message m ()
+  RaftT entry node state result m ()
 resetElectionTimer = do
   electionTimeout <- nextElectionTimeout
   view electionTimer >>= lift . resetTimer electionTimeout

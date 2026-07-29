@@ -39,9 +39,9 @@ import Network.Consensus.Raft.Client (Request)
 import Network.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
 import Network.Consensus.Raft.Transformer.Spec (RPC, RPCResult, RaftSpec, RaftState, initialRaftState)
 
-type RaftT entry node state result message m =
+type RaftT entry node state result m =
   RWST
-    (RaftEnv entry node state result message m)
+    (RaftEnv entry node state result m)
     ()
     (RaftState node entry state)
     m
@@ -53,8 +53,8 @@ runRaftT ::
   ) =>
   Config node ->
   state ->
-  RaftSpec entry node state result message m ->
-  RaftT entry node state result message m a ->
+  RaftSpec entry node state result m ->
+  RaftT entry node state result m a ->
   m a
 runRaftT c i s f = do
   queue <- atomically newTQueue
@@ -82,10 +82,10 @@ data Event node entry result
   | EventRPC (RPC node entry)
   | EventRPCResult (RPCResult node result)
 
-data RaftEnv entry node state result message m
+data RaftEnv entry node state result m
   = MkRaftEnv
   { _configuration :: !(Config node),
-    _specification :: !(RaftSpec entry node state result message m),
+    _specification :: !(RaftSpec entry node state result m),
     _eventQueue :: TQueue m (Event node entry result),
     _currentClientRequests :: MVar m (IntMap (MVar m result)),
     -- Handle to a thread which will send a heartbeat timeout

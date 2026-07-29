@@ -14,13 +14,13 @@ import Control.Monad.Class.MonadAsync (concurrently, forConcurrently_, race_)
 import Control.Monad.Class.MonadTimer (threadDelay)
 import Control.Monad.IOSim (IOSim, exploreSimTrace, traceM)
 import Control.Monitor
+import Data.Functor ((<&>))
 import Data.IntMap (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import Data.Sequence (Seq (..))
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Text (Text)
 import qualified Data.Text as Text
 import Network.Consensus.Raft
   ( AppendEntries (..),
@@ -28,12 +28,11 @@ import Network.Consensus.Raft
     Config (..),
     Microseconds (Microseconds),
     RPC (..),
-    RPCResult,
     RaftSpec (..),
     runRaftT,
     server,
   )
-import Network.Consensus.Raft.Client (RaftClientSpec (..), RaftClientT, Request (..), Response, request, runRaftClientT)
+import Network.Consensus.Raft.Client (RaftClientSpec (..), RaftClientT, request, runRaftClientT)
 import Test.Network.Consensus.Raft.Properties (allProperties)
 import Test.Network.Consensus.Scenario (Scenario, checkScenario, commandReceived, commitIndexIncreased, leaderElected, logEntryApplied, rpcReceived)
 import Test.Tasty (TestTree, testGroup)
@@ -193,7 +192,7 @@ type State = ()
 
 data Harness s
   = MkHarness
-  { serverSpecifications :: IntMap (RaftSpec Entry Node State Result TestMessage (IOSim s)),
+  { serverSpecifications :: IntMap (RaftSpec Entry Node State Result (IOSim s)),
     runClientAction :: forall a. RaftClientT Entry Node Result (IOSim s) a -> IOSim s a
   }
 
@@ -201,16 +200,19 @@ testHarness ::
   Set Node ->
   IOSim s (Harness s)
 testHarness serverNodes = do
-  mailbox <- newTVarIO mempty
+  rpcMailbox <- newTVarIO mempty
+  rpcResultsMailbox <- newTVarIO mempty
+  requestsMailbox <- newTVarIO mempty
+  responsesMailbox <- newTVarIO mempty
   pure $
     MkHarness
-      { serverSpecifications = IntMap.fromList [(node, serverSpec mailbox node) | node <- Set.toList serverNodes],
-        runClientAction = \action -> runRaftClientT action clientNode (clientSpec mailbox)
+      { serverSpecifications = IntMap.fromList [(node, serverSpec rpcMailbox rpcResultsMailbox requestsMailbox responsesMailbox node) | node <- Set.toList serverNodes],
+        runClientAction = \action -> runRaftClientT action clientNode (clientSpec requestsMailbox responsesMailbox)
       }
   where
     clientNode = maybe 0 succ (Set.lookupMax serverNodes)
 
-    serverSpec mailbox node =
+    serverSpec rpcMailbox rpcResultsMailbox requestsMailbox responsesMailbox node =
       MkRaftSpec
         { _readLogEntry = \_ -> pure Nothing,
           _writeLogEntry = \_ _ _ -> pure (),
@@ -219,24 +221,20 @@ testHarness serverNodes = do
           _readVotedFor = pure Nothing,
           _voteFor = \_ -> pure (),
           _applyLogEntry = \_ _ -> (() :: State, () :: Result),
-          _serializeRPC = TestRPC,
-          _serializeRPCResult = TestRPCResult,
-          _serializeClientResponse = TestClientResponse,
-          _deserializeRPC = fromRPC,
-          _deserializeRPCResult = fromRPCResult,
-          _deserializeClientRequest = fromClientReq,
-          _send = send mailbox,
-          _receive = receive mailbox node,
+          _sendRPC = send rpcMailbox,
+          _sendRPCResult = send rpcResultsMailbox,
+          _sendClientResponse = send responsesMailbox,
+          _receiveRPC = receive rpcMailbox node <&> Right,
+          _receiveRPCResult = receive rpcResultsMailbox node <&> Right,
+          _receiveClientRequest = receive requestsMailbox node <&> Right,
           _tracer = traceM
         }
 
-    clientSpec mailbox =
+    clientSpec requestsMailbox responsesMailbox =
       MkRaftClientSpec
-        { sendRequest = \n req -> send mailbox n (TestClientRequest req),
+        { sendRequest = send requestsMailbox,
           receiveResponse =
-            receive mailbox clientNode >>= \case
-              TestClientResponse resp -> pure $ Right resp
-              _ -> pure $ Left "Unexpected message type"
+            receive responsesMailbox clientNode <&> Right
         }
 
     send mailbox node message =
@@ -250,22 +248,3 @@ testHarness serverNodes = do
         Just (nextMessage :<| rest) ->
           writeTVar mailbox (IntMap.insert node rest mail)
             >> pure nextMessage
-
-data TestMessage
-  = TestClientRequest (Request Node ())
-  | TestClientResponse (Response Node ())
-  | TestRPC (RPC Node ())
-  | TestRPCResult (RPCResult Node ())
-  deriving (Show)
-
-fromClientReq :: TestMessage -> Either Text (Request Node ())
-fromClientReq (TestClientRequest req) = Right req
-fromClientReq _ = Left (Text.pack "unexpected failure")
-
-fromRPC :: TestMessage -> Either Text (RPC Node ())
-fromRPC (TestRPC rpc) = Right rpc
-fromRPC _ = Left (Text.pack "unexpected failure")
-
-fromRPCResult :: TestMessage -> Either Text (RPCResult Node ())
-fromRPCResult (TestRPCResult result) = Right result
-fromRPCResult _ = Left (Text.pack "Unexpected failure")
