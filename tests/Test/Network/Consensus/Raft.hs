@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
@@ -9,32 +11,32 @@
 
 module Test.Network.Consensus.Raft (tests) where
 
+import Control.Concurrent.Class.MonadMVar (modifyMVar_, newMVar)
 import Control.Concurrent.Class.MonadSTM (atomically, modifyTVar', newTVarIO, readTVar, retry, writeTVar)
+import Control.Monad (forever, when)
 import Control.Monad.Class.MonadAsync (concurrently, forConcurrently_, race_)
 import Control.Monad.Class.MonadTimer (threadDelay)
 import Control.Monad.IOSim (IOSim, exploreSimTrace, traceM)
-import Control.Monitor
+import qualified Data.Foldable as Foldable
 import Data.Functor ((<&>))
 import Data.IntMap (IntMap)
 import qualified Data.IntMap.Strict as IntMap
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq (..))
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
-import qualified Data.Text as Text
 import Network.Consensus.Raft
-  ( AppendEntries (..),
-    Command (..),
-    Config (..),
+  ( Config (..),
     Microseconds (Microseconds),
-    RPC (..),
     RaftSpec (..),
     runRaftT,
     server,
   )
 import Network.Consensus.Raft.Client (RaftClientSpec (..), RaftClientT, request, runRaftClientT)
 import Test.Network.Consensus.Raft.Properties (allProperties)
-import Test.Network.Consensus.Scenario (Scenario, checkScenario, commandReceived, commitIndexIncreased, leaderElected, logEntryApplied, rpcReceived)
+import Test.Network.Consensus.Scenario (checkScenario)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck
 
@@ -44,14 +46,13 @@ tests =
     "Raft"
     [ testGroup
         "Property tests"
-        [ testClusterElections,
-          testClusterProcessesCommands
+        [ testCluster
         ]
     ]
 
-testClusterElections :: TestTree
-testClusterElections =
-  testProperty "Cluster elects leader" $
+testCluster :: TestTree
+testCluster =
+  testProperty "Cluster properties" $
     property $
       forAll (elements [1 .. 5]) $ \clusterSize ->
         -- The following timings ensure that once election happens,
@@ -61,14 +62,15 @@ testClusterElections =
           forAll (chooseBoundedIntegral (1_000, 200_000)) $ \heartbeatTimeout ->
             forAll (chooseBoundedIntegral (heartbeatTimeout `div` 2, 2 * heartbeatTimeout)) $ \electionTimeoutLowerBound ->
               forAll (chooseBoundedIntegral (electionTimeoutLowerBound `div` 2, 2 * electionTimeoutLowerBound)) $ \electionTimeoutUpperBound ->
-                exploreSimTrace
-                  id
-                  (scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound (Set.fromList seeds))
-                  ( \_ trace ->
-                      checkScenario
-                        (allProperties @Entry @Result @Node)
-                        trace
-                  )
+                forAll (vectorOf 1000 (arbitrary @Command)) $ \commands ->
+                  exploreSimTrace
+                    id
+                    (scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound (Set.fromList seeds) commands)
+                    ( \_ trace ->
+                        checkScenario
+                          (allProperties @Command @Result @Node)
+                          trace
+                    )
   where
     mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds =
       let nodes = Set.fromList [0 .. length seeds - 1]
@@ -85,115 +87,38 @@ testClusterElections =
             | (ix, seed) <- zip [0 ..] (Set.toList seeds)
             ]
 
-    scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds = do
+    runServers configs specs =
+      forConcurrently_ (IntMap.toList specs) $ \(ix, spec) ->
+        runRaftT (configs IntMap.! ix) mempty spec server
+
+    runClient runRequest expectedState = forever $ do
+      threadDelay 10_000
+      modifyMVar_ expectedState $ \case
+        [] -> pure [] -- simulation exhausted
+        ((command, state, expectedResult) : rest) -> do
+          runRequest (request 0 command) >>= \case
+            -- Command needs to be re-tried
+            Left _ -> pure $ (command, state, expectedResult) : rest
+            Right actualResult -> do
+              when (actualResult /= expectedResult) (fail "Unexpected state")
+              pure rest
+
+    scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds commands = do
       let configs = mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds
-      MkHarness serverSpecs _clientSpec <- testHarness (Set.fromList $ IntMap.keys configs)
+          stateMachineExpectations = expectedResults commands
+      MkHarness serverSpecs clientSpec <- testHarness (Set.fromList $ IntMap.keys configs)
+      stateMachineVar <- newMVar stateMachineExpectations
       -- The scenario must give enough time for potentially multiple elections to be triggered
-      race_ (threadDelay (5 * fromIntegral electionTimeoutUpperBound)) $ do
-        forConcurrently_ (IntMap.toList serverSpecs) $ \(ix, spec) ->
-          runRaftT (configs IntMap.! ix) () spec server
-
-testClusterProcessesCommands :: TestTree
-testClusterProcessesCommands =
-  testProperty "Cluster processes commands" $
-    property $
-      forAll (elements [1 .. 5]) $ \clusterSize ->
-        -- The following timings ensure that once election happens,
-        -- the heartbeat will be sent early enough to ensure the leader
-        -- remains a leader.
-        -- TODO: play with timing to allow the possibility for an election to be triggered.
-        --       How does one formulate a good property to check in this case?
-        forAll (vectorOf clusterSize (chooseBoundedIntegral (0, 1_000_000))) $ \seeds ->
-          forAll (chooseBoundedIntegral (1_000, 200_000)) $ \heartbeatTimeout ->
-            forAll (chooseBoundedIntegral (heartbeatTimeout, 2 * heartbeatTimeout)) $ \electionTimeoutLowerBound ->
-              forAll (chooseBoundedIntegral (electionTimeoutLowerBound, 2 * electionTimeoutLowerBound)) $ \electionTimeoutUpperBound ->
-                exploreSimTrace
-                  id
-                  (scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound (Set.fromList seeds))
-                  (\_ trace -> checkScenario (expectation (length seeds)) trace)
-  where
-    mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds =
-      let nodes = Set.fromList [0 .. length seeds - 1]
-       in IntMap.fromList
-            [ ( ix,
-                MkConfig
-                  { nodeId = ix,
-                    otherNodes = nodes `Set.difference` Set.singleton ix,
-                    electionTimeoutRange = (Microseconds electionTimeoutLowerBound, Microseconds electionTimeoutUpperBound),
-                    heartBeatTimeout = Microseconds heartbeatTimeout,
-                    randomSeed = seed
-                  }
-              )
-            | (ix, seed) <- zip [0 ..] (Set.toList seeds)
-            ]
-
-    expectation :: Int -> Scenario Entry Result Node
-    expectation numNodes = do
-      (electionTerm, leaderNode) <- eventually leaderElected <?> "Leader elected"
-      (_, commandNode, MkCommand command _) <- eventually commandReceived <?> "Command received"
-      -- The command should end up at the leader
-      assert
-        ( "Unexpected command node: "
-            <> Text.show commandNode
-            <> " instead of "
-            <> Text.show leaderNode
-        )
-        (leaderNode == commandNode)
-
-      (appendEntries, (_, _, commitIndex)) <-
-        collectUntil
-          ( do
-              (_, _, AE AppendEntries {}) <- rpcReceived
-              pure ()
-          )
-          commitIndexIncreased
-          <?> "Enough entries appended until leader's commit index increased"
-
-      let quorumSize = numNodes `div` 2 + 1
-      assert "Quorum not reached" (length appendEntries >= pred quorumSize) -- 'pred' because we don't count the leader
-      assert "Unexpected commit index" (commitIndex == 1)
-
-      (appliedTerm, appliedNode, entry) <- eventually logEntryApplied <?> "Log entry applied"
-      assert mempty (appliedTerm == electionTerm)
-      assert mempty (appliedNode == leaderNode)
-      assert mempty (command == entry)
-
-    scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds = do
-      let configs = mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds
-      MkHarness serverSpecs runClient <- testHarness (Set.fromList $ IntMap.keys configs)
-      -- The scenario must give enough time for an election to be triggered,
-      -- hence why we race against 2 * electionTimeoutUpperBound
-      --
-      -- Then, we send a single client request, from a fictitious node (we don't care about the
-      -- client in this particular test)
-      race_ (threadDelay (3 * fromIntegral electionTimeoutUpperBound)) $
+      race_ (threadDelay (5 * fromIntegral electionTimeoutUpperBound)) $
         concurrently
-          -- Normal cluster
-          ( forConcurrently_ (IntMap.toList serverSpecs) $ \(ix, spec) ->
-              runRaftT (configs IntMap.! ix) () spec server
-          )
-          -- Client request.
-          -- If the cluster is in an election, the response will be "Left ...",
-          -- and so we retry a little bit later.
-          ( let f =
-                  runClient (request 0 ()) >>= \case
-                    Left _ -> threadDelay (fromIntegral heartbeatTimeout) >> f
-                    Right r -> pure $ Right r
-             in f
-          )
-
-type Node = Int
-
-type Entry = ()
-
-type Result = ()
-
-type State = ()
+          (runServers configs serverSpecs)
+          (runClient clientSpec stateMachineVar)
 
 data Harness s
   = MkHarness
-  { serverSpecifications :: IntMap (RaftSpec Entry Node State Result (IOSim s)),
-    runClientAction :: forall a. RaftClientT Entry Node Result (IOSim s) a -> IOSim s a
+  { serverSpecifications :: IntMap (RaftSpec Command Node State Result (IOSim s)),
+    -- TODO: have multiple concurrent clients
+    runClientAction :: forall a. RaftClientT Command Node Result (IOSim s) a -> IOSim s a
   }
 
 testHarness ::
@@ -220,7 +145,7 @@ testHarness serverNodes = do
           _writeTerm = \_ -> pure (),
           _readVotedFor = pure Nothing,
           _voteFor = \_ -> pure (),
-          _applyLogEntry = \_ _ -> (() :: State, () :: Result),
+          _applyLogEntry = step,
           _sendRPC = send rpcMailbox,
           _sendRPCResult = send rpcResultsMailbox,
           _sendClientResponse = send responsesMailbox,
@@ -248,3 +173,53 @@ testHarness serverNodes = do
         Just (nextMessage :<| rest) ->
           writeTVar mailbox (IntMap.insert node rest mail)
             >> pure nextMessage
+
+-- Simple key-value store
+
+type Node = Int
+
+type State = Map Char Int
+
+data Command
+  = Insert Char Int
+  | Delete Char
+  | Get Char
+  deriving (Eq, Ord, Show)
+
+instance Arbitrary Command where
+  arbitrary =
+    let possibleKeys = ['a', 'b', 'c']
+     in oneof
+          [ Insert <$> elements possibleKeys <*> chooseInt (0, 10),
+            Delete <$> elements possibleKeys,
+            Get <$> elements possibleKeys
+          ]
+
+data Result
+  = Value Int
+  | Ok
+  | Err
+  deriving (Eq, Show)
+
+step :: State -> Command -> (State, Result)
+step state (Insert k v) = (Map.insert k v state, Ok)
+step state (Delete k) = (Map.delete k state, Ok)
+step state (Get k) = case Map.lookup k state of
+  Nothing -> (state, Err)
+  Just v -> (state, Value v)
+
+expectedResults :: [Command] -> [(Command, State, Result)]
+expectedResults [] = []
+expectedResults allCommands@(cmd : cmds) =
+  zipWith (\c (s, r) -> (c, s, r)) allCommands $
+    reverse $
+      snd $
+        -- Using foldl' qualified to prevent
+        -- warning of foldl' already being in prelude
+        -- since GHC 9.10
+        Foldable.foldl'
+          ( \(state, results) c ->
+              let (!newState, !result) = step state c in (newState, (state, result) : results)
+          )
+          (let (state, result) = step mempty cmd in (state, [(state, result)]))
+          cmds

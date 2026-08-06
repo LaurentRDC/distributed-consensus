@@ -29,12 +29,11 @@ import Control.Monad.Class.MonadAsync (MonadAsync, forConcurrently_, race_)
 import Control.Monad.Class.MonadFork (MonadFork, myThreadId, throwTo)
 import Control.Monad.Class.MonadThrow (MonadThrow)
 import Control.Monad.Class.MonadTimer (MonadDelay (..))
-import Control.Monad.IOSim (SimEvent, SimEventType (EventLog), Trace, selectTraceEvents')
+import Control.Monad.IOSim (SimEvent, SimEventType (EventLog), SimResult, Trace, selectTraceEvents)
 import Control.Monitor
 import Data.Dynamic (Typeable, fromDynamic)
 import qualified Data.Text as Text
 import Data.Word (Word64)
-import qualified Debug.Trace as Debug
 import Network.Consensus.Raft (Command, CommandResponse, LogIndex, RPC (..), RPCResult, RaftTrace (..), Term)
 import System.Random.Stateful (mkStdGen64, uniformR, uniformShuffleList)
 import Test.Tasty.QuickCheck
@@ -52,7 +51,7 @@ checkScenario ::
     Typeable node
   ) =>
   Scenario entry result node ->
-  Trace a SimEvent ->
+  Trace (SimResult a) SimEvent ->
   Property
 checkScenario scenario trace' =
   let evs = raftTrace trace'
@@ -88,16 +87,14 @@ faultInjector f initials faultProbability seed = do
       modifyMVarMasked_ threadIds (pure . (tid :))
       f x
   where
-    faultProbabilityClamped = Debug.traceShowId $ max (min 1 faultProbability) 0
+    faultProbabilityClamped = max (min 1 faultProbability) 0
     faultInjectorThread threadIds gen = do
       threadDelay 10_000
       let (num, newGen) = uniformR @Double (0.0, 1.0) gen
-      Debug.traceShowM num
       if num > faultProbabilityClamped
         then faultInjectorThread threadIds newGen
         else do
           threads <- readMVar threadIds
-          Debug.traceShowM threads
           let (shuffled, newGen') = uniformShuffleList threads newGen
           case shuffled of
             [] -> pure ()
@@ -106,9 +103,9 @@ faultInjector f initials faultProbability seed = do
 
 raftTrace ::
   (Typeable entry, Typeable result, Typeable node) =>
-  Trace a SimEvent -> [RaftTrace entry result node]
+  Trace (SimResult a) SimEvent -> [RaftTrace entry result node]
 raftTrace =
-  selectTraceEvents'
+  selectTraceEvents
     ( \_ ev -> case ev of
         EventLog dyn -> fromDynamic dyn
         _ -> Nothing -- internal io-sim event

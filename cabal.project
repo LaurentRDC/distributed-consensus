@@ -1,8 +1,5 @@
 packages: hs-raft.cabal
 
--- Temporary until microlens-platform supports GHC 9.14
-allow-newer: template-haskell
-
 program-options
     ghc-options: +RTS -A64m -RTS
 
