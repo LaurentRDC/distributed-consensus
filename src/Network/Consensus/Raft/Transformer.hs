@@ -245,6 +245,7 @@ applyLogEntries = do
           Just r -> trace (\t n -> CommandResultResponded t n r)
 
       lastApplied .= currentCommitIndex
+      trace (\n t -> LastAppliedIndexIncreasedTo n t currentCommitIndex)
 
 nextElectionTimeout :: (Monad m) => RaftT entry node state result m Microseconds
 nextElectionTimeout = do

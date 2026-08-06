@@ -9,9 +9,9 @@ module Network.Consensus.Raft.Algorithm (server) where
 import Control.Arrow ((&&&))
 import Control.Concurrent.Class.MonadMVar (MonadMVar)
 import Control.Concurrent.Class.MonadSTM (atomically, writeTQueue)
-import Control.Monad (forever, unless, when)
-import Control.Monad.Class.MonadAsync (MonadAsync)
-import Control.Monad.Class.MonadFork (MonadFork, forkIO, labelThisThread)
+import Control.Monad (forever, unless, when, (<=<))
+import Control.Monad.Class.MonadAsync (MonadAsync, async, link)
+import Control.Monad.Class.MonadFork (MonadFork, labelThisThread)
 import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay)
 import Control.Monad.Trans.Class (lift)
@@ -88,10 +88,9 @@ server = do
   self <- view configuration <&> nodeId
 
   let trace' makeTrace = spec ^. tracer $ makeTrace self
-  -- TODO: link these threads to this thread
-  _ <- lift $ forkIO $ receiveRPCs spec queue trace'
-  _ <- lift $ forkIO $ receiveRPCResults spec queue trace'
-  _ <- lift $ forkIO $ receiveClientRequests spec queue trace'
+  _ <- lift $ link <=< async $ receiveRPCs spec queue trace'
+  _ <- lift $ link <=< async $ receiveRPCResults spec queue trace'
+  _ <- lift $ link <=< async $ receiveClientRequests spec queue trace'
 
   -- There are some initialization steps which require the configuration.
   -- Instead of coupling 'initialRaftState' with the configuration,
@@ -103,10 +102,7 @@ server = do
   resetElectionTimer
   forever $ do
     ev <- dequeueEvent
-    case ev of
-      EventRPC rpc -> trace (\t n -> RPCReceived t n rpc)
-      EventRPCResult result -> trace (\t n -> RPCResultReceived t n result)
-      _ -> pure ()
+    trace (\t n -> EventReceived t n ev)
     handleEvent ev
   where
     receiveRPCs spec queue trace' = do

@@ -1,3 +1,4 @@
+{-# LANGUAGE ExplicitForAll #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -9,6 +10,7 @@ module Test.Network.Consensus.Raft.Properties
     singleVoteCastPerTermProperty,
     monotonicallyIncreasingTermProperty,
     allAcceptedCommandReceiveResponseProperty,
+    indexRelationshipProperty,
   )
 where
 
@@ -19,18 +21,22 @@ import qualified Data.Set as Set
 import Network.Consensus.Raft
   ( Command (..),
     CommandResponse (..),
+    LogIndex,
     RaftTrace (..),
   )
 import Test.Network.Consensus.Scenario (Scenario, commandReceived, commandResponded, leaderElected, votedFor)
 
-allProperties :: (Ord node) => Scenario entry result node
+-- It's still not clear to me why, but without the explicit forall here,
+-- RaftTrace events don't get picked up
+allProperties :: forall entry result node. (Ord node) => Scenario entry result node
 allProperties =
   void $
     allOf
       [ singleLeaderPerTermProperty,
         singleVoteCastPerTermProperty,
         monotonicallyIncreasingTermProperty,
-        allAcceptedCommandReceiveResponseProperty
+        allAcceptedCommandReceiveResponseProperty,
+        indexRelationshipProperty
       ]
 
 -- | Ensure that in each term where a leader is elected, no other leader
@@ -89,3 +95,53 @@ allAcceptedCommandReceiveResponseProperty = go
             commandResponded >>= \(_, _, MkCommandResponse _result' reqId') ->
               predicate $ \_ -> unless (reqId == reqId') Nothing
        in eventually thisCommandResponded
+
+data NodeIndexes
+  = MkNodeIndexes
+      -- | Last applied index
+      !LogIndex
+      -- | Commit index
+      !LogIndex
+      -- | Log length
+      !Int
+
+-- | Ensures that the following relationship holds for each node individually:
+--
+--    appliex index  <=  commit index  <=  log length
+indexRelationshipProperty :: (Ord node) => Scenario entry result node
+indexRelationshipProperty = go mempty
+  where
+    checkState node acc =
+      case Map.lookup node acc of
+        Nothing -> assert "Incomplete state" False
+        Just (MkNodeIndexes lastApplied committed _logLength) -> do
+          assert "last_applied_index <= commit_index violated" (lastApplied <= committed)
+    -- assert "" (committed <= fromIntegral logLength)
+    go acc =
+      step
+        ()
+        ( \case
+            LastAppliedIndexIncreasedTo _term node lastApplied -> do
+              let newAcc =
+                    Map.alter
+                      ( \case
+                          Nothing -> Just (MkNodeIndexes lastApplied 0 0)
+                          Just (MkNodeIndexes _ y z) -> Just (MkNodeIndexes lastApplied y z)
+                      )
+                      node
+                      acc
+              checkState node newAcc
+              go newAcc
+            CommitIndexIncreasedTo _term node commitIndex -> do
+              let newAcc =
+                    Map.alter
+                      ( \case
+                          Nothing -> Just (MkNodeIndexes 0 commitIndex 0)
+                          Just (MkNodeIndexes x _ z) -> Just (MkNodeIndexes x commitIndex z)
+                      )
+                      node
+                      acc
+              checkState node newAcc
+              go newAcc
+            _ -> go acc
+        )

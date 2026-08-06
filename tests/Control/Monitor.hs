@@ -15,6 +15,8 @@ module Control.Monitor
     -- ** Defining 'Monitor's
     label,
     (<?>),
+    nonEmptyStep,
+    step,
 
     -- * Predicates
     module Control.Monitor.Predicate,
@@ -79,6 +81,13 @@ nonEmptyStep ::
   (e -> Monitor e a) ->
   Monitor e a
 nonEmptyStep = Step (Left (oneReason unexpectedEnd))
+
+step ::
+  a ->
+  (e -> Monitor e a) ->
+  Monitor e a
+step ifEmpty =
+  Step (Right ifEmpty)
 
 label :: Text -> Monitor e a -> Monitor e a
 label l = mapReason (\r -> r {reasonLabels = l : reasonLabels r})

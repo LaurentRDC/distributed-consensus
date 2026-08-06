@@ -34,7 +34,7 @@ import Control.Monitor
 import Data.Dynamic (Typeable, fromDynamic)
 import qualified Data.Text as Text
 import Data.Word (Word64)
-import Network.Consensus.Raft (Command, CommandResponse, LogIndex, RPC (..), RPCResult, RaftTrace (..), Term)
+import Network.Consensus.Raft (Command, CommandResponse, Event (..), LogIndex, RPC (..), RPCResult, RaftTrace (..), Term)
 import System.Random.Stateful (mkStdGen64, uniformR, uniformShuffleList)
 import Test.Tasty.QuickCheck
 
@@ -56,8 +56,10 @@ checkScenario ::
 checkScenario scenario trace' =
   let evs = raftTrace trace'
    in case runMonitor scenario evs of
-        Left errs -> counterexample (Text.unpack $ ppReasonsWithTrace Text.show 3 (zip [0 ..] evs) errs) False
-        Right _ -> True === True
+        (Left errs) -> counterexample (Text.unpack $ ppReasonsWithTrace Text.show 3 (zip [0 ..] evs) errs) False
+        -- There have been instances in the past of tests trivially passing
+        -- because no events were emitted!
+        (Right _) -> counterexample "No events emitted" (not (null evs))
 
 data TestFault = TestFault
   deriving (Show)
@@ -133,12 +135,12 @@ commandResponded = predicate $ \case
 
 rpcReceived :: Predicate (RaftTrace entry result node) (Term, node, RPC node entry)
 rpcReceived = predicate $ \case
-  (RPCReceived t n rpc) -> Just (t, n, rpc)
+  (EventReceived t n (EventRPC rpc)) -> Just (t, n, rpc)
   _ -> Nothing
 
 rpcResultReceived :: Predicate (RaftTrace entry result node) (Term, node, RPCResult node result)
 rpcResultReceived = predicate $ \case
-  (RPCResultReceived t n resp) -> Just (t, n, resp)
+  (EventReceived t n (EventRPCResult resp)) -> Just (t, n, resp)
   _ -> Nothing
 
 commitIndexIncreased :: Predicate (RaftTrace entry result node) (Term, node, LogIndex)

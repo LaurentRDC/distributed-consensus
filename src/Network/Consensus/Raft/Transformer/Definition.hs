@@ -12,9 +12,6 @@ module Network.Consensus.Raft.Transformer.Definition
     heartBeatTimer,
     electionTimer,
 
-    -- * Events
-    Event (..),
-
     -- * Generic helpers
     ask,
     asks,
@@ -35,9 +32,8 @@ import Data.IntMap.Strict (IntMap)
 import Data.Set (Set)
 import Data.Word (Word64)
 import Lens.Micro.Platform (makeLenses)
-import Network.Consensus.Raft.Client (Request)
 import Network.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
-import Network.Consensus.Raft.Transformer.Spec (RPC, RPCResult, RaftSpec, RaftState, initialRaftState)
+import Network.Consensus.Raft.Transformer.Spec (Event (..), RaftSpec, RaftState, initialRaftState)
 
 type RaftT entry node state result m =
   RWST
@@ -74,13 +70,6 @@ runRaftT c i s f = do
           }
       )
       (initialRaftState (randomSeed c) i)
-
-data Event node entry result
-  = EventElectionTimeout
-  | EventHeartBeatTimeout
-  | EventIncomingClientRequest (Request node entry)
-  | EventRPC (RPC node entry)
-  | EventRPCResult (RPCResult node result)
 
 data RaftEnv entry node state result m
   = MkRaftEnv

@@ -45,6 +45,7 @@ module Network.Consensus.Raft.Transformer.Spec
     CommandResponse (..),
     AppendEntries (..),
     AppendEntriesResult (..),
+    Event (..),
     RPC (..),
     RPCResult (..),
     Role (..),
@@ -146,6 +147,14 @@ data RPCResult node result
       Bool
   deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
 
+data Event node entry result
+  = EventElectionTimeout
+  | EventHeartBeatTimeout
+  | EventIncomingClientRequest (Request node entry)
+  | EventRPC (RPC node entry)
+  | EventRPCResult (RPCResult node result)
+  deriving (Eq, Show)
+
 data RaftTrace entry result node
   = LeaderElected Term node
   | VotedFor
@@ -182,8 +191,7 @@ data RaftTrace entry result node
       node
   | BecameCandidate Term node
   | BecameFollower Term node
-  | RPCReceived Term node (RPC node entry)
-  | RPCResultReceived Term node (RPCResult node result)
+  | EventReceived Term node (Event node entry result)
   | SplitElection Term node
   | ElectionTriggered Term node
   | DeserializationError node Text
@@ -193,7 +201,8 @@ data RaftTrace entry result node
   | CommandResultResponded Term node (CommandResponse node result)
   | CommitIndexIncreasedTo Term node LogIndex
   | LogEntryApplied Term node entry
-  deriving (Eq, Ord, Show)
+  | LastAppliedIndexIncreasedTo Term node LogIndex
+  deriving (Eq, Show)
 
 data RaftSpec entry node state result m = MkRaftSpec
   { _readLogEntry :: LogIndex -> m (Maybe entry),

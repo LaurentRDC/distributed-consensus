@@ -1,5 +1,4 @@
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
@@ -11,9 +10,8 @@
 
 module Test.Network.Consensus.Raft (tests) where
 
-import Control.Concurrent.Class.MonadMVar (modifyMVar_, newMVar)
 import Control.Concurrent.Class.MonadSTM (atomically, modifyTVar', newTVarIO, readTVar, retry, writeTVar)
-import Control.Monad (forever, when)
+import Control.Monad (when)
 import Control.Monad.Class.MonadAsync (concurrently, forConcurrently_, race_)
 import Control.Monad.Class.MonadTimer (threadDelay)
 import Control.Monad.IOSim (IOSim, exploreSimTrace, traceM)
@@ -63,14 +61,23 @@ testCluster =
             forAll (chooseBoundedIntegral (heartbeatTimeout `div` 2, 2 * heartbeatTimeout)) $ \electionTimeoutLowerBound ->
               forAll (chooseBoundedIntegral (electionTimeoutLowerBound `div` 2, 2 * electionTimeoutLowerBound)) $ \electionTimeoutUpperBound ->
                 forAll (vectorOf 1000 (arbitrary @Command)) $ \commands ->
-                  exploreSimTrace
-                    id
-                    (scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound (Set.fromList seeds) commands)
-                    ( \_ trace ->
-                        checkScenario
-                          (allProperties @Command @Result @Node)
-                          trace
+                  counterexample
+                    ( unlines
+                        [ "cluster size =" <> show clusterSize,
+                          "seeds = " <> show seeds,
+                          "heartbeat timeout = " <> show heartbeatTimeout,
+                          "election timeout lower bound = " <> show electionTimeoutLowerBound,
+                          "election timeout upper bound = " <> show electionTimeoutUpperBound
+                        ]
                     )
+                    $ exploreSimTrace
+                      id
+                      (scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound (Set.fromList seeds) commands)
+                      ( \_ trace ->
+                          checkScenario
+                            (allProperties @Command @Result @Node)
+                            trace
+                      )
   where
     mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds =
       let nodes = Set.fromList [0 .. length seeds - 1]
@@ -91,28 +98,25 @@ testCluster =
       forConcurrently_ (IntMap.toList specs) $ \(ix, spec) ->
         runRaftT (configs IntMap.! ix) mempty spec server
 
-    runClient runRequest expectedState = forever $ do
+    runClient _ [] = pure ()
+    runClient runRequest ((command, state, expectedResult) : rest) = do
       threadDelay 10_000
-      modifyMVar_ expectedState $ \case
-        [] -> pure [] -- simulation exhausted
-        ((command, state, expectedResult) : rest) -> do
-          runRequest (request 0 command) >>= \case
-            -- Command needs to be re-tried
-            Left _ -> pure $ (command, state, expectedResult) : rest
-            Right actualResult -> do
-              when (actualResult /= expectedResult) (fail "Unexpected state")
-              pure rest
+      runRequest (request 0 command) >>= \case
+        -- Command needs to be re-tried
+        Left _ -> runClient runRequest ((command, state, expectedResult) : rest)
+        Right actualResult -> do
+          when (actualResult /= expectedResult) (fail "Unexpected state")
+          runClient runRequest rest
 
     scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds commands = do
       let configs = mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds
           stateMachineExpectations = expectedResults commands
       MkHarness serverSpecs clientSpec <- testHarness (Set.fromList $ IntMap.keys configs)
-      stateMachineVar <- newMVar stateMachineExpectations
       -- The scenario must give enough time for potentially multiple elections to be triggered
       race_ (threadDelay (5 * fromIntegral electionTimeoutUpperBound)) $
         concurrently
           (runServers configs serverSpecs)
-          (runClient clientSpec stateMachineVar)
+          (runClient clientSpec stateMachineExpectations)
 
 data Harness s
   = MkHarness
