@@ -3,6 +3,9 @@ packages: hs-raft.cabal
 program-options
     ghc-options: +RTS -A64m -RTS
 
+jobs: $ncpus
+semaphore: True
+
 test-show-details: streaming
 tests: True
 benchmarks: True

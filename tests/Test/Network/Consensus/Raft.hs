@@ -12,7 +12,7 @@ module Test.Network.Consensus.Raft (tests) where
 
 import Control.Concurrent.Class.MonadSTM (atomically, modifyTVar', newTVarIO, readTVar, retry, writeTVar)
 import Control.Monad (when)
-import Control.Monad.Class.MonadAsync (concurrently, forConcurrently_, race_)
+import Control.Monad.Class.MonadAsync (forConcurrently_, withAsync)
 import Control.Monad.Class.MonadTimer (threadDelay)
 import Control.Monad.IOSim (IOSim, exploreSimTrace, traceM)
 import qualified Data.Foldable as Foldable
@@ -58,9 +58,12 @@ testCluster =
         -- remains a leader.
         forAll (vectorOf clusterSize (chooseBoundedIntegral (0, 1_000_000))) $ \seeds ->
           forAll (chooseBoundedIntegral (1_000, 200_000)) $ \heartbeatTimeout ->
-            forAll (chooseBoundedIntegral (heartbeatTimeout `div` 2, 2 * heartbeatTimeout)) $ \electionTimeoutLowerBound ->
-              forAll (chooseBoundedIntegral (electionTimeoutLowerBound `div` 2, 2 * electionTimeoutLowerBound)) $ \electionTimeoutUpperBound ->
-                forAll (vectorOf 1000 (arbitrary @Command)) $ \commands ->
+            -- Making the lower election timeout possibly shorter than the heartbeat timeout
+            -- allows to have terms with no leaders elected
+            forAll (chooseBoundedIntegral (round $ (0.9 :: Double) * fromIntegral heartbeatTimeout, heartbeatTimeout * 10)) $ \electionTimeoutLowerBound ->
+              forAll (chooseBoundedIntegral (electionTimeoutLowerBound, 2 * electionTimeoutLowerBound)) $ \electionTimeoutUpperBound ->
+                -- Number of commands tuned for the test suite to take a few seconds.
+                forAll (vectorOf 30 (arbitrary @Command)) $ \commands ->
                   counterexample
                     ( unlines
                         [ "cluster size =" <> show clusterSize,
@@ -112,11 +115,9 @@ testCluster =
       let configs = mkConfigs heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound seeds
           stateMachineExpectations = expectedResults commands
       MkHarness serverSpecs clientSpec <- testHarness (Set.fromList $ IntMap.keys configs)
-      -- The scenario must give enough time for potentially multiple elections to be triggered
-      race_ (threadDelay (5 * fromIntegral electionTimeoutUpperBound)) $
-        concurrently
-          (runServers configs serverSpecs)
-          (runClient clientSpec stateMachineExpectations)
+      -- Run servers until the clients are done interacting
+      withAsync (runServers configs serverSpecs) $ \_ ->
+        runClient clientSpec stateMachineExpectations
 
 data Harness s
   = MkHarness
