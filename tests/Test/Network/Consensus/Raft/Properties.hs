@@ -114,9 +114,9 @@ indexRelationshipProperty = go mempty
     checkState node acc =
       case Map.lookup node acc of
         Nothing -> assert "Incomplete state" False
-        Just (MkNodeIndexes lastApplied committed _logLength) -> do
+        Just (MkNodeIndexes lastApplied committed logLength) -> do
           assert "last_applied_index <= commit_index violated" (lastApplied <= committed)
-    -- assert "" (committed <= fromIntegral logLength)
+          assert "commit_index <= log_length violated" (committed <= fromIntegral logLength)
     go acc =
       step
         ()
@@ -138,6 +138,18 @@ indexRelationshipProperty = go mempty
                       ( \case
                           Nothing -> Just (MkNodeIndexes 0 commitIndex 0)
                           Just (MkNodeIndexes x _ z) -> Just (MkNodeIndexes x commitIndex z)
+                      )
+                      node
+                      acc
+              checkState node newAcc
+              go newAcc
+            -- A proxy for the log length increasing by one command
+            CommandReceived _tern node _ -> do
+              let newAcc =
+                    Map.alter
+                      ( \case
+                          Nothing -> Just (MkNodeIndexes 0 0 1)
+                          Just (MkNodeIndexes x y z) -> Just (MkNodeIndexes x y (succ z))
                       )
                       node
                       acc
