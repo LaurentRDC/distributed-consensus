@@ -13,6 +13,8 @@ module Network.Consensus.Raft.Transformer.Spec
     writeTerm,
     readVotedFor,
     voteFor,
+    writeSnapshot,
+    readSnapshot,
     applyLogEntry,
     sendRPC,
     sendRPCResult,
@@ -31,7 +33,7 @@ module Network.Consensus.Raft.Transformer.Spec
     internalState,
     votedFor,
     currentLeader,
-    logEntries,
+    commandLog,
     commitIndex,
     lastApplied,
     nextIndex,
@@ -45,20 +47,16 @@ module Network.Consensus.Raft.Transformer.Spec
     CommandResponse (..),
     AppendEntries (..),
     AppendEntriesResult (..),
+    InstallSnapshot (..),
+    InstallSnapshotResult (..),
     Event (..),
     RPC (..),
     RPCResult (..),
-    Role (..),
-    LogIndex,
-    Term,
-    RequestId,
     RaftTrace (..),
   )
 where
 
-import Data.Int (Int64)
 import Data.Map.Strict (Map)
-import Data.Sequence (Seq)
 import Data.Set (Set)
 import Data.Text (Text)
 import Data.Vector (Vector)
@@ -66,19 +64,9 @@ import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
 import Network.Consensus.Raft.Client (Request, Response)
+import Network.Consensus.Raft.Domain (RequestId, Role (..), Term)
+import Network.Consensus.Raft.Log (Log, LogIndex, Snapshot, SnapshotMetadata, newLog)
 import System.Random (StdGen, mkStdGen64)
-
-newtype LogIndex = LogIndex Int64
-  deriving stock (Generic, Eq, Ord, Show)
-  deriving newtype (Real, Enum, Num, Integral)
-
-newtype Term = Term Int64
-  deriving stock (Generic, Eq, Ord, Show)
-  deriving newtype (Real, Enum, Num, Integral)
-
-newtype RequestId = RequestId Int64
-  deriving stock (Generic, Eq, Ord, Show)
-  deriving newtype (Real, Enum, Num, Integral)
 
 data Command entry
   = MkCommand
@@ -111,10 +99,25 @@ data AppendEntriesResult node result = AppendEntriesResult
     aerMatch :: !Bool,
     aerNewEntryLogIndex :: !LogIndex
   }
-  deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
+  deriving (Eq, Ord, Show, Generic)
 
-data RPC node entry
+data InstallSnapshot node state = InstallSnapshot
+  { isLeaderTerm :: !Term,
+    isLeaderNode :: !node,
+    isSnapshot :: !(Snapshot state)
+  }
+  deriving (Eq, Ord, Show, Generic)
+
+data InstallSnapshotResult node = InstallSnapshotResult
+  { isrTerm :: !Term,
+    isrNode :: !node,
+    isrSnapshotMetadata :: !SnapshotMetadata
+  }
+  deriving (Eq, Ord, Show, Generic)
+
+data RPC node entry state
   = AE (AppendEntries node entry)
+  | IS (InstallSnapshot node state)
   | HeartBeat
       -- | Leader's term
       Term
@@ -136,8 +139,8 @@ data RPC node entry
   deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
 
 data RPCResult node result
-  = ClientRequestResult (CommandResponse node result)
-  | AER (AppendEntriesResult node result)
+  = AER (AppendEntriesResult node result)
+  | ISR (InstallSnapshotResult node)
   | RequestVoteResult
       -- | Voter node
       node
@@ -147,15 +150,15 @@ data RPCResult node result
       Bool
   deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
 
-data Event node entry result
+data Event node entry result state
   = EventElectionTimeout
   | EventHeartBeatTimeout
   | EventIncomingClientRequest (Request node entry)
-  | EventRPC (RPC node entry)
+  | EventRPC (RPC node entry state)
   | EventRPCResult (RPCResult node result)
   deriving (Eq, Show)
 
-data RaftTrace entry result node
+data RaftTrace entry result node state
   = LeaderElected Term node
   | VotedFor
       -- | Our term
@@ -191,7 +194,7 @@ data RaftTrace entry result node
       node
   | BecameCandidate Term node
   | BecameFollower Term node
-  | EventReceived Term node (Event node entry result)
+  | EventReceived Term node (Event node entry result state)
   | SplitElection Term node
   | ElectionTriggered Term node
   | DeserializationError node Text
@@ -202,35 +205,32 @@ data RaftTrace entry result node
   | CommitIndexIncreasedTo Term node LogIndex
   | LogEntryApplied Term node entry
   | LastAppliedIndexIncreasedTo Term node LogIndex
+  | SnapshotApplied Term node SnapshotMetadata
   deriving (Eq, Show)
 
 data RaftSpec entry node state result m = MkRaftSpec
-  { _readLogEntry :: LogIndex -> m (Maybe entry),
-    _writeLogEntry :: LogIndex -> Term -> entry -> m (),
-    _readTerm :: m Term,
-    _writeTerm :: Term -> m (),
-    _readVotedFor :: m (Maybe node),
-    _voteFor :: Maybe node -> m (),
+  { _readLogEntry :: node -> LogIndex -> m (Maybe entry),
+    _writeLogEntry :: node -> LogIndex -> Term -> entry -> m (),
+    _readTerm :: node -> m Term,
+    _writeTerm :: node -> Term -> m (),
+    _readVotedFor :: node -> m (Maybe node),
+    _voteFor :: node -> Maybe node -> m (),
+    _readSnapshot :: node -> m (Maybe (Snapshot state)),
+    _writeSnapshot :: node -> Snapshot state -> m (),
     _applyLogEntry :: state -> entry -> (state, result),
-    _sendRPC :: node -> RPC node entry -> m (),
+    _sendRPC :: node -> RPC node entry state -> m (),
     _sendRPCResult :: node -> RPCResult node result -> m (),
     _sendClientResponse :: node -> Response node result -> m (),
     -- We use 'Text' to represent deserialization errors because this is
     -- easiest to represent to the user. I don't think it's worth adding
     -- yet another type variable to the spec.
-    _receiveRPC :: m (Either Text (RPC node entry)),
+    _receiveRPC :: m (Either Text (RPC node entry state)),
     _receiveRPCResult :: m (Either Text (RPCResult node result)),
     _receiveClientRequest :: m (Either Text (Request node entry)),
-    _tracer :: RaftTrace entry result node -> m ()
+    _tracer :: RaftTrace entry result node state -> m ()
   }
 
 makeLenses ''RaftSpec
-
-data Role
-  = Leader
-  | Follower
-  | Candidate
-  deriving (Eq, Show, Ord, Enum, Bounded)
 
 data RaftState node entry state = MkRaftState
   { _role :: !Role,
@@ -238,7 +238,7 @@ data RaftState node entry state = MkRaftState
     _internalState :: !state,
     _votedFor :: !(Maybe node),
     _currentLeader :: !(Maybe node),
-    _logEntries :: !(Seq (Term, Command entry)),
+    _commandLog :: !(Log state (Term, Command entry)),
     _commitIndex :: !LogIndex,
     _lastApplied :: !LogIndex,
     _nextIndex :: Map node LogIndex,
@@ -262,7 +262,7 @@ initialRaftState seed initialState =
       _internalState = initialState,
       _votedFor = Nothing,
       _currentLeader = Nothing,
-      _logEntries = mempty,
+      _commandLog = newLog initialState,
       _commitIndex = 0,
       _lastApplied = 0,
       _nextIndex = mempty,

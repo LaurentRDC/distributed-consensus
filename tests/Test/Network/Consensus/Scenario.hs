@@ -38,19 +38,21 @@ import Network.Consensus.Raft (Command, CommandResponse, Event (..), LogIndex, R
 import System.Random.Stateful (mkStdGen64, uniformR, uniformShuffleList)
 import Test.Tasty.QuickCheck
 
-type Scenario entry result node =
-  Monitor (RaftTrace entry result node) ()
+type Scenario entry result state node =
+  Monitor (RaftTrace entry result state node) ()
 
 -- | Check a scenario over a 'Trace'.
 checkScenario ::
   ( Show entry,
     Show result,
     Show node,
+    Show state,
     Typeable entry,
     Typeable result,
-    Typeable node
+    Typeable node,
+    Typeable state
   ) =>
-  Scenario entry result node ->
+  Scenario entry result state node ->
   Trace (SimResult a) SimEvent ->
   Property
 checkScenario scenario trace' =
@@ -104,8 +106,8 @@ faultInjector f initials faultProbability seed = do
           faultInjectorThread threadIds newGen'
 
 raftTrace ::
-  (Typeable entry, Typeable result, Typeable node) =>
-  Trace (SimResult a) SimEvent -> [RaftTrace entry result node]
+  (Typeable entry, Typeable result, Typeable node, Typeable state) =>
+  Trace (SimResult a) SimEvent -> [RaftTrace entry result node state]
 raftTrace =
   selectTraceEvents
     ( \_ ev -> case ev of
@@ -113,42 +115,42 @@ raftTrace =
         _ -> Nothing -- internal io-sim event
     )
 
-leaderElected :: Predicate (RaftTrace entry result node) (Term, node)
+leaderElected :: Predicate (RaftTrace entry result node state) (Term, node)
 leaderElected = predicate $ \case
   (LeaderElected t n) -> Just (t, n)
   _ -> Nothing
 
-votedFor :: Predicate (RaftTrace entry result node) (Term, node, Term, node)
+votedFor :: Predicate (RaftTrace entry result node state) (Term, node, Term, node)
 votedFor = predicate $ \case
   VotedFor voterTerm voterNode candidateTerm candidateNode -> Just (voterTerm, voterNode, candidateTerm, candidateNode)
   _ -> Nothing
 
-commandReceived :: Predicate (RaftTrace entry result node) (Term, node, Command entry)
+commandReceived :: Predicate (RaftTrace entry result node state) (Term, node, Command entry)
 commandReceived = predicate $ \case
   (CommandReceived t n command) -> Just (t, n, command)
   _ -> Nothing
 
-commandResponded :: Predicate (RaftTrace entry result node) (Term, node, CommandResponse node result)
+commandResponded :: Predicate (RaftTrace entry result node state) (Term, node, CommandResponse node result)
 commandResponded = predicate $ \case
   (CommandResultResponded t n response) -> Just (t, n, response)
   _ -> Nothing
 
-rpcReceived :: Predicate (RaftTrace entry result node) (Term, node, RPC node entry)
+rpcReceived :: Predicate (RaftTrace entry result node state) (Term, node, RPC node entry state)
 rpcReceived = predicate $ \case
   (EventReceived t n (EventRPC rpc)) -> Just (t, n, rpc)
   _ -> Nothing
 
-rpcResultReceived :: Predicate (RaftTrace entry result node) (Term, node, RPCResult node result)
+rpcResultReceived :: Predicate (RaftTrace entry result node state) (Term, node, RPCResult node result)
 rpcResultReceived = predicate $ \case
   (EventReceived t n (EventRPCResult resp)) -> Just (t, n, resp)
   _ -> Nothing
 
-commitIndexIncreased :: Predicate (RaftTrace entry result node) (Term, node, LogIndex)
+commitIndexIncreased :: Predicate (RaftTrace entry result node state) (Term, node, LogIndex)
 commitIndexIncreased = predicate $ \case
   (CommitIndexIncreasedTo t n logIndex) -> Just (t, n, logIndex)
   _ -> Nothing
 
-logEntryApplied :: Predicate (RaftTrace entry result node) (Term, node, entry)
+logEntryApplied :: Predicate (RaftTrace entry result node state) (Term, node, entry)
 logEntryApplied = predicate $ \case
   (LogEntryApplied t n entry) -> Just (t, n, entry)
   _ -> Nothing

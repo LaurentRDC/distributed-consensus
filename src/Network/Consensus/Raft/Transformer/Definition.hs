@@ -75,7 +75,7 @@ data RaftEnv entry node state result m
   = MkRaftEnv
   { _configuration :: !(Config node),
     _specification :: !(RaftSpec entry node state result m),
-    _eventQueue :: TQueue m (Event node entry result),
+    _eventQueue :: TQueue m (Event node entry result state),
     _currentClientRequests :: MVar m (IntMap (MVar m result)),
     -- Handle to a thread which will send a heartbeat timeout
     -- event after the appropriate amount of time.
@@ -89,7 +89,12 @@ data Config node
     otherNodes :: !(Set node),
     electionTimeoutRange :: !(Microseconds, Microseconds),
     heartBeatTimeout :: !Microseconds,
-    randomSeed :: !Word64
+    randomSeed :: !Word64,
+    -- | If provided, once the log on any node
+    -- reaches this length, a snapshot is produced
+    -- for log compaction. If @Nothing@, snapshotting
+    -- is disabled.
+    maxLogLength :: Maybe Int
     -- TODO: configure the maximum amount of concurrency. For example, we currently
     --       spawn a new thread to send an RPC to each other node.
     --       We may want to batch this concurrency via something like

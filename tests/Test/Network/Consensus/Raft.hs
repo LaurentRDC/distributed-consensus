@@ -78,7 +78,7 @@ testCluster =
                       (scenario heartbeatTimeout electionTimeoutLowerBound electionTimeoutUpperBound (Set.fromList seeds) commands)
                       ( \_ trace ->
                           checkScenario
-                            (allProperties @Command @Result @Node)
+                            (allProperties @Command @Result @Node @State)
                             trace
                       )
   where
@@ -91,7 +91,8 @@ testCluster =
                     otherNodes = nodes `Set.difference` Set.singleton ix,
                     electionTimeoutRange = (Microseconds electionTimeoutLowerBound, Microseconds electionTimeoutUpperBound),
                     heartBeatTimeout = Microseconds heartbeatTimeout,
-                    randomSeed = seed
+                    randomSeed = seed,
+                    maxLogLength = Just 2
                   }
               )
             | (ix, seed) <- zip [0 ..] (Set.toList seeds)
@@ -144,12 +145,14 @@ testHarness serverNodes = do
 
     serverSpec rpcMailbox rpcResultsMailbox requestsMailbox responsesMailbox node =
       MkRaftSpec
-        { _readLogEntry = \_ -> pure Nothing,
-          _writeLogEntry = \_ _ _ -> pure (),
-          _readTerm = pure 0,
-          _writeTerm = \_ -> pure (),
-          _readVotedFor = pure Nothing,
-          _voteFor = \_ -> pure (),
+        { _readLogEntry = \_ _ -> pure Nothing,
+          _writeLogEntry = \_ _ _ _ -> pure (),
+          _readTerm = \_ -> pure 0,
+          _writeTerm = \_ _ -> pure (),
+          _readVotedFor = \_ -> pure Nothing,
+          _voteFor = \_ _ -> pure (),
+          _readSnapshot = \_ -> pure Nothing,
+          _writeSnapshot = \_ _ -> pure (),
           _applyLogEntry = step,
           _sendRPC = send rpcMailbox,
           _sendRPCResult = send rpcResultsMailbox,

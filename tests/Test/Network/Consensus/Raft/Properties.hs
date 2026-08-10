@@ -28,7 +28,7 @@ import Test.Network.Consensus.Scenario (Scenario, commandReceived, commandRespon
 
 -- It's still not clear to me why, but without the explicit forall here,
 -- RaftTrace events don't get picked up
-allProperties :: forall entry result node. (Ord node) => Scenario entry result node
+allProperties :: forall entry result node state. (Ord node) => Scenario entry result node state
 allProperties =
   void $
     allOf
@@ -36,12 +36,14 @@ allProperties =
         singleVoteCastPerTermProperty,
         monotonicallyIncreasingTermProperty,
         allAcceptedCommandReceiveResponseProperty,
-        indexRelationshipProperty
+        indexRelationshipProperty,
+        monotonicallyIncreasingLastAppliedIndexProperty,
+        monotonicallyIncreasingCommitIndexProperty
       ]
 
 -- | Ensure that in each term where a leader is elected, no other leader
 -- is elected
-singleLeaderPerTermProperty :: Scenario entry result node
+singleLeaderPerTermProperty :: Scenario entry result node state
 singleLeaderPerTermProperty = go
   where
     anotherLeaderIn term = predicate $ \case
@@ -58,7 +60,7 @@ singleLeaderPerTermProperty = go
         <?> "Another leader elected for the same term"
 
 -- | Ensure that a node casts at most one vote per term
-singleVoteCastPerTermProperty :: (Ord node) => Scenario entry result node
+singleVoteCastPerTermProperty :: (Ord node) => Scenario entry result node state
 singleVoteCastPerTermProperty = go mempty
   where
     go votes = void $ whenever votedFor $ \(voterTerm, voterNode, _, _) -> do
@@ -67,7 +69,7 @@ singleVoteCastPerTermProperty = go mempty
       go (Set.insert (voterTerm, voterNode) votes)
 
 -- | Ensure that each node witnesses terms that increase monotonically
-monotonicallyIncreasingTermProperty :: (Ord node) => Scenario entry result node
+monotonicallyIncreasingTermProperty :: (Ord node) => Scenario entry result node state
 monotonicallyIncreasingTermProperty = go mempty
   where
     go latestKnownTerms = void $ do
@@ -85,9 +87,49 @@ monotonicallyIncreasingTermProperty = go mempty
     roleTerm (BecameFollower t n) = Just (n, t)
     roleTerm _ = Nothing
 
+-- | Ensure that each node's last applied index increases monotonically.
+monotonicallyIncreasingLastAppliedIndexProperty :: (Ord node) => Scenario entry result node state
+monotonicallyIncreasingLastAppliedIndexProperty = go mempty
+  where
+    go acc =
+      step
+        ()
+        ( \case
+            LastAppliedIndexIncreasedTo _term node lastApplied -> do
+              case Map.lookup node acc of
+                Nothing -> pure ()
+                Just prevLastApplied ->
+                  assert
+                    "Expecting last applied index to increase monotonically"
+                    (prevLastApplied <= lastApplied)
+
+              go (Map.insert node lastApplied acc)
+            _ -> go acc
+        )
+
+-- | Ensure that each node's commit index increases monotonically.
+monotonicallyIncreasingCommitIndexProperty :: (Ord node) => Scenario entry result node state
+monotonicallyIncreasingCommitIndexProperty = go mempty
+  where
+    go acc =
+      step
+        ()
+        ( \case
+            CommitIndexIncreasedTo _term node commitIndex -> do
+              case Map.lookup node acc of
+                Nothing -> pure ()
+                Just prevCommitIndex ->
+                  assert
+                    "Expecting commit index to increase monotonically"
+                    (prevCommitIndex <= commitIndex)
+
+              go (Map.insert node commitIndex acc)
+            _ -> go acc
+        )
+
 -- | Ensure that every command that was acknowledged by the leader
 -- receives a response with the same request ID.
-allAcceptedCommandReceiveResponseProperty :: Scenario entry result node
+allAcceptedCommandReceiveResponseProperty :: Scenario entry result node state
 allAcceptedCommandReceiveResponseProperty = go
   where
     go = void $ whenever commandReceived $ \(_, _, MkCommand _entry reqId) ->
@@ -108,7 +150,7 @@ data NodeIndexes
 -- | Ensures that the following relationship holds for each node individually:
 --
 --    appliex index  <=  commit index  <=  log length
-indexRelationshipProperty :: (Ord node) => Scenario entry result node
+indexRelationshipProperty :: (Ord node) => Scenario entry result node state
 indexRelationshipProperty = go mempty
   where
     checkState node acc =

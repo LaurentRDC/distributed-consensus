@@ -12,6 +12,7 @@ module Network.Consensus.Raft.Transformer
     sendRPCConcurrently,
     sendRPCResult,
     sendClientResponse,
+    whenRole,
     sendHeartbeat,
     sendAppendEntriesTo,
     quorum,
@@ -20,6 +21,7 @@ module Network.Consensus.Raft.Transformer
     updateTerm,
     trace,
     acceptClientRequest,
+    applySnapshot,
   )
 where
 
@@ -44,20 +46,23 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Traversable (for)
 import qualified Data.Vector as Vector
-import Lens.Micro.Platform (at, use, view, (.=), (<%=), (^.))
+import Lens.Micro.Platform (at, use, view, (%=), (.=), (<%=), (^.))
 import Network.Consensus.Raft.Client (Response (..))
+import Network.Consensus.Raft.Domain (RequestId, Role (..), Term)
+import Network.Consensus.Raft.Log (Lookup (..), Snapshot (Snapshot, sData, sMetadata), SnapshotMetadata (..), absoluteIndex, logEntries)
+import qualified Network.Consensus.Raft.Log as Log
 import Network.Consensus.Raft.Timer (Microseconds, resetTimer)
 import Network.Consensus.Raft.Transformer.Definition
 import Network.Consensus.Raft.Transformer.Spec hiding (sendClientResponse, sendRPC, sendRPCResult)
 import qualified Network.Consensus.Raft.Transformer.Spec as Spec
 import System.Random (uniformR)
 
-dequeueEvent :: (MonadSTM m) => RaftT entry node state result m (Event node entry result)
+dequeueEvent :: (MonadSTM m) => RaftT entry node state result m (Event node entry result state)
 dequeueEvent = do
   queue <- view eventQueue
   lift $ atomically $ readTQueue queue
 
-enqueueEvent :: (MonadSTM m) => Event node entry result -> RaftT entry node state result m ()
+enqueueEvent :: (MonadSTM m) => Event node entry result state -> RaftT entry node state result m ()
 enqueueEvent event = do
   queue <- view eventQueue
   lift $ atomically $ writeTQueue queue event
@@ -65,7 +70,7 @@ enqueueEvent event = do
 -- | Send a 'RPC' to another node.
 --
 -- To send a 'RPC' to multiple other nodes, concurrently, see 'sendRPCConcurrently'
-sendRPC :: (Monad m) => node -> RPC node entry -> RaftT entry node state result m ()
+sendRPC :: (Monad m) => node -> RPC node entry state -> RaftT entry node state result m ()
 sendRPC node rpc = do
   spec <- view specification
   lift $ (spec ^. Spec.sendRPC) node rpc
@@ -73,7 +78,7 @@ sendRPC node rpc = do
 -- | Send a 'RPC' concurrently to other nodes.
 --
 -- To send a 'RPC' to a single node, see 'sendRPC'
-sendRPCConcurrently :: (MonadAsync m) => Set node -> RPC node entry -> RaftT entry node state result m ()
+sendRPCConcurrently :: (MonadAsync m) => Set node -> RPC node entry state -> RaftT entry node state result m ()
 sendRPCConcurrently nodes rpc = do
   spec <- view specification
   lift $ mapConcurrently_ (flip (spec ^. Spec.sendRPC) rpc) nodes
@@ -123,29 +128,44 @@ sendHeartbeat =
 -- in our log should be replicated, and send an appropriate 'AppendEntries' RPC.
 sendAppendEntriesTo :: (Ord node, Monad m) => node -> RaftT entry node state result m ()
 sendAppendEntriesTo destination = do
-  entries <- use logEntries
-  (previousLogIndex, previousLogTerm) <-
-    use (nextIndex . at destination) >>= \case
-      Nothing -> pure (0, initialTerm)
-      Just destNextIndex ->
-        let previousLogIndex = pred destNextIndex
-         in case Seq.lookup (fromIntegral previousLogIndex) entries of
-              Just (prevTerm, _) -> pure (previousLogIndex, prevTerm)
-              Nothing -> pure (0, initialTerm)
-
-  let toBeReplicated = Seq.drop (fromIntegral previousLogIndex) entries
-  unless
-    (null toBeReplicated)
-    ( ( AppendEntries
-          <$> use term
-          <*> (view configuration <&> nodeId)
-          <*> pure previousLogIndex
-          <*> pure previousLogTerm
-          <*> pure (Vector.fromList (Foldable.toList toBeReplicated))
-          <*> use commitIndex
-      )
-        >>= sendRPC destination . AE
-    )
+  entries <- use commandLog
+  use (nextIndex . at destination)
+    >>= ( \case
+            Nothing -> pure $ Just (0, initialTerm)
+            Just destNextIndex ->
+              let previousLogIndex = pred destNextIndex
+               in case entries Log.!? previousLogIndex of
+                    Found (prevTerm, _) -> pure $ Just (previousLogIndex, prevTerm)
+                    NotFound -> pure $ Just (0, initialTerm)
+                    -- The follower's next index is "lost" in the snapshot;
+                    -- we can't specify entries to append. A snapshot will have
+                    -- to be installed
+                    LogIndexInSnapshot (SnapshotMetadata lastSnapshotIndex lastSnapshotTerm)
+                      | previousLogIndex == lastSnapshotIndex -> pure $ Just (lastSnapshotIndex, lastSnapshotTerm)
+                      | otherwise -> pure Nothing
+        )
+    >>= \case
+      Just (previousLogIndex, previousLogTerm) -> do
+        let toBeReplicated = Seq.drop (fromIntegral $ Log.relativeIndex entries previousLogIndex) (logEntries entries)
+        unless
+          (null toBeReplicated)
+          ( ( AppendEntries
+                <$> use term
+                <*> (view configuration <&> nodeId)
+                <*> pure previousLogIndex
+                <*> pure previousLogTerm
+                <*> pure (Vector.fromList (Foldable.toList toBeReplicated))
+                <*> use commitIndex
+            )
+              >>= sendRPC destination . AE
+          )
+      Nothing ->
+        ( InstallSnapshot
+            <$> use term
+            <*> (view configuration <&> nodeId)
+            <*> currentSnapshot
+        )
+          >>= sendRPC destination . IS
 
 -- | Number of votes required for a decision to be majority.
 quorum :: (Monad m) => RaftT entry node state result m Int
@@ -171,7 +191,7 @@ applyCommand (MkCommand entry requestId) = do
 updateCommitIndex :: (Monad m) => RaftT entry node state result m Bool
 updateCommitIndex = do
   commitIndex' <- use commitIndex
-  entries <- use logEntries
+  entries <- use commandLog
   ourTerm <- use term
   matchIndices <- use matchIndex
   quorumSize <- quorum
@@ -179,16 +199,22 @@ updateCommitIndex = do
   -- Fetch the indices, starting from the log index after the commit index, such that:
   -- 1. the entry is associated with the current term
   -- 2. a quorum of nodes have committed this index
-  let quorumIndices =
+  --
+  -- All of this is done relative to the snapshot, hence why all of the
+  -- indices are relativized
+  let relativeMatchIndices = fmap (Log.relativeIndex entries) matchIndices
+      relativeCommitIndex = Log.relativeIndex entries commitIndex'
+      liveEntries = logEntries entries
+      relativeQuorumIndices =
         Seq.zip
           ( Seq.fromFunction
-              (Seq.length entries)
+              (length liveEntries)
               -- The initial commit index is 0, hence the first entry to be committed
               -- should have index 1
               succ
           )
-          entries
-          & Seq.drop (fromIntegral commitIndex')
+          liveEntries
+          & Seq.drop (fromIntegral relativeCommitIndex)
           & Seq.filter ((== ourTerm) . fst . snd)
           & fmap fst
           -- By definition of the Raft algorithm, only a contiguous subset of
@@ -196,7 +222,7 @@ updateCommitIndex = do
           -- takeWhileL
           & Seq.takeWhileL
             ( \i ->
-                Map.size (Map.filter (>= fromIntegral i) matchIndices)
+                Map.size (Map.filter (>= fromIntegral i) relativeMatchIndices)
                   -- Note that 'matchIndices' do not include the leader,
                   -- so we take the leader into account by ensuring that there are
                   -- at least 'pred quorumSize' other nodes that have accepted the
@@ -205,9 +231,10 @@ updateCommitIndex = do
             )
           & fmap fromIntegral
 
-  case Seq.viewr quorumIndices of
+  case Seq.viewr relativeQuorumIndices of
     Seq.EmptyR -> pure False
-    _ :> lastIndex -> do
+    _ :> relativeLastIndex -> do
+      let lastIndex = absoluteIndex entries relativeLastIndex
       commitIndex .= lastIndex
       trace (\n t -> CommitIndexIncreasedTo n t lastIndex)
       pure True
@@ -221,11 +248,12 @@ applyLogEntries = do
     lastAppliedIndex <- use lastApplied
     currentCommitIndex <- use commitIndex
     unless (lastAppliedIndex == currentCommitIndex) $ do
-      entries <- use logEntries
+      entries <- use commandLog
       let unAppliedEntries =
             entries
-              & Seq.take (fromIntegral currentCommitIndex)
-              & Seq.drop (fromIntegral lastAppliedIndex)
+              & (`Log.keepEntriesUpTo` currentCommitIndex)
+              & logEntries
+              & Seq.drop (fromIntegral (Log.relativeIndex entries lastAppliedIndex))
               & fmap snd
 
       results <- mapM applyCommand unAppliedEntries
@@ -247,6 +275,14 @@ applyLogEntries = do
       lastApplied .= currentCommitIndex
       trace (\n t -> LastAppliedIndexIncreasedTo n t currentCommitIndex)
 
+      view configuration <&> maxLogLength >>= \case
+        Nothing -> pure ()
+        Just maxLog -> do
+          entries' <- use commandLog
+          when
+            (Seq.length (logEntries entries') > maxLog)
+            (currentSnapshot >>= applySnapshot)
+
 nextElectionTimeout :: (Monad m) => RaftT entry node state result m Microseconds
 nextElectionTimeout = do
   gen <- use randomGen
@@ -255,7 +291,7 @@ nextElectionTimeout = do
   randomGen .= nextGen
   pure timeout
 
-trace :: (Monad m) => (Term -> node -> RaftTrace entry result node) -> RaftT entry node state result m ()
+trace :: (Monad m) => (Term -> node -> RaftTrace entry result node state) -> RaftT entry node state result m ()
 trace makeTrace = do
   ourTerm <- use term
   node <- view configuration <&> nodeId
@@ -268,12 +304,13 @@ trace makeTrace = do
 updateTerm :: (Monad m) => (Term -> Term) -> RaftT entry node state result m (Term, Term)
 updateTerm update = do
   currTerm <- use term
+  self <- view configuration <&> nodeId
   let newTerm = update currTerm
 
   when (newTerm > currTerm) $ do
     spec <- view specification
 
-    lift $ (spec ^. writeTerm) newTerm
+    lift $ (spec ^. writeTerm) self newTerm
     term .= newTerm
   pure (currTerm, newTerm)
 
@@ -308,3 +345,27 @@ acceptClientRequest clientId = do
         pure . IntMap.delete (fromIntegral requestId)
 
   pure requestId
+
+currentSnapshot :: (Monad m) => RaftT entry node state result m (Snapshot state)
+currentSnapshot =
+  Snapshot
+    <$> ( SnapshotMetadata
+            <$> use lastApplied
+            <*> use term
+        )
+    <*> use internalState
+
+-- | Apply a snapshot to the internal state.
+--
+-- This can be used by any node on itself, or
+-- as part of the 'InstallSnapshot' remote procedure call.
+applySnapshot :: (Monad m) => Snapshot state -> RaftT entry node state result m ()
+applySnapshot snapshot = do
+  self <- view configuration <&> nodeId
+  spec <- view specification
+  -- TODO: initiate the snapshot write in a separate
+  -- thread, with a finalizer to apply the snapshot to the log
+  lift $ (spec ^. writeSnapshot) self snapshot
+  commandLog %= Log.applySnapshot snapshot
+  internalState .= sData snapshot
+  trace (\t n -> SnapshotApplied t n (sMetadata snapshot))

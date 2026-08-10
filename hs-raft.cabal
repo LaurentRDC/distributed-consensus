@@ -33,6 +33,8 @@ library
     exposed-modules:  Network.Consensus.Raft
                       Network.Consensus.Raft.Client
     other-modules:    Network.Consensus.Raft.Algorithm
+                      Network.Consensus.Raft.Domain
+                      Network.Consensus.Raft.Log
                       Network.Consensus.Raft.Transformer
                       Network.Consensus.Raft.Transformer.Definition
                       Network.Consensus.Raft.Transformer.Spec

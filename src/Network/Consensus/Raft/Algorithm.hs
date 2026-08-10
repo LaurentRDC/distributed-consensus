@@ -18,12 +18,14 @@ import Control.Monad.Trans.Class (lift)
 import Data.Foldable (traverse_)
 import Data.Functor ((<&>))
 import qualified Data.Map.Strict as Map
-import Data.Sequence (Seq (..), (|>))
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import qualified Data.Vector as Vector
 import Lens.Micro.Platform (at, use, view, (%=), (+=), (.=), (^.))
 import Network.Consensus.Raft.Client (Request (..), Response (..))
+import Network.Consensus.Raft.Domain
+import Network.Consensus.Raft.Log (LogIndex, Lookup (..), Snapshot (Snapshot, sMetadata), SnapshotMetadata (..), lastLogIndex, (!?))
+import qualified Network.Consensus.Raft.Log as Log
 import Network.Consensus.Raft.Timer (resetTimer)
 import Network.Consensus.Raft.Transformer
   ( AppendEntries (..),
@@ -31,15 +33,16 @@ import Network.Consensus.Raft.Transformer
     Command (..),
     Config (..),
     Event (..),
-    LogIndex,
+    InstallSnapshot (..),
+    InstallSnapshotResult (..),
     RPC (..),
     RPCResult (..),
     RaftT,
     RaftTrace (..),
-    Role (..),
-    Term,
     acceptClientRequest,
     applyLogEntries,
+    applySnapshot,
+    commandLog,
     commitIndex,
     configuration,
     currentLeader,
@@ -48,7 +51,6 @@ import Network.Consensus.Raft.Transformer
     eventQueue,
     heartBeatTimer,
     lastApplied,
-    logEntries,
     matchIndex,
     nextElectionTimeout,
     nextIndex,
@@ -69,6 +71,7 @@ import Network.Consensus.Raft.Transformer
     updateTerm,
     voteFor,
     votedFor,
+    whenRole,
     writeTerm,
     yesVotes,
   )
@@ -135,7 +138,7 @@ handleEvent ::
     MonadAsync m,
     MonadMVar m
   ) =>
-  Event node entry result -> RaftT entry node state result m ()
+  Event node entry result state -> RaftT entry node state result m ()
 handleEvent EventElectionTimeout = do
   r <- use role
   when (r /= Leader) $ do
@@ -151,11 +154,13 @@ handleEvent (EventRPC (RequestVote candidateTerm candidateNode candidateLastLogE
 handleEvent (EventRPC (HeartBeat aeTerm senderNodeId _lastLogIndex _aeCommitIndex)) =
   handleHeartBeat aeTerm senderNodeId
 handleEvent (EventRPC (AE appendEntries)) = handleAppendEntries appendEntries
+handleEvent (EventRPC (IS installSnapshot)) = handleInstallSnapshot installSnapshot
 handleEvent (EventRPCResult (RequestVoteResult voter voterTerm votedForUs)) =
   handleRequestVoteResult voter voterTerm votedForUs
 handleEvent (EventRPCResult (AER appendEntriesResult)) =
   handleAppendEntriesResult appendEntriesResult
-handleEvent (EventRPCResult (ClientRequestResult _commandResponse)) = pure () -- only meant for clients to handle
+handleEvent (EventRPCResult (ISR installSnapshotResult)) =
+  handleInstallSnapshotResult installSnapshotResult
 
 handleClientRequest ::
   (Ord node, MonadFork m, MonadMVar m) =>
@@ -171,7 +176,7 @@ handleClientRequest (MkRequest clientId entry) =
       let command = MkCommand entry reqId
       trace (\t n -> CommandReceived t n command)
       ourTerm <- use term
-      logEntries %= (|> (ourTerm, command))
+      commandLog %= (`Log.append` (ourTerm, command))
       peers <- view configuration <&> otherNodes
       -- TODO: sendAppendEntriesTo in parallel
       traverse_ sendAppendEntriesTo peers
@@ -202,12 +207,17 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
       currentLeader .= Just leaderNode
 
       -- Consistency check
-      entries <- use logEntries
-      let logIsConsistent = case entries Seq.!? fromIntegral prevLogIndex of
-            Nothing -> prevLogIndex == 0
-            Just (t, _) -> t == previousLogTerm
+      entries <- use commandLog
+      let Snapshot (SnapshotMetadata lastIx _) _ = Log.lSnapshot entries
+          logIsConsistent =
+            case entries !? prevLogIndex of
+              NotFound -> prevLogIndex == 0
+              LogIndexInSnapshot _ ->
+                -- By snapshot construction, indices
+                prevLogIndex <= lastIx
+              Found (t, _) -> t == previousLogTerm
 
-      let oldLastEntry = fromIntegral $ Seq.length entries - 1
+      let oldLastEntry = lastLogIndex entries - 1
           newLastEntry = prevLogIndex + fromIntegral (length newEntries)
 
       ourTerm <- use term
@@ -215,9 +225,9 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
       if leaderTerm < ourTerm || not logIsConsistent
         then sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm self False oldLastEntry))
         else do
-          logEntries
-            %= (Seq.>< (Seq.fromList $ Vector.toList newEntries))
-            . Seq.take (fromIntegral $ succ prevLogIndex)
+          commandLog
+            %= (`Log.extend` (Seq.fromList $ Vector.toList newEntries))
+            . (`Log.keepEntriesUpTo` succ prevLogIndex)
           sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm self True newLastEntry))
           ourCommitIndex <- use commitIndex
           when (leaderCommitIndex > ourCommitIndex) $ do
@@ -277,11 +287,11 @@ handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLas
   trace (\ourTerm' ourNode -> VoteRequestedBy ourTerm' ourNode candidateTerm candidateNode)
   mAlreadyVoted <- use votedFor
   self <- view configuration <&> nodeId
-  entries <- use logEntries
+  entries <- use commandLog
   case mAlreadyVoted of
     -- We haven't voted yet
     Nothing ->
-      if (candidateLastLogIndex, candidateLastLogIndexTerm) >= lastLogInfo entries
+      if (candidateLastLogIndex, candidateLastLogIndexTerm) >= Log.lastLogInfo entries
         then do
           votedFor .= Just candidateNode
           grantVote ourTerm
@@ -296,10 +306,6 @@ handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLas
     Just _ ->
       sendRPCResult candidateNode (RequestVoteResult self ourTerm False)
   where
-    lastLogInfo :: Seq (Term, entry) -> (LogIndex, Term)
-    lastLogInfo Seq.Empty = (0, 0)
-    lastLogInfo entries@(_ Seq.:|> (lastEntryTerm, _)) = (fromIntegral $ Seq.length entries, lastEntryTerm)
-
     grantVote ourTerm = do
       self <- view configuration <&> nodeId
       sendRPCResult candidateNode (RequestVoteResult self ourTerm True)
@@ -343,6 +349,39 @@ handleRequestVoteResult voter voterTerm votedForUs = do
           else
             trace (\ourTerm ourNode -> VoteDeniedFrom ourTerm ourNode voter)
 
+handleInstallSnapshot ::
+  (MonadMVar m) =>
+  InstallSnapshot node state -> RaftT entry node state result m ()
+handleInstallSnapshot (InstallSnapshot leaderTerm leaderNode snapshot) =
+  handleTermNumber leaderTerm >>= \case
+    LT ->
+      -- old term
+      pure () -- TODO: what do I do here?
+    _ -> whenRole Follower $ do
+      applySnapshot snapshot
+      InstallSnapshotResult
+        <$> use term
+        <*> (view configuration <&> nodeId)
+        <*> pure (sMetadata snapshot)
+        >>= sendRPCResult leaderNode . ISR
+
+handleInstallSnapshotResult ::
+  ( Ord node,
+    MonadMVar m
+  ) =>
+  InstallSnapshotResult node -> RaftT entry node state result m ()
+handleInstallSnapshotResult (InstallSnapshotResult responderTerm responderNode (SnapshotMetadata lastIncludedIndex _)) = do
+  termComp <- handleTermNumber responderTerm
+  ourRole <- use role
+  when (ourRole == Leader && termComp == EQ) $ do
+    matchIndex . at responderNode .= Just lastIncludedIndex
+    nextIndex . at responderNode .= Just (succ lastIncludedIndex)
+    -- The only reason to send an 'InstallSnapshot' RPC
+    -- (and thus get a result) is because a node has gotten behind
+    -- in its entries. With the snapshot installed, we're free to
+    -- send the rest of the logs
+    sendAppendEntriesTo responderNode
+
 becomeCandidate ::
   ( Ord node,
     MonadAsync m,
@@ -360,13 +399,13 @@ becomeCandidate = do
   matchIndex .= mempty
 
   term += 1
+  self <- view configuration <&> nodeId
   w <- view (specification . writeTerm)
   thisTerm <- use term
-  lift (w thisTerm)
+  lift (w self thisTerm)
 
-  self <- view configuration <&> nodeId
   v <- view (specification . voteFor)
-  lift $ v (Just self)
+  lift $ v self (Just self)
   trace (VotedFor thisTerm self)
   votedFor .= Just self
   yesVotes .= Set.singleton self
@@ -378,12 +417,10 @@ becomeCandidate = do
   when (r == Candidate) $ do
     peers <- view configuration <&> otherNodes
     currentTerm <- use term
-    lastLogIndex <- use lastApplied
+    lastAppliedLogIndex <- use lastApplied
     lastLogTerm <-
-      use logEntries >>= \case
-        Empty -> pure 0
-        (_ :|> (lastTerm, _)) -> pure lastTerm
-    let rpc = RequestVote currentTerm self lastLogIndex lastLogTerm
+      use commandLog <&> snd . Log.lastLogInfo
+    let rpc = RequestVote currentTerm self lastAppliedLogIndex lastLogTerm
     sendRPCConcurrently peers rpc
 
 checkElection ::
@@ -413,8 +450,8 @@ becomeLeader = do
   currentLeader .= Just self
   yesVotes .= Set.empty
 
-  lastLogIndex <- use logEntries <&> Seq.length
-  nextIndex .= Map.fromSet (const (fromIntegral lastLogIndex + 1)) peers
+  lastIx <- use commandLog <&> Log.lastLogIndex
+  nextIndex .= Map.fromSet (const (lastIx + 1)) peers
 
   trace LeaderElected
 
