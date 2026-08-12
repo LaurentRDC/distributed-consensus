@@ -40,7 +40,7 @@ data Timer m = MkTimer
 
 newtype Microseconds = Microseconds Int32
   deriving stock (Eq, Ord, Show, Generic)
-  deriving newtype (Real, Enum, Num, Integral)
+  deriving newtype (Real, Enum, Num, Integral, Bounded)
 
 instance UniformRange Microseconds -- via Generic
 

@@ -5,6 +5,11 @@ module Network.Consensus.Raft.Transformer
   ( module Network.Consensus.Raft.Transformer.Definition,
     module Network.Consensus.Raft.Transformer.Spec,
 
+    -- * Cluster nodes
+    self,
+    peers,
+    clusterNodes,
+
     -- * Capabilities
     dequeueEvent,
     enqueueEvent,
@@ -15,13 +20,14 @@ module Network.Consensus.Raft.Transformer
     whenRole,
     sendHeartbeat,
     sendAppendEntriesTo,
-    quorum,
     applyLogEntries,
     nextElectionTimeout,
     updateTerm,
     trace,
     acceptClientRequest,
     applySnapshot,
+    currentSnapshot,
+    appendLogEntry,
   )
 where
 
@@ -34,28 +40,43 @@ import Control.Monad.Class.MonadSTM (MonadSTM)
 import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay)
 import Control.Monad.Trans.Class (lift)
-import Data.Foldable (for_)
+import Data.Foldable (for_, traverse_)
 import qualified Data.Foldable as Foldable
 import Data.Function ((&))
 import Data.Functor (($>), (<&>))
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromJust, isJust)
 import Data.Sequence (ViewR (..))
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Traversable (for)
 import qualified Data.Vector as Vector
-import Lens.Micro.Platform (at, use, view, (%=), (.=), (<%=), (^.))
+import Lens.Micro.Platform (assign, at, use, view, (%=), (.=), (<%=), (^.))
 import Network.Consensus.Raft.Client (Response (..))
-import Network.Consensus.Raft.Domain (RequestId, Role (..), Term)
-import Network.Consensus.Raft.Log (Lookup (..), Snapshot (Snapshot, sData, sMetadata), SnapshotMetadata (..), absoluteIndex, logEntries)
+import Network.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId, Role (..), Term, allNodes, hasQuorum)
+import Network.Consensus.Raft.Log (Lookup (..), Snapshot (Snapshot, sData, sMetadata), SnapshotMetadata (..), absoluteIndex, logEntries, sCluster)
 import qualified Network.Consensus.Raft.Log as Log
 import Network.Consensus.Raft.Timer (Microseconds, resetTimer)
 import Network.Consensus.Raft.Transformer.Definition
 import Network.Consensus.Raft.Transformer.Spec hiding (sendClientResponse, sendRPC, sendRPCResult)
 import qualified Network.Consensus.Raft.Transformer.Spec as Spec
 import System.Random (uniformR)
+
+-- | Node identifier
+self :: (Monad m) => RaftT entry node state result m node
+self = view configuration <&> nodeId
+
+-- | All nodes in the cluster, except self
+peers :: (Monad m, Ord node) => RaftT entry node state result m (Set node)
+peers = do
+  s <- self
+  use clusterConfiguration <&> Set.delete s . allNodes
+
+-- | All nodes in the cluster; both 'self' and 'peers'.
+clusterNodes :: (Monad m, Ord node) => RaftT entry node state result m (Set node)
+clusterNodes = use clusterConfiguration <&> allNodes
 
 dequeueEvent :: (MonadSTM m) => RaftT entry node state result m (Event node entry result state)
 dequeueEvent = do
@@ -106,7 +127,8 @@ whenRole r action = do
 --
 -- This function also resets the heartbeat timer.
 sendHeartbeat ::
-  ( MonadDelay m,
+  ( Ord node,
+    MonadDelay m,
     MonadMVar m,
     MonadFork m,
     MonadMask m,
@@ -117,11 +139,10 @@ sendHeartbeat =
   whenRole Leader $ do
     config <- view configuration
     thisTerm <- use term
-    let peers = config.otherNodes
     lastLogIndex <- use lastApplied
     theCommitIndex <- use commitIndex
     let rpc = HeartBeat thisTerm config.nodeId lastLogIndex theCommitIndex
-    sendRPCConcurrently peers rpc
+    peers >>= (`sendRPCConcurrently` rpc)
     view heartBeatTimer >>= lift . resetTimer config.heartBeatTimeout
 
 -- | For a given destination node, look up which of the entries
@@ -167,34 +188,36 @@ sendAppendEntriesTo destination = do
         )
           >>= sendRPC destination . IS
 
--- | Number of votes required for a decision to be majority.
-quorum :: (Monad m) => RaftT entry node state result m Int
-quorum = do
-  conf <- view configuration
-  let numNodesInCluster = 1 + Set.size (otherNodes conf)
-  pure $
-    if even numNodesInCluster
-      then numNodesInCluster `div` 2 + 1
-      else (numNodesInCluster - 1) `div` 2 + 1
-
-applyCommand :: (Monad m) => Command entry -> RaftT entry node state result m (CommandResponse node result)
-applyCommand (MkCommand entry requestId) = do
+applyEntry :: (MonadSTM m, Ord node, MonadMVar m) => LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
+applyEntry (LogEntryCommand (Command entry requestId)) = do
   apply <- view (specification . applyLogEntry)
   (newState, result) <- use internalState <&> flip apply entry
   trace (\n t -> LogEntryApplied n t entry)
 
   internalState .= newState
-  pure (MkCommandResponse result requestId)
+  pure $ Just (MkCommandResponse result requestId)
+applyEntry (LogEntryMembershipChange clusterConf) = do
+  assign clusterConfiguration clusterConf
+  trace (\n t -> MembershipChangeApplied n t clusterConf)
+
+  -- If we just committed to a joint membership configuration,
+  -- then it's time to propose the move to the union
+  case clusterConf of
+    Simple _ -> trace MembershipChangeCompleted $> Nothing
+    conf@Joint {} -> do
+      appendLogEntry (LogEntryMembershipChange (Simple (allNodes conf)))
+      pure Nothing
 
 -- | Updates the commit index. Returns 'True' if some log entries can be applied,
 -- and 'False' otherwise.
-updateCommitIndex :: (Monad m) => RaftT entry node state result m Bool
+updateCommitIndex :: (Ord node, Monad m) => RaftT entry node state result m Bool
 updateCommitIndex = do
   commitIndex' <- use commitIndex
   entries <- use commandLog
   ourTerm <- use term
   matchIndices <- use matchIndex
-  quorumSize <- quorum
+  s <- self
+  clusterConf <- use clusterConfiguration
 
   -- Fetch the indices, starting from the log index after the commit index, such that:
   -- 1. the entry is associated with the current term
@@ -222,12 +245,15 @@ updateCommitIndex = do
           -- takeWhileL
           & Seq.takeWhileL
             ( \i ->
-                Map.size (Map.filter (>= fromIntegral i) relativeMatchIndices)
+                hasQuorum
+                  clusterConf
                   -- Note that 'matchIndices' do not include the leader,
-                  -- so we take the leader into account by ensuring that there are
-                  -- at least 'pred quorumSize' other nodes that have accepted the
-                  -- entries, rather than 'quorumsize'
-                  >= pred quorumSize
+                  -- so we take the leader into account by inserting it
+                  -- with the other match indices
+                  ( Set.insert s $
+                      Map.keysSet
+                        (Map.filter (>= fromIntegral i) relativeMatchIndices)
+                  )
             )
           & fmap fromIntegral
 
@@ -241,7 +267,7 @@ updateCommitIndex = do
 
 -- | Update the commit index, and apply log entries if there are
 -- any log entries that /can/ be applied.
-applyLogEntries :: (MonadMVar m) => RaftT entry node state result m ()
+applyLogEntries :: (Ord node, MonadMVar m, MonadSTM m) => RaftT entry node state result m ()
 applyLogEntries = do
   isTimeToCommit <- updateCommitIndex
   when isTimeToCommit $ do
@@ -256,7 +282,10 @@ applyLogEntries = do
               & Seq.drop (fromIntegral (Log.relativeIndex entries lastAppliedIndex))
               & fmap snd
 
-      results <- mapM applyCommand unAppliedEntries
+      results <-
+        mapM applyEntry unAppliedEntries
+          -- Membership change commands don't return a result
+          <&> fmap fromJust . Seq.filter isJust
 
       requestsVar <- view currentClientRequests
       whenRole Leader $ do
@@ -304,13 +333,13 @@ trace makeTrace = do
 updateTerm :: (Monad m) => (Term -> Term) -> RaftT entry node state result m (Term, Term)
 updateTerm update = do
   currTerm <- use term
-  self <- view configuration <&> nodeId
+  s <- self
   let newTerm = update currTerm
 
   when (newTerm > currTerm) $ do
     spec <- view specification
 
-    lift $ (spec ^. writeTerm) self newTerm
+    lift $ (spec ^. writeTerm) s newTerm
     term .= newTerm
   pure (currTerm, newTerm)
 
@@ -346,7 +375,7 @@ acceptClientRequest clientId = do
 
   pure requestId
 
-currentSnapshot :: (Monad m) => RaftT entry node state result m (Snapshot state)
+currentSnapshot :: (Monad m) => RaftT entry node state result m (Snapshot node state)
 currentSnapshot =
   Snapshot
     <$> ( SnapshotMetadata
@@ -354,18 +383,35 @@ currentSnapshot =
             <*> use term
         )
     <*> use internalState
+    <*> use clusterConfiguration
 
 -- | Apply a snapshot to the internal state.
 --
 -- This can be used by any node on itself, or
 -- as part of the 'InstallSnapshot' remote procedure call.
-applySnapshot :: (Monad m) => Snapshot state -> RaftT entry node state result m ()
+applySnapshot :: (Monad m) => Snapshot node state -> RaftT entry node state result m ()
 applySnapshot snapshot = do
-  self <- view configuration <&> nodeId
+  s <- self
   spec <- view specification
   -- TODO: initiate the snapshot write in a separate
   -- thread, with a finalizer to apply the snapshot to the log
-  lift $ (spec ^. writeSnapshot) self snapshot
+  lift $ (spec ^. writeSnapshot) s snapshot
   commandLog %= Log.applySnapshot snapshot
   internalState .= sData snapshot
+  clusterConfiguration .= sCluster snapshot
   trace (\t n -> SnapshotApplied t n (sMetadata snapshot))
+
+-- | Append a log entry to the log
+appendLogEntry :: (Ord node, MonadMVar m, MonadSTM m) => LogEntry node entry -> RaftT entry node state result m ()
+appendLogEntry entry = do
+  ourTerm <- use term
+  commandLog %= (`Log.append` (ourTerm, entry))
+  trace (\t n -> LogEntryAppended t n entry)
+
+  -- TODO: sendAppendEntriesTo in parallel
+  whenRole Leader $
+    peers >>= traverse_ sendAppendEntriesTo
+
+  -- In a single-node cluster, we would already have
+  -- quorum to update our commit index
+  applyLogEntries

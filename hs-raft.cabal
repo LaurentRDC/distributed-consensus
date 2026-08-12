@@ -70,7 +70,9 @@ test-suite hs-raft-test
                     , hs-raft
                     , io-classes
                     , io-sim
+                    , pretty-simple ^>=4.1
                     , random
                     , tasty ^>=1.5
                     , tasty-quickcheck ^>=0.11
                     , text
+                    , transformers

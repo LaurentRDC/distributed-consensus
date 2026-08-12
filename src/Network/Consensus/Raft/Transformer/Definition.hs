@@ -48,11 +48,12 @@ runRaftT ::
     MonadMVar m
   ) =>
   Config node ->
+  Set node ->
   state ->
   RaftSpec entry node state result m ->
   RaftT entry node state result m a ->
   m a
-runRaftT c i s f = do
+runRaftT config members internalState spec f = do
   queue <- atomically newTQueue
   requests <- newMVar mempty
   hbTimer <- newTimer (atomically $ writeTQueue queue EventHeartBeatTimeout)
@@ -61,15 +62,15 @@ runRaftT c i s f = do
     <$> evalRWST
       f
       ( MkRaftEnv
-          { _configuration = c,
-            _specification = s,
+          { _configuration = config,
+            _specification = spec,
             _eventQueue = queue,
             _currentClientRequests = requests,
             _heartBeatTimer = hbTimer,
             _electionTimer = elTimer
           }
       )
-      (initialRaftState (randomSeed c) i)
+      (initialRaftState (randomSeed config) members internalState)
 
 data RaftEnv entry node state result m
   = MkRaftEnv
@@ -86,7 +87,6 @@ data RaftEnv entry node state result m
 data Config node
   = MkConfig
   { nodeId :: !node,
-    otherNodes :: !(Set node),
     electionTimeoutRange :: !(Microseconds, Microseconds),
     heartBeatTimeout :: !Microseconds,
     randomSeed :: !Word64,

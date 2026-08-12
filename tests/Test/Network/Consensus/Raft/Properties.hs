@@ -10,7 +10,10 @@ module Test.Network.Consensus.Raft.Properties
     singleVoteCastPerTermProperty,
     monotonicallyIncreasingTermProperty,
     allAcceptedCommandReceiveResponseProperty,
+    allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration,
     indexRelationshipProperty,
+    monotonicallyIncreasingLastAppliedIndexProperty,
+    monotonicallyIncreasingCommitIndexProperty,
   )
 where
 
@@ -24,7 +27,7 @@ import Network.Consensus.Raft
     LogIndex,
     RaftTrace (..),
   )
-import Test.Network.Consensus.Scenario (Scenario, commandReceived, commandResponded, leaderElected, votedFor)
+import Test.Network.Consensus.Scenario (Scenario, clusterMembershipChangeCompleted, clusterMembershipChangeInitiated, commandReceived, commandResponded, leaderElected, votedFor)
 
 -- It's still not clear to me why, but without the explicit forall here,
 -- RaftTrace events don't get picked up
@@ -36,6 +39,7 @@ allProperties =
         singleVoteCastPerTermProperty,
         monotonicallyIncreasingTermProperty,
         allAcceptedCommandReceiveResponseProperty,
+        allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration,
         indexRelationshipProperty,
         monotonicallyIncreasingLastAppliedIndexProperty,
         monotonicallyIncreasingCommitIndexProperty
@@ -132,11 +136,23 @@ monotonicallyIncreasingCommitIndexProperty = go mempty
 allAcceptedCommandReceiveResponseProperty :: Scenario entry result node state
 allAcceptedCommandReceiveResponseProperty = go
   where
-    go = void $ whenever commandReceived $ \(_, _, MkCommand _entry reqId) ->
+    go = void $ whenever commandReceived $ \(_, _, Command _entry reqId) ->
       let thisCommandResponded =
             commandResponded >>= \(_, _, MkCommandResponse _result' reqId') ->
               predicate $ \_ -> unless (reqId == reqId') Nothing
        in eventually thisCommandResponded
+
+-- | Ensure that every cluster membership change that's accepted by a leader
+-- is seen through by the same leader
+allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration :: (Eq node) => Scenario entry result node state
+allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration = go
+  where
+    go = void $ whenever clusterMembershipChangeInitiated $ \(term, leader) ->
+      eventually
+        ( clusterMembershipChangeCompleted >>= \(term', leader') ->
+            predicate $ \_ -> unless (term == term' && leader == leader') Nothing
+        )
+        <?> "Cluster membership change never completed"
 
 data NodeIndexes
   = MkNodeIndexes
@@ -185,8 +201,7 @@ indexRelationshipProperty = go mempty
                       acc
               checkState node newAcc
               go newAcc
-            -- A proxy for the log length increasing by one command
-            CommandReceived _tern node _ -> do
+            LogEntryAppended _tern node _ -> do
               let newAcc =
                     Map.alter
                       ( \case

@@ -4,24 +4,28 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Network.Consensus.Raft.Algorithm (server) where
+module Network.Consensus.Raft.Algorithm
+  ( server,
 
-import Control.Arrow ((&&&))
+    -- * Utilities
+    serverJoinCluster,
+  )
+where
+
 import Control.Concurrent.Class.MonadMVar (MonadMVar)
-import Control.Concurrent.Class.MonadSTM (atomically, writeTQueue)
+import Control.Concurrent.Class.MonadSTM (MonadSTM, atomically, writeTQueue)
 import Control.Monad (forever, unless, when, (<=<))
 import Control.Monad.Class.MonadAsync (MonadAsync, async, link)
 import Control.Monad.Class.MonadFork (MonadFork, labelThisThread)
 import Control.Monad.Class.MonadThrow (MonadMask)
-import Control.Monad.Class.MonadTimer (MonadDelay)
+import Control.Monad.Class.MonadTimer (MonadDelay, threadDelay)
 import Control.Monad.Trans.Class (lift)
-import Data.Foldable (traverse_)
 import Data.Functor ((<&>))
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import qualified Data.Vector as Vector
-import Lens.Micro.Platform (at, use, view, (%=), (+=), (.=), (^.))
+import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (^.))
 import Network.Consensus.Raft.Client (Request (..), Response (..))
 import Network.Consensus.Raft.Domain
 import Network.Consensus.Raft.Log (LogIndex, Lookup (..), Snapshot (Snapshot, sMetadata), SnapshotMetadata (..), lastLogIndex, (!?))
@@ -30,22 +34,29 @@ import Network.Consensus.Raft.Timer (resetTimer)
 import Network.Consensus.Raft.Transformer
   ( AppendEntries (..),
     AppendEntriesResult (..),
+    ClusterMembershipRequest (..),
+    ClusterMembershipResult (..),
     Command (..),
     Config (..),
     Event (..),
     InstallSnapshot (..),
     InstallSnapshotResult (..),
+    LogEntry (..),
     RPC (..),
     RPCResult (..),
     RaftT,
     RaftTrace (..),
     acceptClientRequest,
+    appendLogEntry,
     applyLogEntries,
     applySnapshot,
+    clusterConfiguration,
+    clusterNodes,
     commandLog,
     commitIndex,
     configuration,
     currentLeader,
+    currentSnapshot,
     dequeueEvent,
     electionTimer,
     eventQueue,
@@ -54,14 +65,16 @@ import Network.Consensus.Raft.Transformer
     matchIndex,
     nextElectionTimeout,
     nextIndex,
-    quorum,
+    peers,
     receiveClientRequest,
     receiveRPC,
     receiveRPCResult,
     role,
+    self,
     sendAppendEntriesTo,
     sendClientResponse,
     sendHeartbeat,
+    sendRPC,
     sendRPCConcurrently,
     sendRPCResult,
     specification,
@@ -75,6 +88,7 @@ import Network.Consensus.Raft.Transformer
     writeTerm,
     yesVotes,
   )
+import Network.Consensus.Raft.Transformer.Spec (ClusterMembershipError (..))
 
 server ::
   ( Ord node,
@@ -85,12 +99,42 @@ server ::
     MonadDelay m
   ) =>
   RaftT entry node state result m ()
-server = do
+server = serverWith $ do
+  resetHeartBeatTimer
+  resetElectionTimer
+
+serverJoinCluster ::
+  ( Ord node,
+    MonadMask m,
+    MonadFork m,
+    MonadMVar m,
+    MonadAsync m,
+    MonadDelay m
+  ) =>
+  node ->
+  RaftT entry node state result m ()
+serverJoinCluster target = serverWith $ do
+  self >>= sendRPC target . CM . ClusterMembershipRequest
+
+serverWith ::
+  ( Ord node,
+    MonadMask m,
+    MonadFork m,
+    MonadMVar m,
+    MonadAsync m,
+    MonadDelay m
+  ) =>
+  -- | Action to perform immediately after starting.
+  -- This can be used to spin up a server, and then
+  -- connect to an existing cluster.
+  RaftT entry node state result m () ->
+  RaftT entry node state result m ()
+serverWith onStart = do
   spec <- view specification
   queue <- view eventQueue
-  self <- view configuration <&> nodeId
+  s <- self
 
-  let trace' makeTrace = spec ^. tracer $ makeTrace self
+  let trace' makeTrace = spec ^. tracer $ makeTrace s
   _ <- lift $ link <=< async $ receiveRPCs spec queue trace'
   _ <- lift $ link <=< async $ receiveRPCResults spec queue trace'
   _ <- lift $ link <=< async $ receiveClientRequests spec queue trace'
@@ -98,11 +142,20 @@ server = do
   -- There are some initialization steps which require the configuration.
   -- Instead of coupling 'initialRaftState' with the configuration,
   -- we perform some initialization here.
-  peers <- view configuration <&> otherNodes
-  nextIndex .= Map.fromSet (const 0) peers
+  ps <- peers
+  nextIndex .= Map.fromSet (const 0) ps
 
-  resetHeartBeatTimer
-  resetElectionTimer
+  -- It's OK to run this before the main loop
+  -- since the receiving loops have already been
+  -- started.
+  --
+  -- Therefore, if we receive a reply before the main loop has
+  -- started, the events will queue up.
+  --
+  -- TODO: find a way to do this without exposing the internals
+  --       of RaftT
+  onStart
+
   forever $ do
     ev <- dequeueEvent
     trace (\t n -> EventReceived t n ev)
@@ -155,15 +208,17 @@ handleEvent (EventRPC (HeartBeat aeTerm senderNodeId _lastLogIndex _aeCommitInde
   handleHeartBeat aeTerm senderNodeId
 handleEvent (EventRPC (AE appendEntries)) = handleAppendEntries appendEntries
 handleEvent (EventRPC (IS installSnapshot)) = handleInstallSnapshot installSnapshot
+handleEvent (EventRPC (CM clusterMembershipRequest)) = handleClusterMembershipRequest clusterMembershipRequest
 handleEvent (EventRPCResult (RequestVoteResult voter voterTerm votedForUs)) =
   handleRequestVoteResult voter voterTerm votedForUs
 handleEvent (EventRPCResult (AER appendEntriesResult)) =
   handleAppendEntriesResult appendEntriesResult
 handleEvent (EventRPCResult (ISR installSnapshotResult)) =
   handleInstallSnapshotResult installSnapshotResult
+handleEvent (EventRPCResult (CMR clusterMembershipResult)) = handleClusterMembershipResult clusterMembershipResult
 
 handleClientRequest ::
-  (Ord node, MonadFork m, MonadMVar m) =>
+  (Ord node, MonadFork m, MonadMVar m, MonadSTM m) =>
   Request node entry -> RaftT entry node state result m ()
 handleClientRequest (MkRequest clientId entry) =
   use role >>= \case
@@ -173,20 +228,13 @@ handleClientRequest (MkRequest clientId entry) =
       use currentLeader >>= sendClientResponse clientId . NotLeader
     Leader -> do
       reqId <- acceptClientRequest clientId
-      let command = MkCommand entry reqId
+      let command = Command entry reqId
       trace (\t n -> CommandReceived t n command)
-      ourTerm <- use term
-      commandLog %= (`Log.append` (ourTerm, command))
-      peers <- view configuration <&> otherNodes
-      -- TODO: sendAppendEntriesTo in parallel
-      traverse_ sendAppendEntriesTo peers
-
-      -- In a single-node cluster, we would already have
-      -- quorum to update our commit index
-      applyLogEntries
+      appendLogEntry (LogEntryCommand command)
 
 handleAppendEntries ::
-  ( MonadMVar m,
+  ( Ord node,
+    MonadMVar m,
     MonadAsync m,
     MonadMask m,
     MonadFork m,
@@ -208,7 +256,7 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
 
       -- Consistency check
       entries <- use commandLog
-      let Snapshot (SnapshotMetadata lastIx _) _ = Log.lSnapshot entries
+      let Snapshot (SnapshotMetadata lastIx _) _ _ = Log.lSnapshot entries
           logIsConsistent =
             case entries !? prevLogIndex of
               NotFound -> prevLogIndex == 0
@@ -221,21 +269,21 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
           newLastEntry = prevLogIndex + fromIntegral (length newEntries)
 
       ourTerm <- use term
-      self <- view configuration <&> nodeId
+      s <- self
       if leaderTerm < ourTerm || not logIsConsistent
-        then sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm self False oldLastEntry))
+        then sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm s False oldLastEntry))
         else do
           commandLog
             %= (`Log.extend` (Seq.fromList $ Vector.toList newEntries))
             . (`Log.keepEntriesUpTo` succ prevLogIndex)
-          sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm self True newLastEntry))
+          sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm s True newLastEntry))
           ourCommitIndex <- use commitIndex
           when (leaderCommitIndex > ourCommitIndex) $ do
             commitIndex .= min leaderCommitIndex newLastEntry
             applyLogEntries
 
 handleAppendEntriesResult ::
-  (Ord node, MonadMVar m) =>
+  (Ord node, MonadMVar m, MonadSTM m) =>
   AppendEntriesResult node result ->
   RaftT entry node state result m ()
 handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode responderSuccess responderLogIndex) = do
@@ -286,7 +334,7 @@ handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLas
   ourTerm <- use term
   trace (\ourTerm' ourNode -> VoteRequestedBy ourTerm' ourNode candidateTerm candidateNode)
   mAlreadyVoted <- use votedFor
-  self <- view configuration <&> nodeId
+  s <- self
   entries <- use commandLog
   case mAlreadyVoted of
     -- We haven't voted yet
@@ -297,18 +345,18 @@ handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLas
           grantVote ourTerm
           trace (\ourTerm' ourNode -> VotedFor ourTerm' ourNode candidateTerm candidateNode)
         else do
-          sendRPCResult candidateNode (RequestVoteResult self ourTerm False)
+          sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
     -- We already voted for this candidate
     Just someCandidate
       | someCandidate == candidateNode ->
-          sendRPCResult candidateNode (RequestVoteResult self ourTerm True)
+          sendRPCResult candidateNode (RequestVoteResult s ourTerm True)
     -- We already voted, for another candidate
     Just _ ->
-      sendRPCResult candidateNode (RequestVoteResult self ourTerm False)
+      sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
   where
     grantVote ourTerm = do
-      self <- view configuration <&> nodeId
-      sendRPCResult candidateNode (RequestVoteResult self ourTerm True)
+      s <- self
+      sendRPCResult candidateNode (RequestVoteResult s ourTerm True)
       r <- use role
       when (r == Follower) resetElectionTimer
 
@@ -382,6 +430,59 @@ handleInstallSnapshotResult (InstallSnapshotResult responderTerm responderNode (
     -- send the rest of the logs
     sendAppendEntriesTo responderNode
 
+handleClusterMembershipRequest :: (Ord node, MonadMVar m, MonadSTM m) => ClusterMembershipRequest node -> RaftT entry node state result m ()
+handleClusterMembershipRequest (ClusterMembershipRequest requester) =
+  use role >>= \case
+    Candidate -> self >>= \s -> sendRPCResult requester (CMR (ClusterMembershipResult (Left (NoKnownLeader s))))
+    Follower ->
+      use currentLeader >>= \case
+        Nothing -> do
+          s <- self
+          sendRPCResult requester (CMR (ClusterMembershipResult (Left (NoKnownLeader s))))
+        Just leader -> sendRPC leader (CM (ClusterMembershipRequest requester)) -- forward to leader
+    Leader -> do
+      use clusterConfiguration >>= \case
+        -- By design, we cannot handle more than one membership request
+        -- at a time. The requester must retry later.
+        Joint {} -> self >>= \s -> sendRPCResult requester (CMR (ClusterMembershipResult (Left (OngoingClusterMembershipChange s))))
+        Simple {} -> pure ()
+
+      cluster <- clusterNodes
+      trace MembershipChangeInitiated
+      self >>= \s -> sendRPCResult requester (CMR (ClusterMembershipResult (Right s)))
+
+      -- By definition, a node that just joined
+      -- needs to catch up with a snapshot.
+      ( InstallSnapshot
+          <$> use term
+          <*> self
+          <*> currentSnapshot
+        )
+        >>= sendRPC requester . IS
+      appendLogEntry (LogEntryMembershipChange (Joint cluster (Set.insert requester cluster)))
+
+handleClusterMembershipResult ::
+  ( MonadDelay m,
+    MonadMVar m,
+    MonadFork m,
+    MonadMask m,
+    MonadAsync m
+  ) =>
+  ClusterMembershipResult node -> RaftT entry node state result m ()
+handleClusterMembershipResult = \case
+  ClusterMembershipResult (Right leaderId) -> do
+    becomeFollower leaderId
+    resetHeartBeatTimer
+    resetElectionTimer
+    trace JoinedCluster
+  ClusterMembershipResult (Left err) -> do
+    -- The natural delay to wait is one heart beat timeout. What else would we use?
+    view configuration <&> heartBeatTimeout >>= lift . threadDelay . fromIntegral
+    self >>= \s -> sendRPC (clusterMembershipErrorPeer err) (CM (ClusterMembershipRequest s))
+  where
+    clusterMembershipErrorPeer (NoKnownLeader n) = n
+    clusterMembershipErrorPeer (OngoingClusterMembershipChange n) = n
+
 becomeCandidate ::
   ( Ord node,
     MonadAsync m,
@@ -398,33 +499,33 @@ becomeCandidate = do
   nextIndex .= mempty
   matchIndex .= mempty
 
+  s <- self
   term += 1
-  self <- view configuration <&> nodeId
   w <- view (specification . writeTerm)
   thisTerm <- use term
-  lift (w self thisTerm)
+  lift (w s thisTerm)
 
   v <- view (specification . voteFor)
-  lift $ v self (Just self)
-  trace (VotedFor thisTerm self)
-  votedFor .= Just self
-  yesVotes .= Set.singleton self
+  lift $ v s (Just s)
+  trace (VotedFor thisTerm s)
+  votedFor .= Just s
+  yesVotes .= Set.singleton s
 
   resetElectionTimer
 
   checkElection -- there might only be a single node in the cluster
   r <- use role
   when (r == Candidate) $ do
-    peers <- view configuration <&> otherNodes
     currentTerm <- use term
     lastAppliedLogIndex <- use lastApplied
     lastLogTerm <-
       use commandLog <&> snd . Log.lastLogInfo
-    let rpc = RequestVote currentTerm self lastAppliedLogIndex lastLogTerm
-    sendRPCConcurrently peers rpc
+    let rpc = RequestVote currentTerm s lastAppliedLogIndex lastLogTerm
+    peers >>= (`sendRPCConcurrently` rpc)
 
 checkElection ::
-  ( MonadAsync m,
+  ( Ord node,
+    MonadAsync m,
     MonadMask m,
     MonadFork m,
     MonadMVar m,
@@ -432,12 +533,12 @@ checkElection ::
   ) =>
   RaftT entry node state result m ()
 checkElection = do
-  numYes <- Set.size <$> use yesVotes
-  q <- quorum
-  when (numYes >= q) becomeLeader
+  q <- hasQuorum <$> use clusterConfiguration <*> use yesVotes
+  when q becomeLeader
 
 becomeLeader ::
-  ( MonadDelay m,
+  ( Ord node,
+    MonadDelay m,
     MonadMVar m,
     MonadFork m,
     MonadMask m,
@@ -446,12 +547,11 @@ becomeLeader ::
   RaftT entry node state result m ()
 becomeLeader = do
   role .= Leader
-  (self, peers) <- view configuration <&> (nodeId &&& otherNodes)
-  currentLeader .= Just self
+  self <&> Just >>= assign currentLeader
   yesVotes .= Set.empty
 
   lastIx <- use commandLog <&> Log.lastLogIndex
-  nextIndex .= Map.fromSet (const (lastIx + 1)) peers
+  peers <&> Map.fromSet (const (lastIx + 1)) >>= assign nextIndex
 
   trace LeaderElected
 

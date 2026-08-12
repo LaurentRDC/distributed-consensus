@@ -16,6 +16,8 @@ module Test.Network.Consensus.Scenario
     votedFor,
     commandReceived,
     commandResponded,
+    clusterMembershipChangeInitiated,
+    clusterMembershipChangeCompleted,
     commitIndexIncreased,
     logEntryApplied,
     rpcReceived,
@@ -34,7 +36,7 @@ import Control.Monitor
 import Data.Dynamic (Typeable, fromDynamic)
 import qualified Data.Text as Text
 import Data.Word (Word64)
-import Network.Consensus.Raft (Command, CommandResponse, Event (..), LogIndex, RPC (..), RPCResult, RaftTrace (..), Term)
+import Network.Consensus.Raft (Command (..), CommandResponse, Event (..), LogIndex, RPC (..), RPCResult, RaftTrace (..), Term)
 import System.Random.Stateful (mkStdGen64, uniformR, uniformShuffleList)
 import Test.Tasty.QuickCheck
 
@@ -127,12 +129,22 @@ votedFor = predicate $ \case
 
 commandReceived :: Predicate (RaftTrace entry result node state) (Term, node, Command entry)
 commandReceived = predicate $ \case
-  (CommandReceived t n command) -> Just (t, n, command)
+  (CommandReceived t n command@(Command {})) -> Just (t, n, command)
   _ -> Nothing
 
 commandResponded :: Predicate (RaftTrace entry result node state) (Term, node, CommandResponse node result)
 commandResponded = predicate $ \case
   (CommandResultResponded t n response) -> Just (t, n, response)
+  _ -> Nothing
+
+clusterMembershipChangeInitiated :: Predicate (RaftTrace entry result node state) (Term, node)
+clusterMembershipChangeInitiated = predicate $ \case
+  MembershipChangeInitiated t n -> pure (t, n)
+  _ -> Nothing
+
+clusterMembershipChangeCompleted :: Predicate (RaftTrace entry result node state) (Term, node)
+clusterMembershipChangeCompleted = predicate $ \case
+  MembershipChangeCompleted t n -> pure (t, n)
   _ -> Nothing
 
 rpcReceived :: Predicate (RaftTrace entry result node state) (Term, node, RPC node entry state)
