@@ -70,4 +70,4 @@ jobs:
         run: cabal build
 
       - name: Run tests
-        run: cabal test
+        run: cabal test --test-options="--quickcheck-tests=1000"
