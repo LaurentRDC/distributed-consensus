@@ -31,7 +31,7 @@ module Network.Consensus.Raft.Transformer
   )
 where
 
-import Control.Concurrent.Class.MonadMVar (MonadMVar, modifyMVar_, newEmptyMVar, putMVar, readMVar, withMVar)
+import Control.Concurrent.Class.MonadMVar (MonadMVar, modifyMVar_, newEmptyMVar, putMVar, readMVar)
 import Control.Concurrent.Class.MonadSTM (atomically, readTQueue, writeTQueue)
 import Control.Monad (unless, void, when)
 import Control.Monad.Class.MonadAsync (MonadAsync, mapConcurrently_)
@@ -51,7 +51,6 @@ import Data.Sequence (ViewR (..))
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Traversable (for)
 import qualified Data.Vector as Vector
 import Lens.Micro.Platform (assign, at, use, view, (%=), (.=), (<%=), (^.))
 import Network.Consensus.Raft.Client (Response (..))
@@ -289,17 +288,19 @@ applyLogEntries = do
 
       requestsVar <- view currentClientRequests
       whenRole Leader $ do
-        responsesQueued <- lift $
-          withMVar requestsVar $ \requests ->
-            for results $
-              \(MkCommandResponse result requestId) ->
-                traverse
-                  (\r -> r `putMVar` result $> MkCommandResponse result requestId)
-                  (IntMap.lookup (fromIntegral requestId) requests)
+        -- It's not super elegant, but we must read the 'requestsVar' map
+        -- first, before inserting in its leaves.
+        --
+        -- Initially I tried to use `withMVar requestsVar (... putMVar <some leaf MVar>)`,
+        -- but this caused a rare race condition uncovered by `io-sim`!
+        resultSlots <- lift $ readMVar requestsVar
 
-        for_ responsesQueued $ \case
-          Nothing -> pure ()
-          Just r -> trace (\t n -> CommandResultResponded t n r)
+        for_ results $ \response@(MkCommandResponse result requestId) ->
+          case IntMap.lookup (fromIntegral requestId) resultSlots of
+            Nothing -> pure () -- TODO: isn't this unexpected?
+            Just slot -> do
+              lift (putMVar slot result)
+              trace (\t n -> CommandResultResponded t n response)
 
       lastApplied .= currentCommitIndex
       trace (\n t -> LastAppliedIndexIncreasedTo n t currentCommitIndex)
