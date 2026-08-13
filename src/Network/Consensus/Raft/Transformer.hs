@@ -31,11 +31,11 @@ module Network.Consensus.Raft.Transformer
   )
 where
 
-import Control.Concurrent.Class.MonadMVar (MonadMVar, modifyMVar_, newEmptyMVar, putMVar, readMVar)
+import Control.Concurrent.Class.MonadMVar (MonadMVar)
 import Control.Concurrent.Class.MonadSTM (atomically, readTQueue, writeTQueue)
-import Control.Monad (unless, void, when)
+import Control.Monad (unless, when)
 import Control.Monad.Class.MonadAsync (MonadAsync, mapConcurrently_)
-import Control.Monad.Class.MonadFork (MonadFork, forkFinally, labelThisThread)
+import Control.Monad.Class.MonadFork (MonadFork)
 import Control.Monad.Class.MonadSTM (MonadSTM)
 import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay)
@@ -44,7 +44,6 @@ import Data.Foldable (for_, traverse_)
 import qualified Data.Foldable as Foldable
 import Data.Function ((&))
 import Data.Functor (($>), (<&>))
-import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromJust, isJust)
 import Data.Sequence (ViewR (..))
@@ -286,21 +285,20 @@ applyLogEntries = do
           -- Membership change commands don't return a result
           <&> fmap fromJust . Seq.filter isJust
 
-      requestsVar <- view currentClientRequests
       whenRole Leader $ do
-        -- It's not super elegant, but we must read the 'requestsVar' map
-        -- first, before inserting in its leaves.
-        --
+        leaderId <- self
         -- Initially I tried to use `withMVar requestsVar (... putMVar <some leaf MVar>)`,
         -- but this caused a rare race condition uncovered by `io-sim`!
-        resultSlots <- lift $ readMVar requestsVar
-
         for_ results $ \response@(MkCommandResponse result requestId) ->
-          case IntMap.lookup (fromIntegral requestId) resultSlots of
-            Nothing -> pure () -- TODO: isn't this unexpected?
-            Just slot -> do
-              lift (putMVar slot result)
-              trace (\t n -> CommandResultResponded t n response)
+          use currentClientRequests
+            <&> Map.lookup requestId
+            >>= \case
+              Nothing -> pure () -- TODO: isn't this unexpected?
+              Just requester -> do
+                trace (\t n -> CommandResultResponded t n response)
+                -- TODO: reply (and possibly retry) in a separate thread
+                sendClientResponse requester (Success leaderId result)
+                currentClientRequests %= Map.delete requestId
 
       lastApplied .= currentCommitIndex
       trace (\n t -> LastAppliedIndexIncreasedTo n t currentCommitIndex)
@@ -346,33 +344,13 @@ updateTerm update = do
 
 -- | Set up a callback for a client request
 acceptClientRequest ::
-  (MonadMVar m, MonadFork m) =>
+  (MonadMVar m) =>
   -- | Client node
   node ->
   RaftT entry node state result m RequestId
 acceptClientRequest clientId = do
-  requests <- view currentClientRequests
-  spec <- view specification
   requestId <- nextRequestId <%= succ
-  resultVar <- lift newEmptyMVar
-  leaderId <- view configuration <&> nodeId
-  lift $
-    modifyMVar_ requests $
-      pure . IntMap.insert (fromIntegral requestId) resultVar
-
-  void
-    $ lift
-    $ forkFinally
-      ( do
-          -- TODO: define some timeout after which this thread is filled,
-          -- and the cleanup deletes the data associated with the request ID
-          labelThisThread $ "Client request handler for request ID " <> show requestId
-          result <- readMVar resultVar
-          (spec ^. Spec.sendClientResponse) clientId (Success leaderId result)
-      )
-    $ \_ ->
-      modifyMVar_ requests $
-        pure . IntMap.delete (fromIntegral requestId)
+  currentClientRequests %= Map.insert requestId clientId
 
   pure requestId
 

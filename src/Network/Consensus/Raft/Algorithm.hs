@@ -218,7 +218,7 @@ handleEvent (EventRPCResult (ISR installSnapshotResult)) =
 handleEvent (EventRPCResult (CMR clusterMembershipResult)) = handleClusterMembershipResult clusterMembershipResult
 
 handleClientRequest ::
-  (Ord node, MonadFork m, MonadMVar m, MonadSTM m) =>
+  (Ord node, MonadMVar m, MonadAsync m) =>
   Request node entry -> RaftT entry node state result m ()
 handleClientRequest (MkRequest clientId entry) =
   use role >>= \case

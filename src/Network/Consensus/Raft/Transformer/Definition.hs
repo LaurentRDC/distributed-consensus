@@ -8,7 +8,6 @@ module Network.Consensus.Raft.Transformer.Definition
     specification,
     configuration,
     eventQueue,
-    currentClientRequests,
     heartBeatTimer,
     electionTimer,
 
@@ -24,11 +23,10 @@ module Network.Consensus.Raft.Transformer.Definition
   )
 where
 
-import Control.Concurrent.Class.MonadMVar (MVar, MonadMVar, newMVar)
+import Control.Concurrent.Class.MonadMVar (MonadMVar)
 import Control.Concurrent.Class.MonadSTM (TQueue, atomically, newTQueue, writeTQueue)
 import Control.Monad.Class.MonadSTM (MonadSTM)
 import Control.Monad.Trans.RWS.CPS (RWST, ask, asks, evalRWST, get, gets, local, modify, put, state)
-import Data.IntMap.Strict (IntMap)
 import Data.Set (Set)
 import Data.Word (Word64)
 import Lens.Micro.Platform (makeLenses)
@@ -55,7 +53,6 @@ runRaftT ::
   m a
 runRaftT config members internalState spec f = do
   queue <- atomically newTQueue
-  requests <- newMVar mempty
   hbTimer <- newTimer (atomically $ writeTQueue queue EventHeartBeatTimeout)
   elTimer <- newTimer (atomically $ writeTQueue queue EventElectionTimeout)
   fst
@@ -65,7 +62,6 @@ runRaftT config members internalState spec f = do
           { _configuration = config,
             _specification = spec,
             _eventQueue = queue,
-            _currentClientRequests = requests,
             _heartBeatTimer = hbTimer,
             _electionTimer = elTimer
           }
@@ -77,7 +73,6 @@ data RaftEnv entry node state result m
   { _configuration :: !(Config node),
     _specification :: !(RaftSpec entry node state result m),
     _eventQueue :: TQueue m (Event node entry result state),
-    _currentClientRequests :: MVar m (IntMap (MVar m result)),
     -- Handle to a thread which will send a heartbeat timeout
     -- event after the appropriate amount of time.
     _heartBeatTimer :: Timer m,

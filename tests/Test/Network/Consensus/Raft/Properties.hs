@@ -21,6 +21,7 @@ import Control.Monad (unless, void, when)
 import Control.Monitor
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import qualified Data.Text as Text
 import Network.Consensus.Raft
   ( Command (..),
     CommandResponse (..),
@@ -138,13 +139,13 @@ monotonicallyIncreasingCommitIndexProperty = go mempty <?> "Commit index not inc
 -- | Ensure that every command that was acknowledged by the leader
 -- receives a response with the same request ID.
 allAcceptedCommandReceiveResponseProperty :: Scenario entry result node state
-allAcceptedCommandReceiveResponseProperty = go <?> "An accepted command did not receive a response"
+allAcceptedCommandReceiveResponseProperty = go
   where
     go = void $ whenever commandReceived $ \(_, _, Command _entry reqId) ->
       let thisCommandResponded =
             commandResponded >>= \(_, _, MkCommandResponse _result' reqId') ->
               predicate $ \_ -> unless (reqId == reqId') Nothing
-       in eventually thisCommandResponded
+       in eventually thisCommandResponded <?> "Never received a response for " <> Text.show reqId
 
 -- | Ensure that every cluster membership change that's accepted by a leader
 -- is seen through by the same leader

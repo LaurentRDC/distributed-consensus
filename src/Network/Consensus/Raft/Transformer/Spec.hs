@@ -41,6 +41,7 @@ module Network.Consensus.Raft.Transformer.Spec
     matchIndex,
     yesVotes,
     nextRequestId,
+    currentClientRequests,
     randomGen,
 
     -- * Types
@@ -284,6 +285,7 @@ data RaftState node entry state = MkRaftState
     -- | Set of votes received in the current term
     _yesVotes :: !(Set node),
     _nextRequestId :: !RequestId,
+    _currentClientRequests :: !(Map RequestId node),
     _randomGen :: !StdGen
   }
 
@@ -316,6 +318,7 @@ initialRaftState seed clusterConf initialState =
       _matchIndex = mempty,
       _yesVotes = mempty,
       _nextRequestId = 0,
+      _currentClientRequests = mempty,
       -- We use mkStdGen64 for reproducibility across 32-bit and 64-bit architectures
       _randomGen = mkStdGen64 seed
     }
