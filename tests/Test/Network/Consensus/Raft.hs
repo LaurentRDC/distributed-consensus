@@ -113,12 +113,12 @@ propClusterWith raceOrNot =
 
       -- In order to detect infinite loops, especially in CI,
       -- we use a *very generous* scenario timeout.
-      --
-      let scenarioTimeUpperBound =
-            10 * scenarioInputs.electionTimeoutUpperBound -- Baseline
+      let timeStep = max 10_000 scenarioInputs.electionTimeoutUpperBound
+          scenarioTimeUpperBound =
+            10 * timeStep -- Baseline
               + 3
                 * genericLength scenarioInputs.commands
-                * scenarioInputs.electionTimeoutUpperBound
+                * timeStep
 
       race_
         (threadDelay (fromIntegral scenarioTimeUpperBound) >> fail "Possible infinite loop detected")
