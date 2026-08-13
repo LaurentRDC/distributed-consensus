@@ -19,7 +19,7 @@ where
 
 import Control.Concurrent.Class.MonadSTM (MonadSTM, TQueue, atomically, newTQueueIO, readTQueue, writeTQueue)
 import Control.Monad (when)
-import Control.Monad.Class.MonadAsync (concurrently_, forConcurrently_, withAsync)
+import Control.Monad.Class.MonadAsync (concurrently_, forConcurrently_, race_, withAsync)
 import Control.Monad.Class.MonadTest (exploreRaces)
 import Control.Monad.Class.MonadTimer (threadDelay, timeout)
 import Control.Monad.IOSim (IOSim, exploreSimTrace, traceM)
@@ -29,6 +29,7 @@ import Data.Functor ((<&>))
 import Data.IntMap (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.IntSet as IntSet
+import Data.List (genericLength)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -95,47 +96,54 @@ propClusterWith raceOrNot =
   property $
     forAll genScenarioInputs $
       \scenarioInputs ->
-        -- Number of commands tuned for the test suite to take a few seconds.
-        forAll (vectorOf 30 (arbitrary @Command)) $ \commands ->
-          counterexample
-            (Text.unpack $ pShow scenarioInputs)
-            $ exploreSimTrace
-              id
-              ( scenario
-                  scenarioInputs
-                  commands
-              )
-              ( \_ trace ->
-                  checkScenario
-                    (allProperties @Command @Result @Node @State)
-                    trace
-              )
+        counterexample
+          (Text.unpack $ pShow scenarioInputs)
+          $ exploreSimTrace
+            id
+            (scenario scenarioInputs)
+            ( \_ trace ->
+                checkScenario
+                  (allProperties @Command @Result @Node @State)
+                  trace
+            )
   where
-    scenario scenarioInputs commands = do
-      let stateMachineExpectations = expectedResults commands
+    scenario scenarioInputs = do
+      let stateMachineExpectations = expectedResults scenarioInputs.commands
       (harness :: Harness s) <- testHarness scenarioInputs
 
-      -- This is the point where we can mark this thread "racy"
-      -- (by default, it is not).
+      -- In order to detect infinite loops, especially in CI,
+      -- we use a *very generous* scenario timeout.
       --
-      -- The benefit of NOT marking this racy is to explore many more of the initial
-      -- parameter space (more 'ScenarioInputs's).
-      --
-      -- The benefit of marking this racy is to explore races within fewer initial
-      -- conditions
-      raceOrNot
+      let scenarioTimeUpperBound =
+            10 * scenarioInputs.electionTimeoutUpperBound -- Baseline
+              + 3
+                * genericLength scenarioInputs.commands
+                * scenarioInputs.electionTimeoutUpperBound
 
-      -- Run servers until the clients are done interacting
-      withAsync (runServers harness) $ \_ ->
-        runClient
-          (runClientAction harness)
-          -- In principle, there is no upper bound on how long a
-          -- client can wait to receive a message. I'm putting a generous
-          -- bound here because I have seen situations where the client never
-          -- receives a reply (due to a bug)
-          (10 * scenarioInputs.electionTimeoutUpperBound)
-          stateMachineExpectations
+      race_
+        (threadDelay (fromIntegral scenarioTimeUpperBound) >> fail "Possible infinite loop detected")
+        ( do
+            -- This is the point where we can mark this thread "racy"
+            -- (by default, it is not).
+            --
+            -- The benefit of NOT marking this racy is to explore many more of the initial
+            -- parameter space (more 'ScenarioInputs's).
+            --
+            -- The benefit of marking this racy is to explore races within fewer initial
+            -- conditions
+            raceOrNot
 
+            -- Run servers until the clients are done interacting
+            withAsync (runServers harness) $ \_ ->
+              runClient
+                (runClientAction harness)
+                -- In principle, there is no upper bound on how long a
+                -- client can wait to receive a message. I'm putting a generous
+                -- bound here because I have seen situations where the client never
+                -- receives a reply (due to a bug)
+                (10 * scenarioInputs.electionTimeoutUpperBound)
+                stateMachineExpectations
+        )
     runServers :: Harness s -> IOSim s ()
     runServers harness =
       concurrently_
@@ -187,7 +195,8 @@ data ScenarioInputs
     seeds :: [Word64],
     numInitialClusterNodes :: Int,
     numInitialLoneNodes :: Int,
-    loneNodesWait :: [Microseconds]
+    loneNodesWait :: [Microseconds],
+    commands :: [Command]
   }
   deriving (Eq, Show)
 
@@ -202,6 +211,7 @@ genScenarioInputs = do
   etolb <- chooseBoundedIntegral (round $ (0.9 :: Double) * fromIntegral hb, hb * 10)
   etoub <- chooseBoundedIntegral (etolb, 2 * etolb)
   loneWaits <- vectorOf numLoneNodes (chooseBoundedIntegral (etoub, 10 * etoub))
+  cmds <- flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 30)
   pure $
     ScenarioInputs
       { heartbeatTimeout = hb,
@@ -210,7 +220,8 @@ genScenarioInputs = do
         seeds = ss,
         numInitialClusterNodes = clusterSize,
         numInitialLoneNodes = numLoneNodes,
-        loneNodesWait = loneWaits
+        loneNodesWait = loneWaits,
+        commands = cmds
       }
 
 data Server s
@@ -284,7 +295,7 @@ testHarness ::
   ScenarioInputs ->
   IOSim s (Harness s)
 testHarness
-  (ScenarioInputs hb etlb etup s numClusterNodes numLoneNodes loneWaits) = do
+  (ScenarioInputs hb etlb etup s numClusterNodes numLoneNodes loneWaits _commands) = do
     networkFabric <- newNetworkFabric $ mconcat [Set.fromList (fromIntegral <$> serverNodes), Set.fromList (fromIntegral <$> loneNodes), Set.singleton clientNode]
 
     let mkServer' :: Word64 -> Node -> Server s
