@@ -48,7 +48,7 @@ allProperties =
 -- | Ensure that in each term where a leader is elected, no other leader
 -- is elected
 singleLeaderPerTermProperty :: Scenario entry result node state
-singleLeaderPerTermProperty = go
+singleLeaderPerTermProperty = go <?> "Another leader elected for the same term"
   where
     anotherLeaderIn term = predicate $ \case
       LeaderElected t _ | t == term -> Just ()
@@ -61,20 +61,24 @@ singleLeaderPerTermProperty = go
     -- apply the expectation using 'both'
     go = void $ whenever leaderElected $ \(term, _) ->
       both go (never (anotherLeaderIn term))
-        <?> "Another leader elected for the same term"
 
 -- | Ensure that a node casts at most one vote per term
 singleVoteCastPerTermProperty :: (Ord node) => Scenario entry result node state
-singleVoteCastPerTermProperty = go mempty
+singleVoteCastPerTermProperty = go mempty <?> "More than one vote cast per term"
   where
-    go votes = void $ whenever votedFor $ \(voterTerm, voterNode, _, _) -> do
-      when (Set.member (voterTerm, voterNode) votes) $ fail "Node cast more than one vote in term"
+    go votes =
+      void
+        ( whenever
+            votedFor
+            $ \(voterTerm, voterNode, _, _) -> do
+              when (Set.member (voterTerm, voterNode) votes) $ fail "Node cast more than one vote in term"
 
-      go (Set.insert (voterTerm, voterNode) votes)
+              go (Set.insert (voterTerm, voterNode) votes)
+        )
 
 -- | Ensure that each node witnesses terms that increase monotonically
 monotonicallyIncreasingTermProperty :: (Ord node) => Scenario entry result node state
-monotonicallyIncreasingTermProperty = go mempty
+monotonicallyIncreasingTermProperty = go mempty <?> "Term not increased monotonically"
   where
     go latestKnownTerms = void $ do
       whenever (predicate roleTerm) $ \(node, newTerm) -> do
@@ -93,7 +97,7 @@ monotonicallyIncreasingTermProperty = go mempty
 
 -- | Ensure that each node's last applied index increases monotonically.
 monotonicallyIncreasingLastAppliedIndexProperty :: (Ord node) => Scenario entry result node state
-monotonicallyIncreasingLastAppliedIndexProperty = go mempty
+monotonicallyIncreasingLastAppliedIndexProperty = go mempty <?> "Last applied index not increasing monotonically"
   where
     go acc =
       step
@@ -113,7 +117,7 @@ monotonicallyIncreasingLastAppliedIndexProperty = go mempty
 
 -- | Ensure that each node's commit index increases monotonically.
 monotonicallyIncreasingCommitIndexProperty :: (Ord node) => Scenario entry result node state
-monotonicallyIncreasingCommitIndexProperty = go mempty
+monotonicallyIncreasingCommitIndexProperty = go mempty <?> "Commit index not increasing monotonically"
   where
     go acc =
       step
@@ -134,7 +138,7 @@ monotonicallyIncreasingCommitIndexProperty = go mempty
 -- | Ensure that every command that was acknowledged by the leader
 -- receives a response with the same request ID.
 allAcceptedCommandReceiveResponseProperty :: Scenario entry result node state
-allAcceptedCommandReceiveResponseProperty = go
+allAcceptedCommandReceiveResponseProperty = go <?> "An accepted command did not receive a response"
   where
     go = void $ whenever commandReceived $ \(_, _, Command _entry reqId) ->
       let thisCommandResponded =
@@ -145,7 +149,8 @@ allAcceptedCommandReceiveResponseProperty = go
 -- | Ensure that every cluster membership change that's accepted by a leader
 -- is seen through by the same leader
 allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration :: (Eq node) => Scenario entry result node state
-allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration = go
+allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration =
+  go <?> "An accepted cluster membership request did not result in new configuration"
   where
     go = void $ whenever clusterMembershipChangeInitiated $ \(term, leader) ->
       eventually
@@ -167,7 +172,7 @@ data NodeIndexes
 --
 --    appliex index  <=  commit index  <=  log length
 indexRelationshipProperty :: (Ord node) => Scenario entry result node state
-indexRelationshipProperty = go mempty
+indexRelationshipProperty = go mempty <?> "index relationship did not hold"
   where
     checkState node acc =
       case Map.lookup node acc of
