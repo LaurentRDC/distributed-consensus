@@ -1,0 +1,9 @@
+import: cabal.project
+
+-- Turns on optimizations for local packages
+-- and also for third-party packages
+optimization: 2
+
+package *
+    optimization: 2
+
