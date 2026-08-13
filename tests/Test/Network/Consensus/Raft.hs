@@ -8,13 +8,19 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 
-module Test.Network.Consensus.Raft (tests) where
+module Test.Network.Consensus.Raft
+  ( tests,
+    NumRacyTests,
+  )
+where
 
-import Control.Concurrent.Class.MonadSTM (MonadSTM, TVar, atomically, modifyTVar', newTVarIO, readTVar, retry, writeTVar)
+import Control.Concurrent.Class.MonadSTM (MonadSTM, TQueue, atomically, newTQueueIO, readTQueue, writeTQueue)
 import Control.Monad (when)
 import Control.Monad.Class.MonadAsync (concurrently_, forConcurrently_, withAsync)
+import Control.Monad.Class.MonadTest (exploreRaces)
 import Control.Monad.Class.MonadTimer (threadDelay, timeout)
 import Control.Monad.IOSim (IOSim, exploreSimTrace, traceM)
 import Control.Monad.Trans.Class (lift)
@@ -25,9 +31,10 @@ import qualified Data.IntMap.Strict as IntMap
 import qualified Data.IntSet as IntSet
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Sequence (Seq (..))
-import qualified Data.Sequence as Seq
+import Data.Maybe (fromMaybe)
+import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Tagged (Tagged (..))
 import qualified Data.Text.Lazy as Text
 import Data.Word (Word64)
 import Network.Consensus.Raft
@@ -42,8 +49,23 @@ import qualified Network.Consensus.Raft as Raft
 import Network.Consensus.Raft.Client (RaftClientSpec (..), RaftClientT, Request, Response, request, runRaftClientT)
 import Test.Network.Consensus.Raft.Properties (allProperties)
 import Test.Network.Consensus.Scenario (checkScenario)
-import Test.Tasty (TestTree, testGroup)
+import Test.Tasty (TestTree, askOption, localOption, testGroup)
+import Test.Tasty.Options
 import Test.Tasty.QuickCheck
+  ( Arbitrary (arbitrary),
+    Gen,
+    Property,
+    QuickCheckTests (QuickCheckTests),
+    Testable (property),
+    chooseBoundedIntegral,
+    chooseInt,
+    counterexample,
+    elements,
+    forAll,
+    oneof,
+    testProperty,
+    vectorOf,
+  )
 import Text.Pretty.Simple (pShow)
 
 tests :: TestTree
@@ -52,15 +74,27 @@ tests =
     "Raft"
     [ testGroup
         "Property tests"
-        [ testCluster
+        [ testClusterWithoutRaces,
+          testClusterWithRaces
         ]
     ]
 
-testCluster :: TestTree
-testCluster =
-  testProperty "Cluster properties" $
-    property $
-      forAll genScenarioInputs $ \scenarioInputs ->
+testClusterWithoutRaces :: TestTree
+testClusterWithoutRaces =
+  testProperty "Cluster properties without schedule exploration" $
+    propClusterWith (pure ())
+
+testClusterWithRaces :: TestTree
+testClusterWithRaces =
+  setNumRacyTests $
+    testProperty "Cluster properties with schedule exploration" $
+      propClusterWith exploreRaces
+
+propClusterWith :: (forall s. IOSim s ()) -> Property
+propClusterWith raceOrNot =
+  property $
+    forAll genScenarioInputs $
+      \scenarioInputs ->
         -- Number of commands tuned for the test suite to take a few seconds.
         forAll (vectorOf 30 (arbitrary @Command)) $ \commands ->
           counterexample
@@ -80,6 +114,17 @@ testCluster =
     scenario scenarioInputs commands = do
       let stateMachineExpectations = expectedResults commands
       (harness :: Harness s) <- testHarness scenarioInputs
+
+      -- This is the point where we can mark this thread "racy"
+      -- (by default, it is not).
+      --
+      -- The benefit of NOT marking this racy is to explore many more of the initial
+      -- parameter space (more 'ScenarioInputs's).
+      --
+      -- The benefit of marking this racy is to explore races within fewer initial
+      -- conditions
+      raceOrNot
+
       -- Run servers until the clients are done interacting
       withAsync (runServers harness) $ \_ ->
         runClient
@@ -174,7 +219,7 @@ data Server s
     sSpec :: RaftSpec Command Node State Result (IOSim s)
   }
 
-type Mailbox s m = TVar (IOSim s) (IntMap (Seq m))
+type Mailbox s m = (IntMap (TQueue (IOSim s) m))
 
 data NetworkFabric s
   = MkNetworkFabric
@@ -184,13 +229,15 @@ data NetworkFabric s
     responsesMailbox :: Mailbox s (Response Node Result)
   }
 
-newNetworkFabric :: IOSim s (NetworkFabric s)
-newNetworkFabric =
+newNetworkFabric :: Set Node -> IOSim s (NetworkFabric s)
+newNetworkFabric nodes =
   MkNetworkFabric
-    <$> newTVarIO mempty
-    <*> newTVarIO mempty
-    <*> newTVarIO mempty
-    <*> newTVarIO mempty
+    <$> newMailbox
+    <*> newMailbox
+    <*> newMailbox
+    <*> newMailbox
+  where
+    newMailbox = IntMap.fromList <$> traverse (\n -> (fromIntegral n,) <$> newTQueueIO) (Set.toList nodes)
 
 mkServer :: NetworkFabric s -> Microseconds -> Microseconds -> Microseconds -> Word64 -> Node -> Server s
 mkServer networkFabric hbto etolb etoub seed node =
@@ -238,7 +285,7 @@ testHarness ::
   IOSim s (Harness s)
 testHarness
   (ScenarioInputs hb etlb etup s numClusterNodes numLoneNodes loneWaits) = do
-    networkFabric <- newNetworkFabric
+    networkFabric <- newNetworkFabric $ mconcat [Set.fromList (fromIntegral <$> serverNodes), Set.fromList (fromIntegral <$> loneNodes), Set.singleton clientNode]
 
     let mkServer' :: Word64 -> Node -> Server s
         mkServer' = mkServer networkFabric hb etlb etup
@@ -271,19 +318,17 @@ testHarness
               receive networkFabric.responsesMailbox clientNode <&> Right
           }
 
-send :: (MonadSTM m) => TVar m (IntMap (Seq a)) -> Node -> a -> m ()
+send :: (MonadSTM m) => IntMap (TQueue m a) -> Node -> a -> m ()
 send mailbox node message =
-  atomically $ modifyTVar' mailbox (IntMap.insertWith (<>) (fromIntegral node) (Seq.singleton message))
+  case IntMap.lookup (fromIntegral node) mailbox of
+    Nothing -> error $ "Mailbox badly configures: missing node " <> show node
+    Just queue -> atomically $ writeTQueue queue message
 
-receive :: (MonadSTM m) => TVar m (IntMap (Seq a)) -> Node -> m a
-receive mailbox node = atomically $ do
-  mail <- readTVar mailbox
-  case IntMap.lookup (fromIntegral node) mail of
-    Nothing -> retry
-    Just Seq.Empty -> retry
-    Just (nextMessage :<| rest) ->
-      writeTVar mailbox (IntMap.insert (fromIntegral node) rest mail)
-        >> pure nextMessage
+receive :: (MonadSTM m) => IntMap (TQueue m a) -> Node -> m a
+receive mailbox node =
+  case IntMap.lookup (fromIntegral node) mailbox of
+    Nothing -> error $ "Mailbox badly configures: missing node " <> show node
+    Just queue -> atomically $ readTQueue queue
 
 -- Simple key-value store
 
@@ -335,3 +380,28 @@ expectedResults allCommands@(cmd : cmds) =
           )
           (let (state, result) = step mempty cmd in (state, [(state, result)]))
           cmds
+
+setNumRacyTests :: TestTree -> TestTree
+setNumRacyTests tree =
+  -- These tests are potentially very long. We want a small default (here, 3),
+  -- but with the ability to set it to a larger or smaller number at weill.
+  --
+  -- 'QuickCheckTests' doesn't allow this, as its default is 100, which is much
+  -- too large
+  askOption $ \(NumRacyTests n) ->
+    let numTests = fromMaybe 3 n
+     in localOption (QuickCheckTests numTests) tree
+
+newtype NumRacyTests
+  = NumRacyTests (Maybe Int)
+  deriving (Eq, Ord, Show)
+
+instance IsOption NumRacyTests where
+  defaultValue = NumRacyTests Nothing
+
+  parseValue s =
+    NumRacyTests . Just <$> safeRead s
+
+  optionName = Tagged "num-racy-tests"
+
+  optionHelp = Tagged "Number of racy tests to run"

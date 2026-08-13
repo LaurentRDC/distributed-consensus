@@ -72,6 +72,7 @@ test-suite hs-raft-test
                     , io-sim
                     , pretty-simple ^>=4.1
                     , random
+                    , tagged ^>=0.8
                     , tasty ^>=1.5
                     , tasty-quickcheck ^>=0.11
                     , text

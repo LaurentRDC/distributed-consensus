@@ -33,6 +33,26 @@ $ cabal test
 
 ### Deterministic simulation testing
 
+Cluster properties are tested under two modes: with, and without, schedule exploration.
+
+In both cases, the cluster's initial conditions are generated at random by QuickCheck: timeouts, cluster configuration, fault schedules, etc.
+
+Without schedule exploration, a simulated trace is run from these initial conditions. This is relatively fast, and allows to explore the behavior of the system under many initial conditions. You can tweak the number of tests run in this mode using the `quichcheck-tests` option. For example:
+
+```sh
+cabal test --test-options='--quickcheck-tests=1000'
+```
+
+
+With schedule exploration, the system is started in randomly-generated conditions. However, whenever the simulation reaches a branching-point, timing-wise, both branches are explored separately as tests. This is much slower, but allows to detect races in the execution of a cluster. You can tweak the number of tests in this mode using the `num-racy-tests` option. For example:
+
+```sh
+cabal test --test-options='--num-racy-tests=5'
+```
+
+### Replaying a failure
+
+
 During the course of development, you may see a test failure for the deterministic simulation test suite:
 
 ```sh
@@ -42,7 +62,7 @@ Test suite hs-raft-test: RUNNING...
 hs-raft
   Raft
     Property tests
-      Cluster properties: FAIL (0.05s)
+      Cluster properties: FAIL
         <snip>
         Use --quickcheck-replay="(SMGen 6009993106432336185 7272677387067049729,0)" to reproduce.
         <snip>
