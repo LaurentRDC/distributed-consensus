@@ -4,6 +4,7 @@ module Network.Consensus.Raft.Transformer.Definition
   ( runRaftT,
     RaftT,
     Config (..),
+    StartingState (..),
     RaftEnv,
     specification,
     configuration,
@@ -29,8 +30,10 @@ import Control.Concurrent.Class.MonadSTM (TQueue, atomically, newTQueue, writeTQ
 import Control.Monad.Class.MonadSTM (MonadSTM)
 import Control.Monad.Trans.RWS.CPS (RWST, ask, asks, evalRWST, get, gets, local, modify, put, state)
 import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Word (Word64)
 import Lens.Micro.Platform (makeLenses)
+import Network.Consensus.Raft.Domain (Role (..))
 import Network.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
 import Network.Consensus.Raft.Transformer.Spec (Event (..), RaftSpec, RaftState, initialRaftState)
 
@@ -41,22 +44,32 @@ type RaftT entry node state result m =
     (RaftState node entry state)
     m
 
+data StartingState node
+  = -- | Lone node, not in a cluster
+    LoneNode
+  | -- | Node in cluster. The cluster configuration can be empty,
+    -- in which case this cluster has a single node
+    InCluster (Set node)
+
 runRaftT ::
   ( Ord node,
     MonadSTM m,
     MonadMVar m
   ) =>
   Config node ->
-  Set node ->
+  StartingState node ->
   state ->
   RaftSpec entry node state result m ->
   RaftT entry node state result m a ->
   m a
-runRaftT config members internalState spec f = do
+runRaftT config startingState internalState spec f = do
   queue <- atomically newTQueue
   hbTimer <- newTimer (atomically $ writeTQueue queue EventHeartBeatTimeout)
   elTimer <- newTimer (atomically $ writeTQueue queue EventElectionTimeout)
   exitLock <- newEmptyMVar
+  let (members, initRole) = case startingState of
+        LoneNode -> (mempty, NonMember)
+        InCluster cluster -> (Set.insert (nodeId config) cluster, Follower)
   fst
     <$> evalRWST
       f
@@ -69,7 +82,7 @@ runRaftT config members internalState spec f = do
             _exitLock = exitLock
           }
       )
-      (initialRaftState (randomSeed config) members internalState)
+      (initialRaftState initRole (randomSeed config) members internalState)
 
 data RaftEnv entry node state result m
   = MkRaftEnv

@@ -32,6 +32,9 @@ data Role
   = Leader
   | Follower
   | Candidate
+  | -- | Special states for nodes that aren't members of a cluster. This
+    -- doesn't let them participate in elections and change their terms
+    NonMember
   deriving (Eq, Show, Ord, Enum, Bounded)
 
 -- | Represents the membership of a cluster.

@@ -118,8 +118,13 @@ server = do
   ps <- peers
   nextIndex .= Map.fromSet (const 0) ps
 
-  resetHeartBeatTimer
-  resetElectionTimer
+  -- NonMembers don't participate in elections, but also don't hold elections
+  -- for themselves. This prevents a NonMember from electing itself as the leader
+  -- of its own trivial cluster
+  r <- use role
+  unless (r == NonMember) $ do
+    resetHeartBeatTimer
+    resetElectionTimer
 
   lock <- view exitLock
   let loop = do
@@ -204,6 +209,8 @@ handleClientRequest ::
   Request node entry -> RaftT entry node state result m ()
 handleClientRequest (MkRequest clientId entry) =
   use role >>= \case
+    NonMember ->
+      sendClientResponse clientId (NotLeader Nothing)
     Candidate ->
       sendClientResponse clientId (NotLeader Nothing)
     Follower ->
@@ -227,42 +234,39 @@ handleAppendEntries ::
 handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLogTerm newEntries leaderCommitIndex) = do
   termComparison <- handleTermNumber leaderTerm
 
-  use role >>= \case
-    Leader -> pure ()
-    Candidate -> pure ()
-    Follower -> do
-      -- TODO: I believe the next line is redundant because we have a separate
-      -- heartbeat mechanism.
-      when (termComparison == EQ) resetElectionTimer
-      currentLeader .= Just leaderNode
+  whenRole Follower $ do
+    -- TODO: I believe the next line is redundant because we have a separate
+    -- heartbeat mechanism.
+    when (termComparison == EQ) resetElectionTimer
+    currentLeader .= Just leaderNode
 
-      -- Consistency check
-      entries <- use commandLog
-      let Snapshot (SnapshotMetadata lastIx _) _ _ = Log.lSnapshot entries
-          logIsConsistent =
-            case entries !? prevLogIndex of
-              NotFound -> prevLogIndex == 0
-              LogIndexInSnapshot _ ->
-                -- By snapshot construction, indices
-                prevLogIndex <= lastIx
-              Found (t, _) -> t == previousLogTerm
+    -- Consistency check
+    entries <- use commandLog
+    let Snapshot (SnapshotMetadata lastIx _) _ _ = Log.lSnapshot entries
+        logIsConsistent =
+          case entries !? prevLogIndex of
+            NotFound -> prevLogIndex == 0
+            LogIndexInSnapshot _ ->
+              -- By snapshot construction, indices
+              prevLogIndex <= lastIx
+            Found (t, _) -> t == previousLogTerm
 
-      let oldLastEntry = lastLogIndex entries - 1
-          newLastEntry = prevLogIndex + fromIntegral (length newEntries)
+    let oldLastEntry = lastLogIndex entries - 1
+        newLastEntry = prevLogIndex + fromIntegral (length newEntries)
 
-      ourTerm <- use term
-      s <- self
-      if leaderTerm < ourTerm || not logIsConsistent
-        then sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm s False oldLastEntry))
-        else do
-          commandLog
-            %= (`Log.extend` (Seq.fromList $ Vector.toList newEntries))
-            . (`Log.keepEntriesUpTo` succ prevLogIndex)
-          sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm s True newLastEntry))
-          ourCommitIndex <- use commitIndex
-          when (leaderCommitIndex > ourCommitIndex) $ do
-            commitIndex .= min leaderCommitIndex newLastEntry
-            applyLogEntries
+    ourTerm <- use term
+    s <- self
+    if leaderTerm < ourTerm || not logIsConsistent
+      then sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm s False oldLastEntry))
+      else do
+        commandLog
+          %= (`Log.extend` (Seq.fromList $ Vector.toList newEntries))
+          . (`Log.keepEntriesUpTo` succ prevLogIndex)
+        sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm s True newLastEntry))
+        ourCommitIndex <- use commitIndex
+        when (leaderCommitIndex > ourCommitIndex) $ do
+          commitIndex .= min leaderCommitIndex newLastEntry
+          applyLogEntries
 
 handleAppendEntriesResult ::
   (Ord node, MonadMVar m, MonadSTM m) =>
@@ -415,6 +419,7 @@ handleInstallSnapshotResult (InstallSnapshotResult responderTerm responderNode (
 handleClusterMembershipRequest :: (Ord node, MonadMVar m, MonadSTM m) => ClusterMembershipRequest node -> RaftT entry node state result m ()
 handleClusterMembershipRequest (ClusterMembershipRequest requester) =
   use role >>= \case
+    NonMember -> self >>= \s -> sendRPCResult requester (CMR (ClusterMembershipResult (Left (NoKnownLeader s))))
     Candidate -> self >>= \s -> sendRPCResult requester (CMR (ClusterMembershipResult (Left (NoKnownLeader s))))
     Follower ->
       use currentLeader >>= \case
@@ -454,8 +459,6 @@ handleClusterMembershipResult ::
 handleClusterMembershipResult = \case
   ClusterMembershipResult (Right leaderId) -> do
     becomeFollower leaderId
-    resetHeartBeatTimer
-    resetElectionTimer
     trace JoinedCluster
   ClusterMembershipResult (Left err) -> do
     -- The natural delay to wait is one heart beat timeout. What else would we use?
@@ -547,11 +550,13 @@ becomeLeader = do
   sendHeartbeat -- Note that 'sendHeartbeat' will also reset the heartbeat timer
 
 becomeFollower ::
-  (MonadMVar m) =>
+  (MonadMVar m, MonadDelay m, MonadFork m, MonadMask m, MonadAsync m) =>
   -- | Leader node ID
   node ->
   RaftT entry node state result m ()
 becomeFollower leaderNodeId = do
+  resetHeartBeatTimer
+  resetElectionTimer
   r <- use role
   unless (r == Follower) $ do
     trace BecameFollower

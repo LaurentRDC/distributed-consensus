@@ -154,7 +154,7 @@ propClusterWith raceOrNot =
         ( forConcurrently_ (IntMap.elems harness.clusterServers) $ \server ->
             runRaftT
               server.sConfig
-              (Set.fromList (map fromIntegral $ IntMap.keys harness.clusterServers))
+              (Raft.InCluster $ Set.fromList (map fromIntegral $ IntMap.keys harness.clusterServers))
               mempty
               server.sSpec
               Raft.server
@@ -175,7 +175,7 @@ propClusterWith raceOrNot =
               )
               ( runRaftT
                   server.sConfig
-                  mempty -- lone nodes don't know about anyone
+                  Raft.LoneNode
                   mempty
                   server.sSpec
                   Raft.server

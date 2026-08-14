@@ -309,6 +309,7 @@ initialTerm = 1
 
 initialRaftState ::
   (Ord node) =>
+  Role ->
   -- | Random number generator seed
   Word64 ->
   -- | Initial cluster configuration
@@ -316,9 +317,9 @@ initialRaftState ::
   -- | Initial internal state
   state ->
   RaftState node entry state
-initialRaftState seed clusterConf initialState =
+initialRaftState initRole seed clusterConf initialState =
   MkRaftState
-    { _role = Follower,
+    { _role = initRole,
       _term = initialTerm,
       _clusterConfiguration = Simple clusterConf,
       _internalState = initialState,
