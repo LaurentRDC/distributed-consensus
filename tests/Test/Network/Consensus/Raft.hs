@@ -23,7 +23,6 @@ import Control.Monad.Class.MonadAsync (concurrently_, forConcurrently_, race_, w
 import Control.Monad.Class.MonadTest (exploreRaces)
 import Control.Monad.Class.MonadTimer (threadDelay, timeout)
 import Control.Monad.IOSim (IOSim, exploreSimTrace, traceM)
-import Control.Monad.Trans.Class (lift)
 import qualified Data.Foldable as Foldable
 import Data.Functor ((<&>))
 import Data.IntMap (IntMap)
@@ -32,14 +31,15 @@ import qualified Data.IntSet as IntSet
 import Data.List (genericLength)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromJust, fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Tagged (Tagged (..))
 import qualified Data.Text.Lazy as Text
 import Data.Word (Word64)
 import Network.Consensus.Raft
-  ( Config (..),
+  ( AdminCommand (..),
+    Config (..),
     Microseconds,
     RPC,
     RPCResult,
@@ -134,7 +134,7 @@ propClusterWith raceOrNot =
             raceOrNot
 
             -- Run servers until the clients are done interacting
-            withAsync (runServers harness) $ \_ ->
+            withAsync (runServers harness) $ \_ -> do
               runClient
                 (runClientAction harness)
                 -- In principle, there is no upper bound on how long a
@@ -143,6 +143,9 @@ propClusterWith raceOrNot =
                 -- receives a reply (due to a bug)
                 (10 * scenarioInputs.electionTimeoutUpperBound)
                 stateMachineExpectations
+
+              forConcurrently_ (harness.clusterServers <> fmap fst harness.loneServers) $ \server ->
+                server.sSendAdminCommand (ShutDown (-1)) -- Admin node (-1) doesn't matter right now
         )
     runServers :: Harness s -> IOSim s ()
     runServers harness =
@@ -158,17 +161,25 @@ propClusterWith raceOrNot =
         )
         -- Lone nodes
         ( forConcurrently_ (IntMap.elems harness.loneServers) $ \(server, wait) ->
-            runRaftT
-              server.sConfig
-              mempty -- lone nodes don't know about anyone
-              mempty
-              server.sSpec
-              $ do
-                lift (threadDelay (fromIntegral wait))
-                maybe
-                  (fail "No nodes in cluster to request membership")
-                  (Raft.serverJoinCluster . fromIntegral . fst)
-                  (IntSet.minView (IntMap.keysSet harness.clusterServers))
+            concurrently_
+              ( threadDelay (fromIntegral wait)
+                  >> server.sSendAdminCommand
+                    ( JoinCluster
+                        (-1) -- Admin ID doesn't matter right now
+                        ( fromIntegral $
+                            fst $
+                              fromJust $
+                                IntSet.minView (IntMap.keysSet harness.clusterServers)
+                        )
+                    )
+              )
+              ( runRaftT
+                  server.sConfig
+                  mempty -- lone nodes don't know about anyone
+                  mempty
+                  server.sSpec
+                  Raft.server
+              )
         )
 
     runClient ::
@@ -227,7 +238,8 @@ genScenarioInputs = do
 data Server s
   = MkServer
   { sConfig :: Config Node,
-    sSpec :: RaftSpec Command Node State Result (IOSim s)
+    sSpec :: RaftSpec Command Node State Result (IOSim s),
+    sSendAdminCommand :: AdminCommand Node -> IOSim s ()
   }
 
 type Mailbox s m = (IntMap (TQueue (IOSim s) m))
@@ -237,7 +249,8 @@ data NetworkFabric s
   { rpcMailbox :: Mailbox s (RPC Node Command State),
     rpcResultsMailbox :: Mailbox s (RPCResult Node Result),
     requestsMailbox :: Mailbox s (Request Node Command),
-    responsesMailbox :: Mailbox s (Response Node Result)
+    responsesMailbox :: Mailbox s (Response Node Result),
+    adminMailbox :: Mailbox s (AdminCommand Node)
   }
 
 newNetworkFabric :: Set Node -> IOSim s (NetworkFabric s)
@@ -247,11 +260,12 @@ newNetworkFabric nodes =
     <*> newMailbox
     <*> newMailbox
     <*> newMailbox
+    <*> newMailbox
   where
     newMailbox = IntMap.fromList <$> traverse (\n -> (fromIntegral n,) <$> newTQueueIO) (Set.toList nodes)
 
 mkServer :: NetworkFabric s -> Microseconds -> Microseconds -> Microseconds -> Word64 -> Node -> Server s
-mkServer networkFabric hbto etolb etoub seed node =
+mkServer network hbto etolb etoub seed node =
   MkServer
     { sConfig =
         MkConfig
@@ -272,14 +286,16 @@ mkServer networkFabric hbto etolb etoub seed node =
             _readSnapshot = \_ -> pure Nothing,
             _writeSnapshot = \_ _ -> pure (),
             _applyLogEntry = step,
-            _sendRPC = send networkFabric.rpcMailbox,
-            _sendRPCResult = send networkFabric.rpcResultsMailbox,
-            _sendClientResponse = send networkFabric.responsesMailbox,
-            _receiveRPC = receive networkFabric.rpcMailbox node <&> Right,
-            _receiveRPCResult = receive networkFabric.rpcResultsMailbox node <&> Right,
-            _receiveClientRequest = receive networkFabric.requestsMailbox node <&> Right,
+            _sendRPC = send network.rpcMailbox,
+            _sendRPCResult = send network.rpcResultsMailbox,
+            _sendClientResponse = send network.responsesMailbox,
+            _receiveRPC = receive network.rpcMailbox node <&> Right,
+            _receiveRPCResult = receive network.rpcResultsMailbox node <&> Right,
+            _receiveClientRequest = receive network.requestsMailbox node <&> Right,
+            _receiveAdminCommand = receive network.adminMailbox node <&> Right,
             _tracer = traceM
-          }
+          },
+      sSendAdminCommand = send network.adminMailbox node
     }
 
 data Harness s
@@ -322,11 +338,11 @@ testHarness
       loneNodes = [numClusterNodes .. numLoneNodes - 1]
       loneNodesWithSeedsAndWaits = zip3 (drop numClusterNodes s) loneWaits loneNodes
 
-      clientSpec networkFabric =
+      clientSpec network =
         MkRaftClientSpec
-          { sendRequest = send networkFabric.requestsMailbox,
+          { sendRequest = send network.requestsMailbox,
             receiveResponse =
-              receive networkFabric.responsesMailbox clientNode <&> Right
+              receive network.responsesMailbox clientNode <&> Right
           }
 
 send :: (MonadSTM m) => IntMap (TQueue m a) -> Node -> a -> m ()

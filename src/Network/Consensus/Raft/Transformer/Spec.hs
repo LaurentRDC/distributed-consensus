@@ -22,6 +22,7 @@ module Network.Consensus.Raft.Transformer.Spec
     receiveRPC,
     receiveRPCResult,
     receiveClientRequest,
+    receiveAdminCommand,
     tracer,
 
     -- * Raft state
@@ -55,6 +56,7 @@ module Network.Consensus.Raft.Transformer.Spec
     ClusterMembershipRequest (..),
     ClusterMembershipResult (..),
     ClusterMembershipError (..),
+    AdminCommand (..),
     Event (..),
     RPC (..),
     RPCResult (..),
@@ -182,12 +184,22 @@ data RPCResult node result
       Bool
   deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
 
+data AdminCommand node
+  = JoinCluster
+      -- | Admin that asked
+      node
+      -- | One node from cluster
+      node
+  | ShutDown node
+  deriving (Eq, Show, Ord, Generic)
+
 data Event node entry result state
   = EventElectionTimeout
   | EventHeartBeatTimeout
   | EventIncomingClientRequest (Request node entry)
   | EventRPC (RPC node entry state)
   | EventRPCResult (RPCResult node result)
+  | EventAdminCommand (AdminCommand node)
   deriving (Eq, Show)
 
 data RaftTrace entry result node state
@@ -265,6 +277,7 @@ data RaftSpec entry node state result m = MkRaftSpec
     _receiveRPC :: m (Either Text (RPC node entry state)),
     _receiveRPCResult :: m (Either Text (RPCResult node result)),
     _receiveClientRequest :: m (Either Text (Request node entry)),
+    _receiveAdminCommand :: m (Either Text (AdminCommand node)),
     _tracer :: RaftTrace entry result node state -> m ()
   }
 

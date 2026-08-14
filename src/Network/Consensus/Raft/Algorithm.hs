@@ -6,20 +6,18 @@
 
 module Network.Consensus.Raft.Algorithm
   ( server,
-
-    -- * Utilities
-    serverJoinCluster,
   )
 where
 
-import Control.Concurrent.Class.MonadMVar (MonadMVar)
+import Control.Concurrent.Class.MonadMVar (MonadMVar, putMVar, tryTakeMVar)
 import Control.Concurrent.Class.MonadSTM (MonadSTM, atomically, writeTQueue)
-import Control.Monad (forever, unless, when, (<=<))
-import Control.Monad.Class.MonadAsync (MonadAsync, async, link)
+import Control.Monad (forever, unless, when)
+import Control.Monad.Class.MonadAsync (MonadAsync, async, cancel, link)
 import Control.Monad.Class.MonadFork (MonadFork, labelThisThread)
 import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay, threadDelay)
 import Control.Monad.Trans.Class (lift)
+import Data.Foldable (for_)
 import Data.Functor ((<&>))
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
@@ -60,12 +58,14 @@ import Network.Consensus.Raft.Transformer
     dequeueEvent,
     electionTimer,
     eventQueue,
+    exitLock,
     heartBeatTimer,
     lastApplied,
     matchIndex,
     nextElectionTimeout,
     nextIndex,
     peers,
+    receiveAdminCommand,
     receiveClientRequest,
     receiveRPC,
     receiveRPCResult,
@@ -88,7 +88,7 @@ import Network.Consensus.Raft.Transformer
     writeTerm,
     yesVotes,
   )
-import Network.Consensus.Raft.Transformer.Spec (ClusterMembershipError (..))
+import Network.Consensus.Raft.Transformer.Spec (AdminCommand (..), ClusterMembershipError (..))
 
 server ::
   ( Ord node,
@@ -99,45 +99,18 @@ server ::
     MonadDelay m
   ) =>
   RaftT entry node state result m ()
-server = serverWith $ do
-  resetHeartBeatTimer
-  resetElectionTimer
-
-serverJoinCluster ::
-  ( Ord node,
-    MonadMask m,
-    MonadFork m,
-    MonadMVar m,
-    MonadAsync m,
-    MonadDelay m
-  ) =>
-  node ->
-  RaftT entry node state result m ()
-serverJoinCluster target = serverWith $ do
-  self >>= sendRPC target . CM . ClusterMembershipRequest
-
-serverWith ::
-  ( Ord node,
-    MonadMask m,
-    MonadFork m,
-    MonadMVar m,
-    MonadAsync m,
-    MonadDelay m
-  ) =>
-  -- | Action to perform immediately after starting.
-  -- This can be used to spin up a server, and then
-  -- connect to an existing cluster.
-  RaftT entry node state result m () ->
-  RaftT entry node state result m ()
-serverWith onStart = do
+server = do
   spec <- view specification
   queue <- view eventQueue
   s <- self
 
   let trace' makeTrace = spec ^. tracer $ makeTrace s
-  _ <- lift $ link <=< async $ receiveRPCs spec queue trace'
-  _ <- lift $ link <=< async $ receiveRPCResults spec queue trace'
-  _ <- lift $ link <=< async $ receiveClientRequests spec queue trace'
+  t1 <- lift $ async $ receiveRPCs spec queue trace'
+  t2 <- lift $ async $ receiveRPCResults spec queue trace'
+  t3 <- lift $ async $ receiveClientRequests spec queue trace'
+  t4 <- lift $ async $ receiveAdminCommands spec queue trace'
+  let receiveLoops = [t1, t2, t3, t4]
+  for_ receiveLoops (lift . link)
 
   -- There are some initialization steps which require the configuration.
   -- Instead of coupling 'initialRaftState' with the configuration,
@@ -145,21 +118,22 @@ serverWith onStart = do
   ps <- peers
   nextIndex .= Map.fromSet (const 0) ps
 
-  -- It's OK to run this before the main loop
-  -- since the receiving loops have already been
-  -- started.
-  --
-  -- Therefore, if we receive a reply before the main loop has
-  -- started, the events will queue up.
-  --
-  -- TODO: find a way to do this without exposing the internals
-  --       of RaftT
-  onStart
+  resetHeartBeatTimer
+  resetElectionTimer
 
-  forever $ do
-    ev <- dequeueEvent
-    trace (\t n -> EventReceived t n ev)
-    handleEvent ev
+  lock <- view exitLock
+  let loop = do
+        lift (tryTakeMVar lock) >>= \case
+          Nothing -> do
+            ev <- dequeueEvent
+            trace (\t n -> EventReceived t n ev)
+            handleEvent ev
+            loop
+          Just () -> pure ()
+
+  loop
+
+  for_ receiveLoops (lift . cancel)
   where
     receiveRPCs spec queue trace' = do
       labelThisThread "receiceRPCs"
@@ -182,6 +156,13 @@ serverWith onStart = do
         recv >>= \case
           Left errMsg -> trace' (`DeserializationError` errMsg)
           Right request -> atomically $ writeTQueue queue (EventIncomingClientRequest request)
+    receiveAdminCommands spec queue trace' = do
+      labelThisThread "receiveAdminCommands"
+      let recv = spec ^. receiveAdminCommand
+      forever $ do
+        recv >>= \case
+          Left errMsg -> trace' (`DeserializationError` errMsg)
+          Right request -> atomically $ writeTQueue queue (EventAdminCommand request)
 
 handleEvent ::
   ( Ord node,
@@ -216,6 +197,7 @@ handleEvent (EventRPCResult (AER appendEntriesResult)) =
 handleEvent (EventRPCResult (ISR installSnapshotResult)) =
   handleInstallSnapshotResult installSnapshotResult
 handleEvent (EventRPCResult (CMR clusterMembershipResult)) = handleClusterMembershipResult clusterMembershipResult
+handleEvent (EventAdminCommand adminCommand) = handleAdminCommand adminCommand
 
 handleClientRequest ::
   (Ord node, MonadMVar m, MonadAsync m) =>
@@ -482,6 +464,12 @@ handleClusterMembershipResult = \case
   where
     clusterMembershipErrorPeer (NoKnownLeader n) = n
     clusterMembershipErrorPeer (OngoingClusterMembershipChange n) = n
+
+handleAdminCommand :: (MonadMVar m) => AdminCommand node -> RaftT entry node state result m ()
+handleAdminCommand (ShutDown _requester) =
+  view exitLock >>= lift . (`putMVar` ()) -- TODO: reply to requester
+handleAdminCommand (JoinCluster _requester target) =
+  self >>= sendRPC target . CM . ClusterMembershipRequest -- TODO: reply to requester
 
 becomeCandidate ::
   ( Ord node,

@@ -10,6 +10,7 @@ module Network.Consensus.Raft.Transformer.Definition
     eventQueue,
     heartBeatTimer,
     electionTimer,
+    exitLock,
 
     -- * Generic helpers
     ask,
@@ -23,7 +24,7 @@ module Network.Consensus.Raft.Transformer.Definition
   )
 where
 
-import Control.Concurrent.Class.MonadMVar (MonadMVar)
+import Control.Concurrent.Class.MonadMVar (MVar, MonadMVar, newEmptyMVar)
 import Control.Concurrent.Class.MonadSTM (TQueue, atomically, newTQueue, writeTQueue)
 import Control.Monad.Class.MonadSTM (MonadSTM)
 import Control.Monad.Trans.RWS.CPS (RWST, ask, asks, evalRWST, get, gets, local, modify, put, state)
@@ -55,6 +56,7 @@ runRaftT config members internalState spec f = do
   queue <- atomically newTQueue
   hbTimer <- newTimer (atomically $ writeTQueue queue EventHeartBeatTimeout)
   elTimer <- newTimer (atomically $ writeTQueue queue EventElectionTimeout)
+  exitLock <- newEmptyMVar
   fst
     <$> evalRWST
       f
@@ -63,7 +65,8 @@ runRaftT config members internalState spec f = do
             _specification = spec,
             _eventQueue = queue,
             _heartBeatTimer = hbTimer,
-            _electionTimer = elTimer
+            _electionTimer = elTimer,
+            _exitLock = exitLock
           }
       )
       (initialRaftState (randomSeed config) members internalState)
@@ -76,7 +79,8 @@ data RaftEnv entry node state result m
     -- Handle to a thread which will send a heartbeat timeout
     -- event after the appropriate amount of time.
     _heartBeatTimer :: Timer m,
-    _electionTimer :: Timer m
+    _electionTimer :: Timer m,
+    _exitLock :: MVar m ()
   }
 
 data Config node
