@@ -14,6 +14,7 @@
 module Test.Network.Consensus.Raft
   ( tests,
     NumRacyTests,
+    PrintTrace,
   )
 where
 
@@ -37,6 +38,7 @@ import qualified Data.Set as Set
 import Data.Tagged (Tagged (..))
 import qualified Data.Text.Lazy as Text
 import Data.Word (Word64)
+import qualified Debug.Trace as Debug
 import Network.Consensus.Raft
   ( AdminCommand (..),
     Config (..),
@@ -52,6 +54,11 @@ import Test.Network.Consensus.Raft.Properties (allProperties)
 import Test.Network.Consensus.Scenario (checkScenario)
 import Test.Tasty (TestTree, askOption, localOption, testGroup)
 import Test.Tasty.Options
+  ( IsOption (..),
+    mkFlagCLParser,
+    safeRead,
+    safeReadBool,
+  )
 import Test.Tasty.QuickCheck
   ( Arbitrary (arbitrary),
     Gen,
@@ -82,17 +89,19 @@ tests =
 
 testClusterWithoutRaces :: TestTree
 testClusterWithoutRaces =
-  testProperty "Cluster properties without schedule exploration" $
-    propClusterWith (pure ())
+  withPrintTraceOption $ \printOrNot ->
+    testProperty "Cluster properties without schedule exploration" $
+      propClusterWith printOrNot (pure ())
 
 testClusterWithRaces :: TestTree
 testClusterWithRaces =
-  setNumRacyTests $
-    testProperty "Cluster properties with schedule exploration" $
-      propClusterWith exploreRaces
+  withPrintTraceOption $ \printOrNote ->
+    setNumRacyTests $
+      testProperty "Cluster properties with schedule exploration" $
+        propClusterWith printOrNote exploreRaces
 
-propClusterWith :: (forall s. IOSim s ()) -> Property
-propClusterWith raceOrNot =
+propClusterWith :: PrintTrace -> (forall s. IOSim s ()) -> Property
+propClusterWith printTrace raceOrNot =
   property $
     forAll genScenarioInputs $
       \scenarioInputs ->
@@ -107,9 +116,13 @@ propClusterWith raceOrNot =
                   trace
             )
   where
+    debug :: forall a. (Show a) => a -> a
+    debug = case printTrace of
+      PrintTrace False -> id
+      PrintTrace True -> Debug.traceShowId
     scenario scenarioInputs = do
       let stateMachineExpectations = expectedResults scenarioInputs.commands
-      (harness :: Harness s) <- testHarness scenarioInputs
+      (harness :: Harness s) <- testHarness debug scenarioInputs
 
       -- In order to detect infinite loops, especially in CI,
       -- we use a *very generous* scenario timeout.
@@ -264,8 +277,8 @@ newNetworkFabric nodes =
   where
     newMailbox = IntMap.fromList <$> traverse (\n -> (fromIntegral n,) <$> newTQueueIO) (Set.toList nodes)
 
-mkServer :: NetworkFabric s -> Microseconds -> Microseconds -> Microseconds -> Word64 -> Node -> Server s
-mkServer network hbto etolb etoub seed node =
+mkServer :: (forall a. (Show a) => a -> a) -> NetworkFabric s -> Microseconds -> Microseconds -> Microseconds -> Word64 -> Node -> Server s
+mkServer debug network hbto etolb etoub seed node =
   MkServer
     { sConfig =
         MkConfig
@@ -293,7 +306,9 @@ mkServer network hbto etolb etoub seed node =
             _receiveRPCResult = receive network.rpcResultsMailbox node <&> Right,
             _receiveClientRequest = receive network.requestsMailbox node <&> Right,
             _receiveAdminCommand = receive network.adminMailbox node <&> Right,
-            _tracer = traceM
+            -- We debug-print events here, rather than in `checkScenario`,
+            -- because `checkScenario` can fail and produce no trace.
+            _tracer = traceM . debug
           },
       sSendAdminCommand = send network.adminMailbox node
     }
@@ -308,14 +323,16 @@ data Harness s
 
 testHarness ::
   forall s.
+  (forall a. (Show a) => a -> a) ->
   ScenarioInputs ->
   IOSim s (Harness s)
 testHarness
+  debug
   (ScenarioInputs hb etlb etup s numClusterNodes numLoneNodes loneWaits _commands) = do
     networkFabric <- newNetworkFabric $ mconcat [Set.fromList (fromIntegral <$> serverNodes), Set.fromList (fromIntegral <$> loneNodes), Set.singleton clientNode]
 
     let mkServer' :: Word64 -> Node -> Server s
-        mkServer' = mkServer networkFabric hb etlb etup
+        mkServer' = mkServer debug networkFabric hb etlb etup
 
     pure $
       MkHarness
@@ -425,10 +442,20 @@ newtype NumRacyTests
 
 instance IsOption NumRacyTests where
   defaultValue = NumRacyTests Nothing
-
-  parseValue s =
-    NumRacyTests . Just <$> safeRead s
-
+  parseValue s = NumRacyTests . Just <$> safeRead s
   optionName = Tagged "num-racy-tests"
-
   optionHelp = Tagged "Number of racy tests to run"
+
+withPrintTraceOption :: (PrintTrace -> TestTree) -> TestTree
+withPrintTraceOption = askOption
+
+newtype PrintTrace
+  = PrintTrace Bool
+  deriving (Eq, Ord, Show)
+
+instance IsOption PrintTrace where
+  defaultValue = PrintTrace False
+  optionName = Tagged "print-trace"
+  parseValue = fmap PrintTrace . safeReadBool
+  optionHelp = Tagged "Print the execution trace. This is generally only useful for a specific test replay."
+  optionCLParser = mkFlagCLParser mempty (PrintTrace True)
