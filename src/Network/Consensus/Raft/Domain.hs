@@ -12,6 +12,7 @@ module Network.Consensus.Raft.Domain
   )
 where
 
+import Data.Binary (Binary)
 import Data.Int (Int64)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -20,13 +21,13 @@ import GHC.Generics (Generic)
 -- | Election term
 newtype Term = Term Int64
   deriving stock (Generic, Eq, Ord, Show)
-  deriving newtype (Real, Enum, Num, Integral)
+  deriving newtype (Real, Binary, Enum, Num, Integral)
 
 -- | A 'RequestId' dentifies a request from a client,
 -- uniquely for each leader.
 newtype RequestId = RequestId Int64
   deriving stock (Generic, Eq, Ord, Show)
-  deriving newtype (Real, Enum, Num, Integral)
+  deriving newtype (Real, Binary, Enum, Num, Integral)
 
 data Role
   = Leader
@@ -35,7 +36,9 @@ data Role
   | -- | Special states for nodes that aren't members of a cluster. This
     -- doesn't let them participate in elections and change their terms
     NonMember
-  deriving (Eq, Show, Ord, Enum, Bounded)
+  deriving (Eq, Show, Ord, Enum, Generic, Bounded)
+
+instance Binary Role
 
 -- | Represents the membership of a cluster.
 --
@@ -46,7 +49,9 @@ data Role
 data ClusterConfiguration node
   = Simple (Set node)
   | Joint (Set node) (Set node)
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Generic, Show)
+
+instance (Binary node) => Binary (ClusterConfiguration node)
 
 allNodes :: (Ord node) => ClusterConfiguration node -> Set node
 allNodes (Simple nodes) = nodes

@@ -64,10 +64,11 @@ module Network.Consensus.Raft.Transformer.Spec
   )
 where
 
+import Data.Binary (Binary)
 import Data.Map.Strict (Map)
+import Data.Sequence (Seq)
 import Data.Set (Set)
 import Data.Text (Text)
-import Data.Vector (Vector)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
@@ -86,6 +87,8 @@ data Command entry
       !RequestId
   deriving (Eq, Show, Ord, Generic)
 
+instance (Binary entry) => Binary (Command entry)
+
 -- | A 'LogEntry' is anything which gets persisted
 -- in the replicated log. This includes client commands,
 -- but also cluster membership changes.
@@ -94,21 +97,27 @@ data LogEntry node entry
   | LogEntryMembershipChange (ClusterConfiguration node)
   deriving (Eq, Show, Ord, Generic)
 
+instance (Binary node, Binary entry) => Binary (LogEntry node entry)
+
 data CommandResponse node result
   = MkCommandResponse
       !result
       !RequestId
   deriving (Eq, Show, Ord, Generic)
 
+instance (Binary node, Binary result) => Binary (CommandResponse node result)
+
 data AppendEntries node entry = AppendEntries
   { aeLeaderTerm :: !Term,
     aeLeaderNode :: !node,
     aePreviousLogIndex :: !LogIndex,
     aePreviousLogTerm :: !Term,
-    aeEntries :: !(Vector (Term, LogEntry node entry)),
+    aeEntries :: !(Seq (Term, LogEntry node entry)),
     aeCommitIndex :: !LogIndex
   }
   deriving (Eq, Show, Ord, Generic)
+
+instance (Binary node, Binary entry) => Binary (AppendEntries node entry)
 
 data AppendEntriesResult node result = AppendEntriesResult
   { aerCurrentTerm :: !Term,
@@ -118,12 +127,16 @@ data AppendEntriesResult node result = AppendEntriesResult
   }
   deriving (Eq, Ord, Show, Generic)
 
+instance (Binary node, Binary result) => Binary (AppendEntriesResult node result)
+
 data InstallSnapshot node state = InstallSnapshot
   { isLeaderTerm :: !Term,
     isLeaderNode :: !node,
     isSnapshot :: !(Snapshot node state)
   }
   deriving (Eq, Ord, Show, Generic)
+
+instance (Binary node, Binary state) => Binary (InstallSnapshot node state)
 
 data InstallSnapshotResult node = InstallSnapshotResult
   { isrTerm :: !Term,
@@ -132,10 +145,14 @@ data InstallSnapshotResult node = InstallSnapshotResult
   }
   deriving (Eq, Ord, Show, Generic)
 
+instance (Binary node) => Binary (InstallSnapshotResult node)
+
 data ClusterMembershipRequest node
   = ClusterMembershipJoinRequest node
   | ClusterMembershipLeaveRequest node
   deriving (Eq, Ord, Show, Generic)
+
+instance (Binary node) => Binary (ClusterMembershipRequest node)
 
 data ClusterMembershipError node
   = -- | carries the node that replied, not the leader
@@ -143,10 +160,14 @@ data ClusterMembershipError node
   | OngoingClusterMembershipChange node
   deriving (Eq, Show, Ord, Generic)
 
+instance (Binary node) => Binary (ClusterMembershipError node)
+
 data ClusterMembershipResult node
   = ClusterMembershipJoinResult (Either (ClusterMembershipError node) node)
   | ClusterMembershipLeaveResult (Either (ClusterMembershipError node) node)
   deriving (Eq, Ord, Show, Generic)
+
+instance (Binary node) => Binary (ClusterMembershipResult node)
 
 data RPC node entry state
   = AE (AppendEntries node entry)
@@ -172,6 +193,8 @@ data RPC node entry state
       Term
   deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
 
+instance (Binary node, Binary entry, Binary state) => Binary (RPC node entry state)
+
 data RPCResult node result
   = AER (AppendEntriesResult node result)
   | ISR (InstallSnapshotResult node)
@@ -185,6 +208,8 @@ data RPCResult node result
       Bool
   deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
 
+instance (Binary node, Binary result) => Binary (RPCResult node result)
+
 data AdminCommand node
   = JoinCluster
       -- | Admin that asked
@@ -196,6 +221,8 @@ data AdminCommand node
       node
   | ShutDown node
   deriving (Eq, Show, Ord, Generic)
+
+instance (Binary node) => Binary (AdminCommand node)
 
 data Event node entry result state
   = EventElectionTimeout

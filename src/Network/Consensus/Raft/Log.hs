@@ -30,6 +30,7 @@ module Network.Consensus.Raft.Log
   )
 where
 
+import Data.Binary (Binary)
 import Data.Int (Int64)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
@@ -43,7 +44,7 @@ import Network.Consensus.Raft.Domain (ClusterConfiguration (..), Term)
 -- 'LogIndex' due to compaction.
 newtype LogIndex = LogIndex Int64
   deriving stock (Generic, Eq, Ord, Show)
-  deriving newtype (Real, Enum, Num, Integral)
+  deriving newtype (Real, Enum, Num, Binary, Integral)
 
 -- | 'RelativeIndex' is a relative position within the 'Log'. It is
 -- specified with respect to the snapshot.
@@ -106,12 +107,16 @@ data SnapshotMetadata = SnapshotMetadata
   }
   deriving (Eq, Ord, Show, Generic)
 
+instance Binary SnapshotMetadata
+
 data Snapshot node state = Snapshot
   { sMetadata :: !SnapshotMetadata,
     sData :: !state,
     sCluster :: !(ClusterConfiguration node)
   }
   deriving (Eq, Ord, Show, Generic)
+
+instance (Binary state, Binary node) => Binary (Snapshot node state)
 
 applySnapshot :: Snapshot node state -> Log node state entry -> Log node state entry
 applySnapshot newSnapshot@(Snapshot (SnapshotMetadata absoluteLastIndex _) _ _) log' =

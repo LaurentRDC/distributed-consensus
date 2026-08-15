@@ -19,9 +19,7 @@ import Control.Monad.Trans.Class (lift)
 import Data.Foldable (for_)
 import Data.Functor ((<&>))
 import qualified Data.Map.Strict as Map
-import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
-import qualified Data.Vector as Vector
 import Lens.Micro.Platform (at, use, view, (%=), (.=), (^.))
 import Network.Consensus.Raft.Client (Request (..), Response (..))
 import Network.Consensus.Raft.Domain
@@ -257,7 +255,7 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
       then sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm s False oldLastEntry))
       else do
         commandLog
-          %= (`Log.extend` (Seq.fromList $ Vector.toList newEntries))
+          %= (`Log.extend` newEntries)
           . (`Log.keepEntriesUpTo` succ prevLogIndex)
         sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm s True newLastEntry))
         ourCommitIndex <- use commitIndex

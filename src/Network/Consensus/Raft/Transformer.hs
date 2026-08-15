@@ -54,7 +54,6 @@ import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay)
 import Control.Monad.Trans.Class (lift)
 import Data.Foldable (for_, traverse_)
-import qualified Data.Foldable as Foldable
 import Data.Function ((&))
 import Data.Functor (($>), (<&>))
 import qualified Data.Map.Strict as Map
@@ -63,7 +62,6 @@ import Data.Sequence (ViewR (..))
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
-import qualified Data.Vector as Vector
 import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (<%=), (^.))
 import Network.Consensus.Raft.Client (Response (..))
 import Network.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId, Role (..), Term, allNodes, hasQuorum)
@@ -186,7 +184,7 @@ sendAppendEntriesTo destination = do
                 <*> (view configuration <&> nodeId)
                 <*> pure previousLogIndex
                 <*> pure previousLogTerm
-                <*> pure (Vector.fromList (Foldable.toList toBeReplicated))
+                <*> pure toBeReplicated
                 <*> use commitIndex
             )
               >>= sendRPC destination . AE
