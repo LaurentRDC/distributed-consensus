@@ -8,7 +8,7 @@ module Network.Consensus.Raft.Algorithm
   )
 where
 
-import Control.Concurrent.Class.MonadMVar (MonadMVar, putMVar, tryTakeMVar)
+import Control.Concurrent.Class.MonadMVar (MonadMVar, putMVar)
 import Control.Concurrent.Class.MonadSTM (MonadSTM, atomically, writeTQueue)
 import Control.Monad (forever, unless, when)
 import Control.Monad.Class.MonadAsync (MonadAsync, async, cancel, link)
@@ -120,15 +120,13 @@ server = do
     resetHeartBeatTimer
     resetElectionTimer
 
-  lock <- view exitLock
   let loop = do
-        lift (tryTakeMVar lock) >>= \case
-          Nothing -> do
-            ev <- dequeueEvent
+        dequeueEvent >>= \case
+          Nothing -> pure () -- shutdown
+          Just ev -> do
             trace (`EventReceived` ev)
             handleEvent ev
             loop
-          Just () -> pure ()
 
   loop
 

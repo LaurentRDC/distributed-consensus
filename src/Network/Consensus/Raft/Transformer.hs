@@ -44,10 +44,10 @@ module Network.Consensus.Raft.Transformer
   )
 where
 
-import Control.Concurrent.Class.MonadMVar (MonadMVar)
+import Control.Concurrent.Class.MonadMVar (MonadMVar, takeMVar)
 import Control.Concurrent.Class.MonadSTM (atomically, readTQueue, writeTQueue)
 import Control.Monad (unless, when)
-import Control.Monad.Class.MonadAsync (MonadAsync, mapConcurrently_)
+import Control.Monad.Class.MonadAsync (MonadAsync, mapConcurrently_, race)
 import Control.Monad.Class.MonadFork (MonadFork)
 import Control.Monad.Class.MonadSTM (MonadSTM)
 import Control.Monad.Class.MonadThrow (MonadMask)
@@ -87,10 +87,14 @@ peers = do
 clusterNodes :: (Monad m, Ord node) => RaftT entry node state result m (Set node)
 clusterNodes = use clusterConfiguration <&> allNodes
 
-dequeueEvent :: (MonadSTM m) => RaftT entry node state result m (Event node entry result state)
+-- | Returns @Nothing@ if the exit lock has been unlocked, in which case
+-- the server should shut down
+dequeueEvent :: (MonadMVar m, MonadAsync m) => RaftT entry node state result m (Maybe (Event node entry result state))
 dequeueEvent = do
   queue <- view eventQueue
-  lift $ atomically $ readTQueue queue
+  lock <- view exitLock
+  lift (race (takeMVar lock) (atomically (readTQueue queue)))
+    >>= either (const (pure Nothing)) (pure . Just)
 
 enqueueEvent :: (MonadSTM m) => Event node entry result state -> RaftT entry node state result m ()
 enqueueEvent event = do

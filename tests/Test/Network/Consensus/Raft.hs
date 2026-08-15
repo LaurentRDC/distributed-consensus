@@ -31,6 +31,7 @@ import Data.IntMap (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.IntSet as IntSet
 import Data.List (genericLength)
+import Data.List.NonEmpty (nonEmpty)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromJust, fromMaybe)
@@ -130,6 +131,10 @@ propClusterWith printTrace raceOrNot =
       let timeStep = max 10_000 scenarioInputs.electionTimeoutUpperBound
           scenarioTimeUpperBound =
             10 * timeStep -- Baseline
+            -- To ensure all lone nodes have time to join, and then leave
+              + 3
+                * maybe 0 maximum (nonEmpty $ sum <$> scenarioInputs.loneNodesWait)
+              -- To ensure all client requests have time to be served
               + 3
                 * genericLength scenarioInputs.commands
                 * timeStep
