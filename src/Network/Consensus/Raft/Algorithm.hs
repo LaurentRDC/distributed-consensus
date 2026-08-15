@@ -1,6 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -23,12 +22,11 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import qualified Data.Vector as Vector
-import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (^.))
+import Lens.Micro.Platform (at, use, view, (%=), (.=), (^.))
 import Network.Consensus.Raft.Client (Request (..), Response (..))
 import Network.Consensus.Raft.Domain
 import Network.Consensus.Raft.Log (LogIndex, Lookup (..), Snapshot (Snapshot, sMetadata), SnapshotMetadata (..), lastLogIndex, (!?))
 import qualified Network.Consensus.Raft.Log as Log
-import Network.Consensus.Raft.Timer (resetTimer)
 import Network.Consensus.Raft.Transformer
   ( AppendEntries (..),
     AppendEntriesResult (..),
@@ -48,6 +46,9 @@ import Network.Consensus.Raft.Transformer
     appendLogEntry,
     applyLogEntries,
     applySnapshot,
+    becomeCandidate,
+    becomeFollower,
+    checkElection,
     clusterConfiguration,
     clusterNodes,
     commandLog,
@@ -56,36 +57,31 @@ import Network.Consensus.Raft.Transformer
     currentLeader,
     currentSnapshot,
     dequeueEvent,
-    electionTimer,
     eventQueue,
     exitLock,
-    heartBeatTimer,
-    lastApplied,
     matchIndex,
-    nextElectionTimeout,
     nextIndex,
     peers,
     receiveAdminCommand,
     receiveClientRequest,
     receiveRPC,
     receiveRPCResult,
+    resetElectionTimer,
+    resetHeartBeatTimer,
     role,
     self,
     sendAppendEntriesTo,
     sendClientResponse,
     sendHeartbeat,
     sendRPC,
-    sendRPCConcurrently,
     sendRPCResult,
     specification,
     term,
     trace,
     tracer,
     updateTerm,
-    voteFor,
     votedFor,
     whenRole,
-    writeTerm,
     yesVotes,
   )
 import Network.Consensus.Raft.Transformer.Spec (AdminCommand (..), ClusterMembershipError (..))
@@ -139,6 +135,7 @@ server = do
   loop
 
   for_ receiveLoops (lift . cancel)
+  trace GracefulShutdown
   where
     receiveRPCs spec queue trace' = do
       labelThisThread "receiceRPCs"
@@ -417,36 +414,49 @@ handleInstallSnapshotResult (InstallSnapshotResult responderTerm responderNode (
     sendAppendEntriesTo responderNode
 
 handleClusterMembershipRequest :: (Ord node, MonadMVar m, MonadSTM m) => ClusterMembershipRequest node -> RaftT entry node state result m ()
-handleClusterMembershipRequest (ClusterMembershipRequest requester) =
+handleClusterMembershipRequest request = do
+  let (requester, resultCtor) = case request of
+        ClusterMembershipJoinRequest r -> (r, ClusterMembershipJoinResult)
+        ClusterMembershipLeaveRequest r -> (r, ClusterMembershipLeaveResult)
   use role >>= \case
-    NonMember -> self >>= \s -> sendRPCResult requester (CMR (ClusterMembershipResult (Left (NoKnownLeader s))))
-    Candidate -> self >>= \s -> sendRPCResult requester (CMR (ClusterMembershipResult (Left (NoKnownLeader s))))
+    NonMember -> self >>= \s -> sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
+    Candidate -> self >>= \s -> sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
     Follower ->
       use currentLeader >>= \case
         Nothing -> do
           s <- self
-          sendRPCResult requester (CMR (ClusterMembershipResult (Left (NoKnownLeader s))))
-        Just leader -> sendRPC leader (CM (ClusterMembershipRequest requester)) -- forward to leader
+          sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
+        Just leader -> sendRPC leader (CM request) -- forward to leader
     Leader -> do
       use clusterConfiguration >>= \case
         -- By design, we cannot handle more than one membership request
         -- at a time. The requester must retry later.
-        Joint {} -> self >>= \s -> sendRPCResult requester (CMR (ClusterMembershipResult (Left (OngoingClusterMembershipChange s))))
+        Joint {} -> self >>= \s -> sendRPCResult requester (CMR (resultCtor (Left (OngoingClusterMembershipChange s))))
         Simple {} -> pure ()
 
       cluster <- clusterNodes
       trace MembershipChangeInitiated
-      self >>= \s -> sendRPCResult requester (CMR (ClusterMembershipResult (Right s)))
+      self >>= \s -> sendRPCResult requester (CMR (resultCtor (Right s)))
 
       -- By definition, a node that just joined
       -- needs to catch up with a snapshot.
-      ( InstallSnapshot
-          <$> use term
-          <*> self
-          <*> currentSnapshot
-        )
-        >>= sendRPC requester . IS
-      appendLogEntry (LogEntryMembershipChange (Joint cluster (Set.insert requester cluster)))
+      case request of
+        ClusterMembershipJoinRequest _ -> do
+          ( InstallSnapshot
+              <$> use term
+              <*> self
+              <*> currentSnapshot
+            )
+            >>= sendRPC requester . IS
+          appendLogEntry
+            ( LogEntryMembershipChange
+                (Joint cluster (Set.insert requester cluster))
+            )
+        ClusterMembershipLeaveRequest _ ->
+          appendLogEntry
+            ( LogEntryMembershipChange
+                (Joint cluster (Set.delete requester cluster))
+            )
 
 handleClusterMembershipResult ::
   ( MonadDelay m,
@@ -457,132 +467,33 @@ handleClusterMembershipResult ::
   ) =>
   ClusterMembershipResult node -> RaftT entry node state result m ()
 handleClusterMembershipResult = \case
-  ClusterMembershipResult (Right leaderId) -> do
+  ClusterMembershipJoinResult (Right leaderId) -> do
     becomeFollower leaderId
-    trace JoinedCluster
-  ClusterMembershipResult (Left err) -> do
+    trace JoinedCluster -- TODO: is this the right moment to trace this? Probably should wait until log is replicated
+  ClusterMembershipJoinResult (Left err) -> do
     -- The natural delay to wait is one heart beat timeout. What else would we use?
     view configuration <&> heartBeatTimeout >>= lift . threadDelay . fromIntegral
-    self >>= \s -> sendRPC (clusterMembershipErrorPeer err) (CM (ClusterMembershipRequest s))
+    self >>= \s -> sendRPC (clusterMembershipErrorPeer err) (CM (ClusterMembershipJoinRequest s))
+  ClusterMembershipLeaveResult (Right _) -> pure () -- Nothing to do until log entry is applied
+  ClusterMembershipLeaveResult (Left err) -> do
+    -- The natural delay to wait is one heart beat timeout. What else would we use?
+    view configuration <&> heartBeatTimeout >>= lift . threadDelay . fromIntegral
+    self >>= \s -> sendRPC (clusterMembershipErrorPeer err) (CM (ClusterMembershipLeaveRequest s))
   where
     clusterMembershipErrorPeer (NoKnownLeader n) = n
     clusterMembershipErrorPeer (OngoingClusterMembershipChange n) = n
 
 handleAdminCommand :: (MonadMVar m) => AdminCommand node -> RaftT entry node state result m ()
-handleAdminCommand (ShutDown _requester) =
-  view exitLock >>= lift . (`putMVar` ()) -- TODO: reply to requester
-handleAdminCommand (JoinCluster _requester target) =
-  self >>= sendRPC target . CM . ClusterMembershipRequest -- TODO: reply to requester
-
-becomeCandidate ::
-  ( Ord node,
-    MonadAsync m,
-    MonadMask m,
-    MonadFork m,
-    MonadMVar m,
-    MonadDelay m
-  ) =>
-  RaftT entry node state result m ()
-becomeCandidate = do
-  trace BecameCandidate
-  role .= Candidate
-  -- The following pieces of state are only useful to leaders
-  nextIndex .= mempty
-  matchIndex .= mempty
-
-  s <- self
-  term += 1
-  w <- view (specification . writeTerm)
-  thisTerm <- use term
-  lift (w s thisTerm)
-
-  v <- view (specification . voteFor)
-  lift $ v s (Just s)
-  trace (VotedFor thisTerm s)
-  votedFor .= Just s
-  yesVotes .= Set.singleton s
-
-  resetElectionTimer
-
-  checkElection -- there might only be a single node in the cluster
-  r <- use role
-  when (r == Candidate) $ do
-    currentTerm <- use term
-    lastAppliedLogIndex <- use lastApplied
-    lastLogTerm <-
-      use commandLog <&> snd . Log.lastLogInfo
-    let rpc = RequestVote currentTerm s lastAppliedLogIndex lastLogTerm
-    peers >>= (`sendRPCConcurrently` rpc)
-
-checkElection ::
-  ( Ord node,
-    MonadAsync m,
-    MonadMask m,
-    MonadFork m,
-    MonadMVar m,
-    MonadDelay m
-  ) =>
-  RaftT entry node state result m ()
-checkElection = do
-  q <- hasQuorum <$> use clusterConfiguration <*> use yesVotes
-  when q becomeLeader
-
-becomeLeader ::
-  ( Ord node,
-    MonadDelay m,
-    MonadMVar m,
-    MonadFork m,
-    MonadMask m,
-    MonadAsync m
-  ) =>
-  RaftT entry node state result m ()
-becomeLeader = do
-  role .= Leader
-  self <&> Just >>= assign currentLeader
-  yesVotes .= Set.empty
-
-  lastIx <- use commandLog <&> Log.lastLogIndex
-  peers <&> Map.fromSet (const (lastIx + 1)) >>= assign nextIndex
-
-  trace LeaderElected
-
-  -- TODO: send append all entries messages to all followers
-  sendHeartbeat -- Note that 'sendHeartbeat' will also reset the heartbeat timer
-
-becomeFollower ::
-  (MonadMVar m, MonadDelay m, MonadFork m, MonadMask m, MonadAsync m) =>
-  -- | Leader node ID
-  node ->
-  RaftT entry node state result m ()
-becomeFollower leaderNodeId = do
-  resetHeartBeatTimer
-  resetElectionTimer
-  r <- use role
-  unless (r == Follower) $ do
-    trace BecameFollower
-    role .= Follower
-  currentLeader .= Just leaderNodeId
-
-resetHeartBeatTimer ::
-  ( MonadAsync m,
-    MonadMask m,
-    MonadFork m,
-    MonadMVar m,
-    MonadDelay m
-  ) =>
-  RaftT entry node state result m ()
-resetHeartBeatTimer = do
-  config <- view configuration
-  view heartBeatTimer >>= lift . resetTimer config.heartBeatTimeout
-
-resetElectionTimer ::
-  ( MonadAsync m,
-    MonadMask m,
-    MonadFork m,
-    MonadMVar m,
-    MonadDelay m
-  ) =>
-  RaftT entry node state result m ()
-resetElectionTimer = do
-  electionTimeout <- nextElectionTimeout
-  view electionTimer >>= lift . resetTimer electionTimeout
+handleAdminCommand comm = do
+  trace (\t n -> AdminCommandReceived t n comm)
+  case comm of
+    (ShutDown _requester) ->
+      view exitLock >>= lift . (`putMVar` ()) -- TODO: reply to requester
+    (JoinCluster _requester target) ->
+      self >>= sendRPC target . CM . ClusterMembershipJoinRequest -- TODO: reply to requester
+    (LeaveCluster _requester) ->
+      use currentLeader
+        >>= \case
+          Nothing -> pure () -- TODO: reply to admin
+          Just leaderId ->
+            self >>= sendRPC leaderId . CM . ClusterMembershipLeaveRequest -- TODO: reply to requester

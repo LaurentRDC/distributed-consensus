@@ -9,10 +9,11 @@ Features of the Raft algorithm include:
 * Leader election;
 * Log replication;
 * Log compaction (i.e. snapshotting);
+* Membership changes;
+* Client request pipelining;
 
 _Upcoming_ Raft features include:
 
-* Membership changes;
 * Read-only queries optimizations
 
 The goal is to have feature-parity with industry standard implementations such as [etcd's Raft implementation](https://github.com/etcd-io/raft).
@@ -42,7 +43,6 @@ Without schedule exploration, a simulated trace is run from these initial condit
 ```sh
 cabal test --test-options='--quickcheck-tests=1000'
 ```
-
 
 With schedule exploration, the system is started in randomly-generated conditions. However, whenever the simulation reaches a branching-point, timing-wise, both branches are explored separately as tests. This is much slower, but allows to detect races in the execution of a cluster. You can tweak the number of tests in this mode using the `num-racy-tests` option. For example:
 

@@ -132,8 +132,9 @@ data InstallSnapshotResult node = InstallSnapshotResult
   }
   deriving (Eq, Ord, Show, Generic)
 
-newtype ClusterMembershipRequest node = ClusterMembershipRequest
-  {cmrRequester :: node}
+data ClusterMembershipRequest node
+  = ClusterMembershipJoinRequest node
+  | ClusterMembershipLeaveRequest node
   deriving (Eq, Ord, Show, Generic)
 
 data ClusterMembershipError node
@@ -142,9 +143,9 @@ data ClusterMembershipError node
   | OngoingClusterMembershipChange node
   deriving (Eq, Show, Ord, Generic)
 
-newtype ClusterMembershipResult node = ClusterMembershipResult
-  { cmrLeader :: Either (ClusterMembershipError node) node
-  }
+data ClusterMembershipResult node
+  = ClusterMembershipJoinResult (Either (ClusterMembershipError node) node)
+  | ClusterMembershipLeaveResult (Either (ClusterMembershipError node) node)
   deriving (Eq, Ord, Show, Generic)
 
 data RPC node entry state
@@ -188,7 +189,10 @@ data AdminCommand node
   = JoinCluster
       -- | Admin that asked
       node
-      -- | One node from cluster
+      -- | One node from cluster to contact initially
+      node
+  | LeaveCluster
+      -- | Admin that asked
       node
   | ShutDown node
   deriving (Eq, Show, Ord, Generic)
@@ -238,6 +242,7 @@ data RaftTrace entry result node state
       node
   | BecameCandidate Term node
   | BecameFollower Term node
+  | BecameNonMember Term node
   | EventReceived Term node (Event node entry result state)
   | SplitElection Term node
   | ElectionTriggered Term node
@@ -249,13 +254,16 @@ data RaftTrace entry result node state
   | -- TODO: better traching of new joining/leaving cluster
     MembershipChangeInitiated Term node
   | MembershipChangeCompleted Term node
+  | AdminCommandReceived Term node (AdminCommand node)
   | JoinedCluster Term node
+  | LeftCluster Term node
   | CommitIndexIncreasedTo Term node LogIndex
   | LogEntryAppended Term node (LogEntry node entry)
   | LogEntryApplied Term node entry
   | MembershipChangeApplied Term node (ClusterConfiguration node)
   | LastAppliedIndexIncreasedTo Term node LogIndex
   | SnapshotApplied Term node SnapshotMetadata
+  | GracefulShutdown Term node
   deriving (Eq, Show)
 
 data RaftSpec entry node state result m = MkRaftSpec

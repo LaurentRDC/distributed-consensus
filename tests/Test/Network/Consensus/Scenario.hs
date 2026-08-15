@@ -16,8 +16,12 @@ module Test.Network.Consensus.Scenario
     votedFor,
     commandReceived,
     commandResponded,
+    joinClusterCommandReceived,
+    leaveClusterCommandReceived,
+    joinedCluster,
     clusterMembershipChangeInitiated,
     clusterMembershipChangeCompleted,
+    clusterMembershipChangeApplied,
     commitIndexIncreased,
     logEntryApplied,
     rpcReceived,
@@ -36,7 +40,7 @@ import Control.Monitor
 import Data.Dynamic (Typeable, fromDynamic)
 import qualified Data.Text as Text
 import Data.Word (Word64)
-import Network.Consensus.Raft (Command (..), CommandResponse, Event (..), LogIndex, RPC (..), RPCResult, RaftTrace (..), Term)
+import Network.Consensus.Raft (AdminCommand (..), ClusterConfiguration, Command (..), CommandResponse, Event (..), LogIndex, RPC (..), RPCResult, RaftTrace (..), Term)
 import System.Random.Stateful (mkStdGen64, uniformR, uniformShuffleList)
 import Test.Tasty.QuickCheck
 
@@ -137,6 +141,21 @@ commandResponded = predicate $ \case
   (CommandResultResponded t n response) -> Just (t, n, response)
   _ -> Nothing
 
+joinClusterCommandReceived :: Predicate (RaftTrace entry result node state) (Term, node)
+joinClusterCommandReceived = predicate $ \case
+  (AdminCommandReceived t n (JoinCluster _ _)) -> Just (t, n)
+  _ -> Nothing
+
+leaveClusterCommandReceived :: Predicate (RaftTrace entry result node state) (Term, node)
+leaveClusterCommandReceived = predicate $ \case
+  (AdminCommandReceived t n (LeaveCluster _)) -> Just (t, n)
+  _ -> Nothing
+
+joinedCluster :: Predicate (RaftTrace entry result node state) (Term, node)
+joinedCluster = predicate $ \case
+  JoinedCluster t n -> Just (t, n)
+  _ -> Nothing
+
 clusterMembershipChangeInitiated :: Predicate (RaftTrace entry result node state) (Term, node)
 clusterMembershipChangeInitiated = predicate $ \case
   MembershipChangeInitiated t n -> pure (t, n)
@@ -145,6 +164,11 @@ clusterMembershipChangeInitiated = predicate $ \case
 clusterMembershipChangeCompleted :: Predicate (RaftTrace entry result node state) (Term, node)
 clusterMembershipChangeCompleted = predicate $ \case
   MembershipChangeCompleted t n -> pure (t, n)
+  _ -> Nothing
+
+clusterMembershipChangeApplied :: Predicate (RaftTrace entry result node state) (Term, node, ClusterConfiguration node)
+clusterMembershipChangeApplied = predicate $ \case
+  MembershipChangeApplied t n clusterConf -> pure (t, n, clusterConf)
   _ -> Nothing
 
 rpcReceived :: Predicate (RaftTrace entry result node state) (Term, node, RPC node entry state)

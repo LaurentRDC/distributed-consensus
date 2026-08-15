@@ -18,8 +18,9 @@ module Test.Network.Consensus.Raft
   )
 where
 
+import Control.Concurrent.Class.MonadMVar (MVar, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.Class.MonadSTM (MonadSTM, TQueue, atomically, newTQueueIO, readTQueue, writeTQueue)
-import Control.Monad (when)
+import Control.Monad (replicateM, when)
 import Control.Monad.Class.MonadAsync (concurrently_, forConcurrently_, race_, withAsync)
 import Control.Monad.Class.MonadTest (exploreRaces)
 import Control.Monad.Class.MonadTimer (threadDelay, timeout)
@@ -157,7 +158,14 @@ propClusterWith printTrace raceOrNot =
                 (10 * scenarioInputs.electionTimeoutUpperBound)
                 stateMachineExpectations
 
-              forConcurrently_ (harness.clusterServers <> fmap fst harness.loneServers) $ \server ->
+              -- We give an opportunity to all lone servers to leave the cluster
+              -- properly before we shut everyone down.
+              --
+              -- This makes it easier to specify properties
+              forConcurrently_ harness.loneServers $ \(server, isDone, _, _) -> do
+                takeMVar isDone
+                server.sSendAdminCommand (ShutDown (-1)) -- Admin node (-1) doesn't matter right now
+              forConcurrently_ harness.clusterServers $ \server ->
                 server.sSendAdminCommand (ShutDown (-1)) -- Admin node (-1) doesn't matter right now
         )
     runServers :: Harness s -> IOSim s ()
@@ -173,9 +181,9 @@ propClusterWith printTrace raceOrNot =
               Raft.server
         )
         -- Lone nodes
-        ( forConcurrently_ (IntMap.elems harness.loneServers) $ \(server, wait) ->
+        ( forConcurrently_ (IntMap.elems harness.loneServers) $ \(server, isDone, waitToJoin, waitToLeave) ->
             concurrently_
-              ( threadDelay (fromIntegral wait)
+              ( threadDelay (fromIntegral waitToJoin)
                   >> server.sSendAdminCommand
                     ( JoinCluster
                         (-1) -- Admin ID doesn't matter right now
@@ -185,6 +193,12 @@ propClusterWith printTrace raceOrNot =
                                 IntSet.minView (IntMap.keysSet harness.clusterServers)
                         )
                     )
+                  >> threadDelay (fromIntegral waitToLeave)
+                  >> server.sSendAdminCommand (LeaveCluster (-1))
+                  -- We give some time for nodes to actually leave.
+
+                  >> threadDelay 100_000
+                  >> putMVar isDone ()
               )
               ( runRaftT
                   server.sConfig
@@ -219,7 +233,7 @@ data ScenarioInputs
     seeds :: [Word64],
     numInitialClusterNodes :: Int,
     numInitialLoneNodes :: Int,
-    loneNodesWait :: [Microseconds],
+    loneNodesWait :: [(Microseconds, Microseconds)],
     commands :: [Command]
   }
   deriving (Eq, Show)
@@ -234,7 +248,13 @@ genScenarioInputs = do
   -- allows to have terms with no leaders elected
   etolb <- chooseBoundedIntegral (round $ (0.9 :: Double) * fromIntegral hb, hb * 10)
   etoub <- chooseBoundedIntegral (etolb, 2 * etolb)
-  loneWaits <- vectorOf numLoneNodes (chooseBoundedIntegral (etoub, 10 * etoub))
+  loneWaits <-
+    vectorOf
+      numLoneNodes
+      ( (,)
+          <$> chooseBoundedIntegral (etoub, 10 * etoub)
+          <*> chooseBoundedIntegral (etoub, 10 * etoub)
+      )
   cmds <- flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 30)
   pure $
     ScenarioInputs
@@ -316,7 +336,7 @@ mkServer debug network hbto etolb etoub seed node =
 data Harness s
   = MkHarness
   { clusterServers :: IntMap (Server s),
-    loneServers :: IntMap (Server s, Microseconds),
+    loneServers :: IntMap (Server s, MVar (IOSim s) (), Microseconds, Microseconds),
     -- TODO: have multiple concurrent clients
     runClientAction :: forall a. RaftClientT Command Node Result (IOSim s) a -> IOSim s a
   }
@@ -334,6 +354,8 @@ testHarness
     let mkServer' :: Word64 -> Node -> Server s
         mkServer' = mkServer debug networkFabric hb etlb etup
 
+    isDones <- replicateM numLoneNodes newEmptyMVar
+
     pure $
       MkHarness
         { clusterServers =
@@ -341,9 +363,20 @@ testHarness
               map (\(serverSeed, n) -> (n, mkServer' serverSeed (fromIntegral n))) serverNodesWithSeeds,
           loneServers =
             IntMap.fromList $
-              map
-                (\(serverSeed, waitBeforeJoin, n) -> (n, (mkServer' serverSeed (fromIntegral n), waitBeforeJoin)))
-                loneNodesWithSeedsAndWaits,
+              zipWith
+                ( curry
+                    ( \((serverSeed, (waitBeforeJoin, waitBeforeLeave), n), isDone) ->
+                        ( n,
+                          ( mkServer' serverSeed (fromIntegral n),
+                            isDone,
+                            waitBeforeJoin,
+                            waitBeforeLeave
+                          )
+                        )
+                    )
+                )
+                loneNodesWithSeedsAndWaits
+                isDones,
           runClientAction = \action -> runRaftClientT action clientNode (clientSpec networkFabric)
         }
     where
@@ -413,7 +446,13 @@ expectedResults :: [Command] -> [(Command, State, Result)]
 expectedResults [] = []
 expectedResults allCommands@(cmd : cmds) =
   zipWith (\c (s, r) -> (c, s, r)) allCommands $
+    -- Using foldl' qualified to prevent
+    -- warning of foldl' already being in prelude
+    -- since GHC 9.10
     reverse $
+      -- Using foldl' qualified to prevent
+      -- warning of foldl' already being in prelude
+      -- since GHC 9.10
       snd $
         -- Using foldl' qualified to prevent
         -- warning of foldl' already being in prelude

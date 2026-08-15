@@ -22,17 +22,24 @@ import Control.Monitor
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as Text
-import Network.Consensus.Raft
-  ( Command (..),
-    CommandResponse (..),
-    LogIndex,
-    RaftTrace (..),
+import Network.Consensus.Raft (ClusterConfiguration (..), Command (..), CommandResponse (..), LogIndex, RaftTrace (..))
+import Test.Network.Consensus.Scenario
+  ( Scenario,
+    clusterMembershipChangeApplied,
+    clusterMembershipChangeCompleted,
+    clusterMembershipChangeInitiated,
+    commandReceived,
+    commandResponded,
+    joinClusterCommandReceived,
+    joinedCluster,
+    leaderElected,
+    leaveClusterCommandReceived,
+    votedFor,
   )
-import Test.Network.Consensus.Scenario (Scenario, clusterMembershipChangeCompleted, clusterMembershipChangeInitiated, commandReceived, commandResponded, leaderElected, votedFor)
 
 -- It's still not clear to me why, but without the explicit forall here,
 -- RaftTrace events don't get picked up
-allProperties :: forall entry result node state. (Ord node) => Scenario entry result node state
+allProperties :: forall entry result node state. (Ord node, Show node) => Scenario entry result node state
 allProperties =
   void $
     allOf
@@ -41,6 +48,8 @@ allProperties =
         monotonicallyIncreasingTermProperty,
         allAcceptedCommandReceiveResponseProperty,
         allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration,
+        allAdminRequestToJoinComplete,
+        allAdminRequestToLeaveComplete,
         indexRelationshipProperty,
         monotonicallyIncreasingLastAppliedIndexProperty,
         monotonicallyIncreasingCommitIndexProperty
@@ -158,7 +167,41 @@ allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration =
         ( clusterMembershipChangeCompleted >>= \(term', leader') ->
             predicate $ \_ -> unless (term == term' && leader == leader') Nothing
         )
-        <?> "Cluster membership change never completed"
+
+allAdminRequestToJoinComplete :: (Eq node, Show node) => Scenario entry result node state
+allAdminRequestToJoinComplete =
+  go <?> "A command to join a cluster did not result in new cluster membership"
+  where
+    go = void $ whenever joinClusterCommandReceived $ \(term, nodeJoining) ->
+      eventually
+        ( joinedCluster >>= \(term', nodeJoining') ->
+            predicate $ \_ -> unless (term == term' && nodeJoining == nodeJoining') Nothing
+        )
+        <?> "A command to "
+        <> Text.show nodeJoining
+        <> " to join a cluster did not result in new cluster membership"
+
+allAdminRequestToLeaveComplete :: (Show node, Ord node) => Scenario entry result node state
+allAdminRequestToLeaveComplete =
+  go
+  where
+    go = void $ whenever leaveClusterCommandReceived $ \(_, nodeLeaving) ->
+      -- This is quite subtle. Basically, the cluster can replicate, commit, and apply a cluster
+      -- configuration change without the node leaving the cluster ever knowing. Consider a cluster
+      -- of three nodes [A, B, C], where C is leaving; join configurations [A, B] and [A, B, C] have
+      -- quorum with just A and B acknowledging and applying the configuration state.
+      --
+      -- Therefore, the true mark of whether a node has left a cluster is not from the point-of-view
+      -- of that node, but from the point-of-view of the leader, that emits a
+      -- 'MembershipChangeApplied'
+      eventually
+        ( clusterMembershipChangeApplied >>= \(_, _, clusterConf) -> predicate $ \_ -> case clusterConf of
+            Joint _ _ -> pure ()
+            Simple cluster -> unless (nodeLeaving `Set.notMember` cluster) Nothing
+        )
+        <?> "A command to "
+        <> Text.show nodeLeaving
+        <> " to leave a cluster did not result in new cluster membership"
 
 data NodeIndexes
   = MkNodeIndexes

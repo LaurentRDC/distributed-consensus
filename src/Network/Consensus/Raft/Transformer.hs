@@ -28,6 +28,19 @@ module Network.Consensus.Raft.Transformer
     applySnapshot,
     currentSnapshot,
     appendLogEntry,
+
+    -- ** Roles
+    becomeFollower,
+    becomeNonMember,
+    becomeLeader,
+    becomeCandidate,
+
+    -- ** Elections
+    checkElection,
+
+    -- ** Timers
+    resetHeartBeatTimer,
+    resetElectionTimer,
   )
 where
 
@@ -51,7 +64,7 @@ import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Vector as Vector
-import Lens.Micro.Platform (assign, at, use, view, (%=), (.=), (<%=), (^.))
+import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (<%=), (^.))
 import Network.Consensus.Raft.Client (Response (..))
 import Network.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId, Role (..), Term, allNodes, hasQuorum)
 import Network.Consensus.Raft.Log (Lookup (..), Snapshot (Snapshot, sData, sMetadata), SnapshotMetadata (..), absoluteIndex, logEntries, sCluster)
@@ -202,8 +215,8 @@ applyEntry (LogEntryMembershipChange clusterConf) = do
   -- then it's time to propose the move to the union
   case clusterConf of
     Simple _ -> trace MembershipChangeCompleted $> Nothing
-    conf@Joint {} -> do
-      appendLogEntry (LogEntryMembershipChange (Simple (allNodes conf)))
+    Joint _before after -> do
+      appendLogEntry (LogEntryMembershipChange (Simple after))
       pure Nothing
 
 -- | Updates the commit index. Returns 'True' if some log entries can be applied,
@@ -394,3 +407,126 @@ appendLogEntry entry = do
   -- In a single-node cluster, we would already have
   -- quorum to update our commit index
   applyLogEntries
+
+becomeLeader ::
+  ( Ord node,
+    MonadDelay m,
+    MonadMVar m,
+    MonadFork m,
+    MonadMask m,
+    MonadAsync m
+  ) =>
+  RaftT entry node state result m ()
+becomeLeader = do
+  role .= Leader
+  self <&> Just >>= assign currentLeader
+  yesVotes .= Set.empty
+
+  lastIx <- use commandLog <&> Log.lastLogIndex
+  peers <&> Map.fromSet (const (lastIx + 1)) >>= assign nextIndex
+
+  trace LeaderElected
+
+  -- TODO: send append all entries messages to all followers
+  sendHeartbeat -- Note that 'sendHeartbeat' will also reset the heartbeat timer
+
+becomeFollower ::
+  (MonadMVar m, MonadDelay m, MonadFork m, MonadMask m, MonadAsync m) =>
+  -- | Leader node ID
+  node ->
+  RaftT entry node state result m ()
+becomeFollower leaderNodeId = do
+  resetHeartBeatTimer
+  resetElectionTimer
+  r <- use role
+  unless (r == Follower) $ do
+    trace BecameFollower
+    role .= Follower
+  currentLeader .= Just leaderNodeId
+
+becomeCandidate ::
+  ( Ord node,
+    MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadMVar m,
+    MonadDelay m
+  ) =>
+  RaftT entry node state result m ()
+becomeCandidate = do
+  trace BecameCandidate
+  role .= Candidate
+  -- The following pieces of state are only useful to leaders
+  nextIndex .= mempty
+  matchIndex .= mempty
+
+  s <- self
+  term += 1
+  w <- view (specification . writeTerm)
+  thisTerm <- use term
+  lift (w s thisTerm)
+
+  v <- view (specification . voteFor)
+  lift $ v s (Just s)
+  trace (VotedFor thisTerm s)
+  votedFor .= Just s
+  yesVotes .= Set.singleton s
+
+  resetElectionTimer
+
+  checkElection -- there might only be a single node in the cluster
+  r <- use role
+  when (r == Candidate) $ do
+    currentTerm <- use term
+    lastAppliedLogIndex <- use lastApplied
+    lastLogTerm <-
+      use commandLog <&> snd . Log.lastLogInfo
+    let rpc = RequestVote currentTerm s lastAppliedLogIndex lastLogTerm
+    peers >>= (`sendRPCConcurrently` rpc)
+
+checkElection ::
+  ( Ord node,
+    MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadMVar m,
+    MonadDelay m
+  ) =>
+  RaftT entry node state result m ()
+checkElection = do
+  q <- hasQuorum <$> use clusterConfiguration <*> use yesVotes
+  when q becomeLeader
+
+becomeNonMember ::
+  (MonadMVar m) =>
+  RaftT entry node state result m ()
+becomeNonMember = do
+  r <- use role
+  unless (r == NonMember) $ do
+    trace BecameNonMember
+    role .= NonMember
+  currentLeader .= Nothing
+
+resetHeartBeatTimer ::
+  ( MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadMVar m,
+    MonadDelay m
+  ) =>
+  RaftT entry node state result m ()
+resetHeartBeatTimer = do
+  config <- view configuration
+  view heartBeatTimer >>= lift . resetTimer config.heartBeatTimeout
+
+resetElectionTimer ::
+  ( MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadMVar m,
+    MonadDelay m
+  ) =>
+  RaftT entry node state result m ()
+resetElectionTimer = do
+  electionTimeout <- nextElectionTimeout
+  view electionTimer >>= lift . resetTimer electionTimeout
