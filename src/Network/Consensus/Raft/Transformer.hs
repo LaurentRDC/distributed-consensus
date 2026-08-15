@@ -201,13 +201,13 @@ applyEntry :: (MonadSTM m, Ord node, MonadMVar m) => LogEntry node entry -> Raft
 applyEntry (LogEntryCommand (Command entry requestId)) = do
   apply <- view (specification . applyLogEntry)
   (newState, result) <- use internalState <&> flip apply entry
-  trace (\n t -> LogEntryApplied n t entry)
+  trace (`LogEntryApplied` entry)
 
   internalState .= newState
   pure $ Just (MkCommandResponse result requestId)
 applyEntry (LogEntryMembershipChange clusterConf) = do
   assign clusterConfiguration clusterConf
-  trace (\n t -> MembershipChangeApplied n t clusterConf)
+  trace (`MembershipChangeApplied` clusterConf)
 
   -- If we just committed to a joint membership configuration,
   -- then it's time to propose the move to the union
@@ -271,7 +271,7 @@ updateCommitIndex = do
     _ :> relativeLastIndex -> do
       let lastIndex = absoluteIndex entries relativeLastIndex
       commitIndex .= lastIndex
-      trace (\n t -> CommitIndexIncreasedTo n t lastIndex)
+      trace (`CommitIndexIncreasedTo` lastIndex)
       pure True
 
 -- | Update the commit index, and apply log entries if there are
@@ -306,13 +306,13 @@ applyLogEntries = do
             >>= \case
               Nothing -> pure () -- TODO: isn't this unexpected?
               Just requester -> do
-                trace (\t n -> CommandResultResponded t n response)
+                trace (`CommandResultResponded` response)
                 -- TODO: reply (and possibly retry) in a separate thread
                 sendClientResponse requester (Success leaderId result)
                 currentClientRequests %= Map.delete requestId
 
       lastApplied .= currentCommitIndex
-      trace (\n t -> LastAppliedIndexIncreasedTo n t currentCommitIndex)
+      trace (`LastAppliedIndexIncreasedTo` currentCommitIndex)
 
       view configuration <&> maxLogLength >>= \case
         Nothing -> pure ()
@@ -330,12 +330,11 @@ nextElectionTimeout = do
   randomGen .= nextGen
   pure timeout
 
-trace :: (Monad m) => (Term -> node -> RaftTrace entry result node state) -> RaftT entry node state result m ()
+trace :: (Monad m) => (EventContext node -> RaftTrace entry result node state) -> RaftT entry node state result m ()
 trace makeTrace = do
-  ourTerm <- use term
-  node <- view configuration <&> nodeId
+  eventCtx <- EventContext <$> use term <*> self
   spec <- view specification
-  lift $ (spec ^. tracer) (makeTrace ourTerm node)
+  lift $ (spec ^. tracer) (makeTrace eventCtx)
 
 -- | Update the internal term state, returning the previous and new 'Term's.
 --
@@ -389,14 +388,14 @@ applySnapshot snapshot = do
   commandLog %= Log.applySnapshot snapshot
   internalState .= sData snapshot
   clusterConfiguration .= sCluster snapshot
-  trace (\t n -> SnapshotApplied t n (sMetadata snapshot))
+  trace (`SnapshotApplied` sMetadata snapshot)
 
 -- | Append a log entry to the log
 appendLogEntry :: (Ord node, MonadMVar m, MonadSTM m) => LogEntry node entry -> RaftT entry node state result m ()
 appendLogEntry entry = do
   ourTerm <- use term
   commandLog %= (`Log.append` (ourTerm, entry))
-  trace (\t n -> LogEntryAppended t n entry)
+  trace (`LogEntryAppended` entry)
 
   -- TODO: sendAppendEntriesTo in parallel
   whenRole Leader $
@@ -466,7 +465,7 @@ becomeCandidate = do
 
   v <- view (specification . voteFor)
   lift $ v s (Just s)
-  trace (VotedFor thisTerm s)
+  trace (\ctx -> VotedFor ctx thisTerm s)
   votedFor .= Just s
   yesVotes .= Set.singleton s
 

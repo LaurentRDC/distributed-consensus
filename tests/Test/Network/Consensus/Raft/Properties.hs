@@ -22,7 +22,7 @@ import Control.Monitor
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as Text
-import Network.Consensus.Raft (ClusterConfiguration (..), Command (..), CommandResponse (..), LogIndex, RaftTrace (..))
+import Network.Consensus.Raft (ClusterConfiguration (..), Command (..), CommandResponse (..), EventContext (..), LogIndex, RaftTrace (..))
 import Test.Network.Consensus.Scenario
   ( Scenario,
     clusterMembershipChangeApplied,
@@ -61,7 +61,7 @@ singleLeaderPerTermProperty :: Scenario entry result node state
 singleLeaderPerTermProperty = go <?> "Another leader elected for the same term"
   where
     anotherLeaderIn term = predicate $ \case
-      LeaderElected t _ | t == term -> Just ()
+      LeaderElected (EventContext t _) | t == term -> Just ()
       _ -> Nothing
 
     -- Whenever a leader is elected, there should not be another
@@ -69,7 +69,7 @@ singleLeaderPerTermProperty = go <?> "Another leader elected for the same term"
     --
     -- In order to allow the test to span multiple terms, we need to recursively
     -- apply the expectation using 'both'
-    go = void $ whenever leaderElected $ \(term, _) ->
+    go = void $ whenever leaderElected $ \(EventContext term _) ->
       both go (never (anotherLeaderIn term))
 
 -- | Ensure that a node casts at most one vote per term
@@ -80,7 +80,7 @@ singleVoteCastPerTermProperty = go mempty <?> "More than one vote cast per term"
       void
         ( whenever
             votedFor
-            $ \(voterTerm, voterNode, _, _) -> do
+            $ \(EventContext voterTerm voterNode, _, _) -> do
               when (Set.member (voterTerm, voterNode) votes) $ fail "Node cast more than one vote in term"
 
               go (Set.insert (voterTerm, voterNode) votes)
@@ -100,9 +100,9 @@ monotonicallyIncreasingTermProperty = go mempty <?> "Term not increased monotoni
               (latestTerm <= newTerm)
         go (Map.insert node newTerm latestKnownTerms)
 
-    roleTerm (LeaderElected t n) = Just (n, t)
-    roleTerm (BecameCandidate t n) = Just (n, t)
-    roleTerm (BecameFollower t n) = Just (n, t)
+    roleTerm (LeaderElected (EventContext t n)) = Just (n, t)
+    roleTerm (BecameCandidate (EventContext t n)) = Just (n, t)
+    roleTerm (BecameFollower (EventContext t n)) = Just (n, t)
     roleTerm _ = Nothing
 
 -- | Ensure that each node's last applied index increases monotonically.
@@ -113,7 +113,7 @@ monotonicallyIncreasingLastAppliedIndexProperty = go mempty <?> "Last applied in
       step
         ()
         ( \case
-            LastAppliedIndexIncreasedTo _term node lastApplied -> do
+            LastAppliedIndexIncreasedTo (EventContext _ node) lastApplied -> do
               case Map.lookup node acc of
                 Nothing -> pure ()
                 Just prevLastApplied ->
@@ -133,7 +133,7 @@ monotonicallyIncreasingCommitIndexProperty = go mempty <?> "Commit index not inc
       step
         ()
         ( \case
-            CommitIndexIncreasedTo _term node commitIndex -> do
+            CommitIndexIncreasedTo (EventContext _ node) commitIndex -> do
               case Map.lookup node acc of
                 Nothing -> pure ()
                 Just prevCommitIndex ->
@@ -150,9 +150,9 @@ monotonicallyIncreasingCommitIndexProperty = go mempty <?> "Commit index not inc
 allAcceptedCommandReceiveResponseProperty :: Scenario entry result node state
 allAcceptedCommandReceiveResponseProperty = go
   where
-    go = void $ whenever commandReceived $ \(_, _, Command _entry reqId) ->
+    go = void $ whenever commandReceived $ \(_, Command _entry reqId) ->
       let thisCommandResponded =
-            commandResponded >>= \(_, _, MkCommandResponse _result' reqId') ->
+            commandResponded >>= \(_, MkCommandResponse _result' reqId') ->
               predicate $ \_ -> unless (reqId == reqId') Nothing
        in eventually thisCommandResponded <?> "Never received a response for " <> Text.show reqId
 
@@ -162,19 +162,19 @@ allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration :: (Eq node)
 allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration =
   go <?> "An accepted cluster membership request did not result in new configuration"
   where
-    go = void $ whenever clusterMembershipChangeInitiated $ \(term, leader) ->
+    go = void $ whenever clusterMembershipChangeInitiated $ \ctx ->
       eventually
-        ( clusterMembershipChangeCompleted >>= \(term', leader') ->
-            predicate $ \_ -> unless (term == term' && leader == leader') Nothing
+        ( clusterMembershipChangeCompleted >>= \ctx' ->
+            predicate $ \_ -> unless (ctx == ctx') Nothing
         )
 
 allAdminRequestToJoinComplete :: (Eq node, Show node) => Scenario entry result node state
 allAdminRequestToJoinComplete =
   go <?> "A command to join a cluster did not result in new cluster membership"
   where
-    go = void $ whenever joinClusterCommandReceived $ \(term, nodeJoining) ->
+    go = void $ whenever joinClusterCommandReceived $ \(EventContext term nodeJoining) ->
       eventually
-        ( joinedCluster >>= \(term', nodeJoining') ->
+        ( joinedCluster >>= \(EventContext term' nodeJoining') ->
             predicate $ \_ -> unless (term == term' && nodeJoining == nodeJoining') Nothing
         )
         <?> "A command to "
@@ -185,7 +185,7 @@ allAdminRequestToLeaveComplete :: (Show node, Ord node) => Scenario entry result
 allAdminRequestToLeaveComplete =
   go
   where
-    go = void $ whenever leaveClusterCommandReceived $ \(_, nodeLeaving) ->
+    go = void $ whenever leaveClusterCommandReceived $ \(EventContext _ nodeLeaving) ->
       -- This is quite subtle. Basically, the cluster can replicate, commit, and apply a cluster
       -- configuration change without the node leaving the cluster ever knowing. Consider a cluster
       -- of three nodes [A, B, C], where C is leaving; join configurations [A, B] and [A, B, C] have
@@ -195,7 +195,7 @@ allAdminRequestToLeaveComplete =
       -- of that node, but from the point-of-view of the leader, that emits a
       -- 'MembershipChangeApplied'
       eventually
-        ( clusterMembershipChangeApplied >>= \(_, _, clusterConf) -> predicate $ \_ -> case clusterConf of
+        ( clusterMembershipChangeApplied >>= \(_, clusterConf) -> predicate $ \_ -> case clusterConf of
             Joint _ _ -> pure ()
             Simple cluster -> unless (nodeLeaving `Set.notMember` cluster) Nothing
         )
@@ -228,7 +228,7 @@ indexRelationshipProperty = go mempty <?> "index relationship did not hold"
       step
         ()
         ( \case
-            LastAppliedIndexIncreasedTo _term node lastApplied -> do
+            LastAppliedIndexIncreasedTo (EventContext _ node) lastApplied -> do
               let newAcc =
                     Map.alter
                       ( \case
@@ -239,7 +239,7 @@ indexRelationshipProperty = go mempty <?> "index relationship did not hold"
                       acc
               checkState node newAcc
               go newAcc
-            CommitIndexIncreasedTo _term node commitIndex -> do
+            CommitIndexIncreasedTo (EventContext _ node) commitIndex -> do
               let newAcc =
                     Map.alter
                       ( \case
@@ -250,7 +250,7 @@ indexRelationshipProperty = go mempty <?> "index relationship did not hold"
                       acc
               checkState node newAcc
               go newAcc
-            LogEntryAppended _tern node _ -> do
+            LogEntryAppended (EventContext _ node) _ -> do
               let newAcc =
                     Map.alter
                       ( \case

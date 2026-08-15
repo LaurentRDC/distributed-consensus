@@ -125,7 +125,7 @@ server = do
         lift (tryTakeMVar lock) >>= \case
           Nothing -> do
             ev <- dequeueEvent
-            trace (\t n -> EventReceived t n ev)
+            trace (`EventReceived` ev)
             handleEvent ev
             loop
           Just () -> pure ()
@@ -213,7 +213,7 @@ handleClientRequest (MkRequest clientId entry) =
     Leader -> do
       reqId <- acceptClientRequest clientId
       let command = Command entry reqId
-      trace (\t n -> CommandReceived t n command)
+      trace (`CommandReceived` command)
       appendLogEntry (LogEntryCommand command)
 
 handleAppendEntries ::
@@ -313,7 +313,7 @@ handleRequestVote ::
 handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLastLogIndexTerm = do
   _ <- handleTermNumber candidateTerm
   ourTerm <- use term
-  trace (\ourTerm' ourNode -> VoteRequestedBy ourTerm' ourNode candidateTerm candidateNode)
+  trace (\ctx -> VoteRequestedBy ctx candidateTerm candidateNode)
   mAlreadyVoted <- use votedFor
   s <- self
   entries <- use commandLog
@@ -324,7 +324,7 @@ handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLas
         then do
           votedFor .= Just candidateNode
           grantVote ourTerm
-          trace (\ourTerm' ourNode -> VotedFor ourTerm' ourNode candidateTerm candidateNode)
+          trace (\ctx -> VotedFor ctx candidateTerm candidateNode)
         else do
           sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
     -- We already voted for this candidate
@@ -372,11 +372,11 @@ handleRequestVoteResult voter voterTerm votedForUs = do
       when (ourRole == Candidate) $
         if votedForUs
           then do
-            trace (\ourTerm ourNode -> VoteGrantedFrom ourTerm ourNode voter)
+            trace (`VoteGrantedFrom` voter)
             yesVotes %= Set.insert voter
             checkElection
           else
-            trace (\ourTerm ourNode -> VoteDeniedFrom ourTerm ourNode voter)
+            trace (`VoteDeniedFrom` voter)
 
 handleInstallSnapshot ::
   (MonadMVar m) =>
@@ -483,7 +483,7 @@ handleClusterMembershipResult = \case
 
 handleAdminCommand :: (MonadMVar m) => AdminCommand node -> RaftT entry node state result m ()
 handleAdminCommand comm = do
-  trace (\t n -> AdminCommandReceived t n comm)
+  trace (`AdminCommandReceived` comm)
   case comm of
     (ShutDown _requester) ->
       view exitLock >>= lift . (`putMVar` ()) -- TODO: reply to requester

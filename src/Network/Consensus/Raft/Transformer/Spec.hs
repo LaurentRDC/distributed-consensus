@@ -60,6 +60,7 @@ module Network.Consensus.Raft.Transformer.Spec
     Event (..),
     RPC (..),
     RPCResult (..),
+    EventContext (..),
     RaftTrace (..),
   )
 where
@@ -233,64 +234,59 @@ data Event node entry result state
   | EventAdminCommand (AdminCommand node)
   deriving (Eq, Show)
 
+data EventContext node
+  = EventContext !Term !node
+  deriving (Eq)
+
+instance (Show node) => Show (EventContext node) where
+  show (EventContext term node) = "[Term=" <> show term <> " | node=" <> show node <> "]"
+
 data RaftTrace entry result node state
-  = LeaderElected Term node
+  = LeaderElected (EventContext node)
   | VotedFor
-      -- | Our term
-      Term
-      -- | Our node
-      node
+      (EventContext node)
       -- | Their term
       Term
       -- | Their node
       node
   | VoteRequestedBy
-      -- | Our term
-      Term
-      -- | Our node
-      node
+      (EventContext node)
       -- | Their term
       Term
       -- | Their node
       node
   | VoteGrantedFrom
-      -- | Our term
-      Term
-      -- | Our node
-      node
+      (EventContext node)
       -- | Their node
       node
   | VoteDeniedFrom
-      -- | Our term
-      Term
-      -- | Our node
-      node
+      (EventContext node)
       -- | Their node
       node
-  | BecameCandidate Term node
-  | BecameFollower Term node
-  | BecameNonMember Term node
-  | EventReceived Term node (Event node entry result state)
-  | SplitElection Term node
-  | ElectionTriggered Term node
+  | BecameCandidate (EventContext node)
+  | BecameFollower (EventContext node)
+  | BecameNonMember (EventContext node)
+  | EventReceived (EventContext node) (Event node entry result state)
+  | SplitElection (EventContext node)
+  | ElectionTriggered (EventContext node)
   | DeserializationError node Text
   | -- | Command received by the leader node. If the command needs to be redirected
     --    to another node, this event is not emitted
-    CommandReceived Term node (Command entry)
-  | CommandResultResponded Term node (CommandResponse node result)
+    CommandReceived (EventContext node) (Command entry)
+  | CommandResultResponded (EventContext node) (CommandResponse node result)
   | -- TODO: better traching of new joining/leaving cluster
-    MembershipChangeInitiated Term node
-  | MembershipChangeCompleted Term node
-  | AdminCommandReceived Term node (AdminCommand node)
-  | JoinedCluster Term node
-  | LeftCluster Term node
-  | CommitIndexIncreasedTo Term node LogIndex
-  | LogEntryAppended Term node (LogEntry node entry)
-  | LogEntryApplied Term node entry
-  | MembershipChangeApplied Term node (ClusterConfiguration node)
-  | LastAppliedIndexIncreasedTo Term node LogIndex
-  | SnapshotApplied Term node SnapshotMetadata
-  | GracefulShutdown Term node
+    MembershipChangeInitiated (EventContext node)
+  | MembershipChangeCompleted (EventContext node)
+  | AdminCommandReceived (EventContext node) (AdminCommand node)
+  | JoinedCluster (EventContext node)
+  | LeftCluster (EventContext node)
+  | CommitIndexIncreasedTo (EventContext node) LogIndex
+  | LogEntryAppended (EventContext node) (LogEntry node entry)
+  | LogEntryApplied (EventContext node) entry
+  | MembershipChangeApplied (EventContext node) (ClusterConfiguration node)
+  | LastAppliedIndexIncreasedTo (EventContext node) LogIndex
+  | SnapshotApplied (EventContext node) SnapshotMetadata
+  | GracefulShutdown (EventContext node)
   deriving (Eq, Show)
 
 data RaftSpec entry node state result m = MkRaftSpec
