@@ -20,7 +20,9 @@ where
 import Control.Arrow ((&&&))
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Reader (ReaderT (runReaderT), asks)
+import Data.Binary (Binary)
 import Data.Text (Text)
+import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
 
 -- Alphabet for communicating with clients
@@ -30,13 +32,17 @@ data Request node entry
   { requestOriginator :: !node,
     requestEntry :: !entry
   }
-  deriving (Eq, Show)
+  deriving (Eq, Show, Generic)
+
+instance (Binary node, Binary entry) => Binary (Request node entry)
 
 data Response node result
   = Success !node !result
   | Failure !Text
   | NotLeader (Maybe node)
-  deriving (Eq, Show)
+  deriving (Eq, Show, Generic)
+
+instance (Binary node, Binary result) => Binary (Response node result)
 
 newtype RaftClientT entry node result m a
   = MkRaftClientT (ReaderT (RaftClientEnv entry node result m) m a)

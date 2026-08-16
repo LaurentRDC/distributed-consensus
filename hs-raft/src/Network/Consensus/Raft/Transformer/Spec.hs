@@ -19,10 +19,11 @@ module Network.Consensus.Raft.Transformer.Spec
     sendRPC,
     sendRPCResult,
     sendClientResponse,
+    sendAdminResponse,
     receiveRPC,
     receiveRPCResult,
     receiveClientRequest,
-    receiveAdminCommand,
+    receiveAdminRequest,
     tracer,
 
     -- * Raft state
@@ -56,7 +57,7 @@ module Network.Consensus.Raft.Transformer.Spec
     ClusterMembershipRequest (..),
     ClusterMembershipResult (..),
     ClusterMembershipError (..),
-    AdminCommand (..),
+    AdminRequest (..),
     Event (..),
     RPC (..),
     RPCResult (..),
@@ -73,6 +74,7 @@ import Data.Text (Text)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
+import Network.Consensus.Raft.Admin (AdminRequest (..), AdminResponse)
 import Network.Consensus.Raft.Client (Request, Response)
 import Network.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId, Role (..), Term)
 import Network.Consensus.Raft.Log (Log, LogIndex, Snapshot, SnapshotMetadata, newLog)
@@ -211,27 +213,13 @@ data RPCResult node result
 
 instance (Binary node, Binary result) => Binary (RPCResult node result)
 
-data AdminCommand node
-  = JoinCluster
-      -- | Admin that asked
-      node
-      -- | One node from cluster to contact initially
-      node
-  | LeaveCluster
-      -- | Admin that asked
-      node
-  | ShutDown node
-  deriving (Eq, Show, Ord, Generic)
-
-instance (Binary node) => Binary (AdminCommand node)
-
 data Event node entry result state
   = EventElectionTimeout
   | EventHeartBeatTimeout
   | EventIncomingClientRequest (Request node entry)
   | EventRPC (RPC node entry state)
   | EventRPCResult (RPCResult node result)
-  | EventAdminCommand (AdminCommand node)
+  | EventAdminRequest (AdminRequest node)
   deriving (Eq, Show)
 
 data EventContext node
@@ -277,7 +265,7 @@ data RaftTrace entry result node state
   | -- TODO: better traching of new joining/leaving cluster
     MembershipChangeInitiated (EventContext node)
   | MembershipChangeCompleted (EventContext node)
-  | AdminCommandReceived (EventContext node) (AdminCommand node)
+  | AdminRequestReceived (EventContext node) (AdminRequest node)
   | JoinedCluster (EventContext node)
   | LeftCluster (EventContext node)
   | CommitIndexIncreasedTo (EventContext node) LogIndex
@@ -302,13 +290,14 @@ data RaftSpec entry node state result m = MkRaftSpec
     _sendRPC :: node -> RPC node entry state -> m (),
     _sendRPCResult :: node -> RPCResult node result -> m (),
     _sendClientResponse :: node -> Response node result -> m (),
+    _sendAdminResponse :: node -> AdminResponse node -> m (),
     -- We use 'Text' to represent deserialization errors because this is
     -- easiest to represent to the user. I don't think it's worth adding
     -- yet another type variable to the spec.
     _receiveRPC :: m (Either Text (RPC node entry state)),
     _receiveRPCResult :: m (Either Text (RPCResult node result)),
     _receiveClientRequest :: m (Either Text (Request node entry)),
-    _receiveAdminCommand :: m (Either Text (AdminCommand node)),
+    _receiveAdminRequest :: m (Either Text (AdminRequest node)),
     _tracer :: RaftTrace entry result node state -> m ()
   }
 

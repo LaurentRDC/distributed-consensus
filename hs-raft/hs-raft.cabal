@@ -31,6 +31,7 @@ common warnings
 library
     import:           warnings
     exposed-modules:  Network.Consensus.Raft
+                      Network.Consensus.Raft.Admin
                       Network.Consensus.Raft.Client
     other-modules:    Network.Consensus.Raft.Algorithm
                       Network.Consensus.Raft.Domain

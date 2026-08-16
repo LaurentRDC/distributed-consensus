@@ -21,6 +21,8 @@ import Data.Functor ((<&>))
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Lens.Micro.Platform (at, use, view, (%=), (.=), (^.))
+import Network.Consensus.Raft.Admin (AdminCommand (..), AdminResponse (..))
+import qualified Network.Consensus.Raft.Admin as Admin
 import Network.Consensus.Raft.Client (Request (..), Response (..))
 import Network.Consensus.Raft.Domain
 import Network.Consensus.Raft.Log (LogIndex, Lookup (..), Snapshot (Snapshot, sMetadata), SnapshotMetadata (..), lastLogIndex, (!?))
@@ -60,7 +62,7 @@ import Network.Consensus.Raft.Transformer
     matchIndex,
     nextIndex,
     peers,
-    receiveAdminCommand,
+    receiveAdminRequest,
     receiveClientRequest,
     receiveRPC,
     receiveRPCResult,
@@ -68,6 +70,7 @@ import Network.Consensus.Raft.Transformer
     resetHeartBeatTimer,
     role,
     self,
+    sendAdminResponse,
     sendAppendEntriesTo,
     sendClientResponse,
     sendHeartbeat,
@@ -82,7 +85,7 @@ import Network.Consensus.Raft.Transformer
     whenRole,
     yesVotes,
   )
-import Network.Consensus.Raft.Transformer.Spec (AdminCommand (..), ClusterMembershipError (..))
+import Network.Consensus.Raft.Transformer.Spec (AdminRequest (..), ClusterMembershipError (..))
 
 server ::
   ( Ord node,
@@ -102,7 +105,7 @@ server = do
   t1 <- lift $ async $ receiveRPCs spec queue trace'
   t2 <- lift $ async $ receiveRPCResults spec queue trace'
   t3 <- lift $ async $ receiveClientRequests spec queue trace'
-  t4 <- lift $ async $ receiveAdminCommands spec queue trace'
+  t4 <- lift $ async $ receiveAdminRequests spec queue trace'
   let receiveLoops = [t1, t2, t3, t4]
   for_ receiveLoops (lift . link)
 
@@ -154,13 +157,13 @@ server = do
         recv >>= \case
           Left errMsg -> trace' (`DeserializationError` errMsg)
           Right request -> atomically $ writeTQueue queue (EventIncomingClientRequest request)
-    receiveAdminCommands spec queue trace' = do
-      labelThisThread "receiveAdminCommands"
-      let recv = spec ^. receiveAdminCommand
+    receiveAdminRequests spec queue trace' = do
+      labelThisThread "receiveAdminRequests"
+      let recv = spec ^. receiveAdminRequest
       forever $ do
         recv >>= \case
           Left errMsg -> trace' (`DeserializationError` errMsg)
-          Right request -> atomically $ writeTQueue queue (EventAdminCommand request)
+          Right request -> atomically $ writeTQueue queue (EventAdminRequest request)
 
 handleEvent ::
   ( Ord node,
@@ -195,7 +198,7 @@ handleEvent (EventRPCResult (AER appendEntriesResult)) =
 handleEvent (EventRPCResult (ISR installSnapshotResult)) =
   handleInstallSnapshotResult installSnapshotResult
 handleEvent (EventRPCResult (CMR clusterMembershipResult)) = handleClusterMembershipResult clusterMembershipResult
-handleEvent (EventAdminCommand adminCommand) = handleAdminCommand adminCommand
+handleEvent (EventAdminRequest adminCommand) = handleAdminRequest adminCommand
 
 handleClientRequest ::
   (Ord node, MonadMVar m, MonadAsync m) =>
@@ -479,17 +482,20 @@ handleClusterMembershipResult = \case
     clusterMembershipErrorPeer (NoKnownLeader n) = n
     clusterMembershipErrorPeer (OngoingClusterMembershipChange n) = n
 
-handleAdminCommand :: (MonadMVar m) => AdminCommand node -> RaftT entry node state result m ()
-handleAdminCommand comm = do
-  trace (`AdminCommandReceived` comm)
-  case comm of
-    (ShutDown _requester) ->
-      view exitLock >>= lift . (`putMVar` ()) -- TODO: reply to requester
-    (JoinCluster _requester target) ->
-      self >>= sendRPC target . CM . ClusterMembershipJoinRequest -- TODO: reply to requester
-    (LeaveCluster _requester) ->
+handleAdminRequest :: (MonadMVar m) => AdminRequest node -> RaftT entry node state result m ()
+handleAdminRequest req@(AdminRequest reqId adminId command) = do
+  trace (`AdminRequestReceived` req)
+  case command of
+    ShutDown -> do
+      view exitLock >>= lift . (`putMVar` ())
+      sendAdminResponse adminId (AdminResponse reqId Admin.ShutdownInitiated)
+    (JoinCluster target) -> do
+      self >>= sendRPC target . CM . ClusterMembershipJoinRequest
+      sendAdminResponse adminId (AdminResponse reqId Admin.JoinInitiated)
+    LeaveCluster ->
       use currentLeader
         >>= \case
-          Nothing -> pure () -- TODO: reply to admin
-          Just leaderId ->
-            self >>= sendRPC leaderId . CM . ClusterMembershipLeaveRequest -- TODO: reply to requester
+          Nothing -> sendAdminResponse adminId (AdminResponse reqId (Admin.NotLeader Nothing))
+          Just leaderId -> do
+            self >>= sendRPC leaderId . CM . ClusterMembershipLeaveRequest
+            sendAdminResponse adminId (AdminResponse reqId Admin.LeaveInitiated)

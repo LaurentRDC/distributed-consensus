@@ -17,6 +17,7 @@ module Network.Consensus.Raft.Transformer
     sendRPCConcurrently,
     sendRPCResult,
     sendClientResponse,
+    sendAdminResponse,
     whenRole,
     sendHeartbeat,
     sendAppendEntriesTo,
@@ -63,13 +64,14 @@ import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (<%=), (^.))
+import Network.Consensus.Raft.Admin (AdminResponse)
 import Network.Consensus.Raft.Client (Response (..))
 import Network.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId, Role (..), Term, allNodes, hasQuorum)
 import Network.Consensus.Raft.Log (Lookup (..), Snapshot (Snapshot, sData, sMetadata), SnapshotMetadata (..), absoluteIndex, logEntries, sCluster)
 import qualified Network.Consensus.Raft.Log as Log
 import Network.Consensus.Raft.Timer (Microseconds, resetTimer)
 import Network.Consensus.Raft.Transformer.Definition
-import Network.Consensus.Raft.Transformer.Spec hiding (sendClientResponse, sendRPC, sendRPCResult)
+import Network.Consensus.Raft.Transformer.Spec hiding (sendAdminResponse, sendClientResponse, sendRPC, sendRPCResult)
 import qualified Network.Consensus.Raft.Transformer.Spec as Spec
 import System.Random (uniformR)
 
@@ -126,6 +128,11 @@ sendClientResponse :: (Monad m) => node -> Response node result -> RaftT entry n
 sendClientResponse node response = do
   spec <- view specification
   lift $ (spec ^. Spec.sendClientResponse) node response
+
+sendAdminResponse :: (Monad m) => node -> AdminResponse node -> RaftT entry node state result m ()
+sendAdminResponse admin response = do
+  spec <- view specification
+  lift $ (spec ^. Spec.sendAdminResponse) admin response
 
 whenRole ::
   (Monad m) =>

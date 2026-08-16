@@ -42,8 +42,7 @@ import qualified Data.Text.Lazy as Text
 import Data.Word (Word64)
 import qualified Debug.Trace as Debug
 import Network.Consensus.Raft
-  ( AdminCommand (..),
-    Config (..),
+  ( Config (..),
     Microseconds,
     RPC,
     RPCResult,
@@ -51,6 +50,8 @@ import Network.Consensus.Raft
     runRaftT,
   )
 import qualified Network.Consensus.Raft as Raft
+import Network.Consensus.Raft.Admin
+import qualified Network.Consensus.Raft.Admin as Admin
 import Network.Consensus.Raft.Client (RaftClientSpec (..), RaftClientT, Request, Response, request, runRaftClientT)
 import Test.Network.Consensus.Raft.Properties (allProperties)
 import Test.Network.Consensus.Scenario (checkScenario)
@@ -169,9 +170,9 @@ propClusterWith printTrace raceOrNot =
               -- This makes it easier to specify properties
               forConcurrently_ harness.loneServers $ \(server, isDone, _, _) -> do
                 takeMVar isDone
-                server.sSendAdminCommand (ShutDown (-1)) -- Admin node (-1) doesn't matter right now
+                runAdminAction harness (Admin.shutDown server.sConfig.nodeId)
               forConcurrently_ harness.clusterServers $ \server ->
-                server.sSendAdminCommand (ShutDown (-1)) -- Admin node (-1) doesn't matter right now
+                runAdminAction harness (Admin.shutDown server.sConfig.nodeId)
         )
     runServers :: Harness s -> IOSim s ()
     runServers harness =
@@ -189,9 +190,10 @@ propClusterWith printTrace raceOrNot =
         ( forConcurrently_ (IntMap.elems harness.loneServers) $ \(server, isDone, waitToJoin, waitToLeave) ->
             concurrently_
               ( threadDelay (fromIntegral waitToJoin)
-                  >> server.sSendAdminCommand
-                    ( JoinCluster
-                        (-1) -- Admin ID doesn't matter right now
+                  >> runAdminAction
+                    harness
+                    ( Admin.joinCluster
+                        server.sConfig.nodeId
                         ( fromIntegral $
                             fst $
                               fromJust $
@@ -199,7 +201,9 @@ propClusterWith printTrace raceOrNot =
                         )
                     )
                   >> threadDelay (fromIntegral waitToLeave)
-                  >> server.sSendAdminCommand (LeaveCluster (-1))
+                  >> runAdminAction
+                    harness
+                    (Admin.leaveCluster server.sConfig.nodeId)
                   -- We give some time for nodes to actually leave.
 
                   >> threadDelay 100_000
@@ -276,8 +280,7 @@ genScenarioInputs = do
 data Server s
   = MkServer
   { sConfig :: Config Node,
-    sSpec :: RaftSpec Command Node State Result (IOSim s),
-    sSendAdminCommand :: AdminCommand Node -> IOSim s ()
+    sSpec :: RaftSpec Command Node State Result (IOSim s)
   }
 
 type Mailbox s m = (IntMap (TQueue (IOSim s) m))
@@ -288,13 +291,15 @@ data NetworkFabric s
     rpcResultsMailbox :: Mailbox s (RPCResult Node Result),
     requestsMailbox :: Mailbox s (Request Node Command),
     responsesMailbox :: Mailbox s (Response Node Result),
-    adminMailbox :: Mailbox s (AdminCommand Node)
+    adminMailbox :: Mailbox s (AdminRequest Node),
+    adminResponsesMailbox :: Mailbox s (AdminResponse Node)
   }
 
 newNetworkFabric :: Set Node -> IOSim s (NetworkFabric s)
 newNetworkFabric nodes =
   MkNetworkFabric
     <$> newMailbox
+    <*> newMailbox
     <*> newMailbox
     <*> newMailbox
     <*> newMailbox
@@ -327,15 +332,15 @@ mkServer debug network hbto etolb etoub seed node =
             _sendRPC = send network.rpcMailbox,
             _sendRPCResult = send network.rpcResultsMailbox,
             _sendClientResponse = send network.responsesMailbox,
+            _sendAdminResponse = send network.adminResponsesMailbox,
             _receiveRPC = receive network.rpcMailbox node <&> Right,
             _receiveRPCResult = receive network.rpcResultsMailbox node <&> Right,
             _receiveClientRequest = receive network.requestsMailbox node <&> Right,
-            _receiveAdminCommand = receive network.adminMailbox node <&> Right,
+            _receiveAdminRequest = receive network.adminMailbox node <&> Right,
             -- We debug-print events here, rather than in `checkScenario`,
             -- because `checkScenario` can fail and produce no trace.
             _tracer = traceM . debug
-          },
-      sSendAdminCommand = send network.adminMailbox node
+          }
     }
 
 data Harness s
@@ -343,7 +348,8 @@ data Harness s
   { clusterServers :: IntMap (Server s),
     loneServers :: IntMap (Server s, MVar (IOSim s) (), Microseconds, Microseconds),
     -- TODO: have multiple concurrent clients
-    runClientAction :: forall a. RaftClientT Command Node Result (IOSim s) a -> IOSim s a
+    runClientAction :: forall a. RaftClientT Command Node Result (IOSim s) a -> IOSim s a,
+    runAdminAction :: forall a. RaftAdminT Node (IOSim s) a -> IOSim s a
   }
 
 testHarness ::
@@ -354,7 +360,14 @@ testHarness ::
 testHarness
   debug
   (ScenarioInputs hb etlb etup s numClusterNodes numLoneNodes loneWaits _commands) = do
-    networkFabric <- newNetworkFabric $ mconcat [Set.fromList (fromIntegral <$> serverNodes), Set.fromList (fromIntegral <$> loneNodes), Set.singleton clientNode]
+    networkFabric <-
+      newNetworkFabric $
+        mconcat
+          [ Set.fromList (fromIntegral <$> serverNodes),
+            Set.fromList (fromIntegral <$> loneNodes),
+            Set.singleton clientNode,
+            Set.singleton adminNode
+          ]
 
     let mkServer' :: Word64 -> Node -> Server s
         mkServer' = mkServer debug networkFabric hb etlb etup
@@ -382,9 +395,11 @@ testHarness
                 )
                 loneNodesWithSeedsAndWaits
                 isDones,
-          runClientAction = \action -> runRaftClientT action clientNode (clientSpec networkFabric)
+          runClientAction = \action -> runRaftClientT action clientNode (clientSpec networkFabric),
+          runAdminAction = \action -> runRaftAdminT action adminNode (adminSpec networkFabric)
         }
     where
+      adminNode = -1
       clientNode = Node $ numClusterNodes + numLoneNodes + 1
 
       serverNodes = [0 .. numClusterNodes - 1]
@@ -398,6 +413,12 @@ testHarness
           { sendRequest = send network.requestsMailbox,
             receiveResponse =
               receive network.responsesMailbox clientNode <&> Right
+          }
+
+      adminSpec network =
+        MkRaftAdminSpec
+          { sendAdminRequest = send network.adminMailbox,
+            receiveAdminResponse = receive network.adminResponsesMailbox adminNode <&> Right
           }
 
 send :: (MonadSTM m) => IntMap (TQueue m a) -> Node -> a -> m ()
