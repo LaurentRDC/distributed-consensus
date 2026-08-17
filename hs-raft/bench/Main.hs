@@ -13,12 +13,11 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
 import Control.Concurrent.STM (TQueue, atomically, newTQueueIO, readTQueue, writeTQueue)
 import Control.DeepSeq (NFData)
-import Control.Monad ((>=>))
-import Data.Foldable (for_)
+import Control.Monad (replicateM, (>=>))
 import Data.Functor ((<&>))
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
-import Data.List.NonEmpty (NonEmpty)
+import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -40,13 +39,44 @@ main = do
     [ withResource startCluster stopCluster $ \getClusterHandle ->
         bgroup
           "Benchmark"
-          [ bench "unloaded latency" $ nfIO $ do
-              cluster <- getClusterHandle
-              cluster.runRequest (NonEmpty.singleton (Get 'a')),
-            bench "unloaded throughput (1000 commands)" $ nfIO $ do
-              cluster <- getClusterHandle
-              for_ (take 1000 ['a' ..]) $ \c ->
-                cluster.runRequest (NonEmpty.singleton (Get c))
+          [ let unloadedLatency batchSize =
+                  bench ("Batch size " <> show batchSize) $ nfIO $ do
+                    cluster <- getClusterHandle
+                    cluster.runRequest
+                      ( Get 'a'
+                          :| [ Get c
+                             | c <-
+                                 take
+                                   (pred batchSize)
+                                   (cycle ['b' ..])
+                             ]
+                      )
+             in bgroup
+                  "Unloaded latency"
+                  [ unloadedLatency 1,
+                    unloadedLatency 100,
+                    unloadedLatency 1_000
+                  ],
+            let unloadedThroughput batchSize =
+                  bench ("Batch size " <> show batchSize) $
+                    nfIO $
+                      do
+                        cluster <- getClusterHandle
+                        let batch =
+                              Get 'a'
+                                :| [ Get c
+                                   | c <-
+                                       take
+                                         (pred batchSize)
+                                         (cycle ['b' ..])
+                                   ]
+                        replicateM (1000 `div` batchSize) $ cluster.runRequest batch
+             in bgroup
+                  "Unloaded throughput (1000 commands)"
+                  [ unloadedThroughput 1,
+                    unloadedThroughput 10,
+                    unloadedThroughput 100
+                  ]
           ]
     ]
 

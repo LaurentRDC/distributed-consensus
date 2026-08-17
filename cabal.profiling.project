@@ -3,3 +3,7 @@ import: cabal.project
 profiling: True
 library-profiling: True
 executable-profiling: True
+profiling-details: all-functions
+
+package *
+    profiling-detail: late-toplevel
