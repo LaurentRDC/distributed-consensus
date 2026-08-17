@@ -13,6 +13,8 @@
 module Test.Network.Consensus.Raft
   ( tests,
     NumRacyTests,
+    ScheduleBound,
+    BranchingFactor,
     PrintTrace,
   )
 where
@@ -23,7 +25,7 @@ import Control.Monad (replicateM, when)
 import Control.Monad.Class.MonadAsync (concurrently_, forConcurrently_, race_, withAsync)
 import Control.Monad.Class.MonadTest (exploreRaces)
 import Control.Monad.Class.MonadTimer (threadDelay, timeout)
-import Control.Monad.IOSim (IOSim, exploreSimTrace, traceM)
+import Control.Monad.IOSim (ExplorationOptions, IOSim, exploreSimTrace, traceM, withBranching, withScheduleBound)
 import Data.Functor ((<&>))
 import Data.IntMap (IntMap)
 import qualified Data.IntMap.Strict as IntMap
@@ -33,6 +35,7 @@ import Data.List.NonEmpty (NonEmpty (..), nonEmpty)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromJust, fromMaybe)
+import Data.Monoid (Endo (..))
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Tagged (Tagged (..))
@@ -92,24 +95,32 @@ testClusterWithoutRaces :: TestTree
 testClusterWithoutRaces =
   withPrintTraceOption $ \printOrNot ->
     testProperty "Cluster properties without schedule exploration" $
-      propClusterWith printOrNot (pure ())
+      propClusterWith
+        printOrNot
+        id -- exploration options don't apply to non-racy simulations
+        (pure ())
 
 testClusterWithRaces :: TestTree
 testClusterWithRaces =
   withPrintTraceOption $ \printOrNote ->
     setNumRacyTests $
-      testProperty "Cluster properties with schedule exploration" $
-        propClusterWith printOrNote exploreRaces
+      withExplorationOptions $ \updateExplorationOptions ->
+        testProperty "Cluster properties with schedule exploration" $
+          propClusterWith printOrNote updateExplorationOptions exploreRaces
 
-propClusterWith :: PrintTrace -> (forall s. IOSim s ()) -> Property
-propClusterWith printTrace raceOrNot =
+propClusterWith ::
+  PrintTrace ->
+  (ExplorationOptions -> ExplorationOptions) ->
+  (forall s. IOSim s ()) ->
+  Property
+propClusterWith printTrace updateExplorationOptions raceOrNot =
   property $
     forAll genScenarioInputs $
       \scenarioInputs ->
         counterexample
           (Text.unpack $ pShow scenarioInputs)
           $ exploreSimTrace
-            id
+            updateExplorationOptions
             (scenario scenarioInputs)
             ( \_ trace ->
                 checkScenario
@@ -491,11 +502,43 @@ newtype NumRacyTests
   = NumRacyTests (Maybe Int)
   deriving (Eq, Ord, Show)
 
+withExplorationOptions :: ((ExplorationOptions -> ExplorationOptions) -> TestTree) -> TestTree
+withExplorationOptions f =
+  askOption $ \(ScheduleBound mBound) ->
+    askOption $ \(BranchingFactor mFactor) ->
+      f
+        ( appEndo $
+            mconcat
+              [ maybe mempty (Endo . withScheduleBound) mBound,
+                maybe mempty (Endo . withBranching) mFactor
+              ]
+        )
+
 instance IsOption NumRacyTests where
   defaultValue = NumRacyTests Nothing
   parseValue s = NumRacyTests . Just <$> safeRead s
   optionName = Tagged "num-racy-tests"
   optionHelp = Tagged "Number of racy tests to run"
+
+newtype ScheduleBound
+  = ScheduleBound (Maybe Int)
+  deriving (Eq, Ord, Show)
+
+instance IsOption ScheduleBound where
+  defaultValue = ScheduleBound Nothing
+  parseValue s = ScheduleBound . Just <$> safeRead s
+  optionName = Tagged "schedule-bound"
+  optionHelp = Tagged "Upper bound on the number of schedules with race reversals that will be explored."
+
+newtype BranchingFactor
+  = BranchingFactor (Maybe Int)
+  deriving (Eq, Ord, Show)
+
+instance IsOption BranchingFactor where
+  defaultValue = BranchingFactor Nothing
+  parseValue s = BranchingFactor . Just <$> safeRead s
+  optionName = Tagged "branching-factor"
+  optionHelp = Tagged "Number of alternative schedules explored per race reversal."
 
 withPrintTraceOption :: (PrintTrace -> TestTree) -> TestTree
 withPrintTraceOption = askOption

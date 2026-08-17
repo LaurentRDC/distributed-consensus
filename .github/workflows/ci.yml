@@ -27,9 +27,6 @@ jobs:
   #         fail-on: note
 
   build:
-    needs:
-      - formatting
-      # - linting # Public repo needed
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -70,4 +67,11 @@ jobs:
         run: cabal build all
 
       - name: Run tests
-        run: cabal test all --test-options="--quickcheck-tests=1000"
+        run: |
+          # Github Actions hosted runners don't have that much RAM,
+          # which can make some tests appear to fail due to the test executable
+          # being killed.
+          #
+          # Therefore, the amount of exploration is capped to about 1/5 of the
+          # default values
+          cabal test all --test-options="--quickcheck-tests=1000 --schedule-bound=20 --branching-factor=2"
