@@ -93,9 +93,9 @@ jobs:
 
       - name: Configure build
         run: |
-          cabal configure --project-file=cabal.optimized.project --disable-tests --semaphore -j
+          cabal configure --disable-tests --semaphore -j
           # Generate a plan.json
-          cabal build all --dry-run
+          cabal build all --project-file=cabal.optimized.project --dry-run
 
       - name: Cache Cabal store
         uses: actions/cache@v4
@@ -106,8 +106,8 @@ jobs:
             ${{ runner.os }}-ghc-${{ env.GHC_VERSION }}-benchmark
 
       - name: Build 
-        run: cabal build all
+        run: cabal build all --project-file=cabal.optimized.project
 
       - name: Run benchmarks
         run: |
-          cabal bench all
+          cabal bench all --project-file=cabal.optimized.project
