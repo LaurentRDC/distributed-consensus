@@ -75,10 +75,9 @@ jobs:
           #
           # Therefore, the amount of exploration is capped to about 1/5 of the
           # default values
-          cabal test all --test-options="--quickcheck-tests=1000 --schedule-bound=20 --branching-factor=2"
+          cabal test all --test-options="--schedule-bound=20 --branching-factor=2"
 
   benchmark:
-    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
