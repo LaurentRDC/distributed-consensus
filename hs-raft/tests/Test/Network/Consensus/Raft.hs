@@ -241,7 +241,7 @@ propClusterWith printTrace updateExplorationOptions raceOrNot =
         Nothing -> fail $ "Client request timed out after " <> show (toInteger maxTime) <> " microseconds"
         -- Command needs to be re-tried
         Just (Left _) -> runClient runRequest maxTime state (batch : rest)
-        Just (Right actualResults) -> do
+        Just (Right (_leaderId, actualResults)) -> do
           when (actualResults /= expectedResults) (fail "Unexpected state")
           runClient runRequest maxTime newState rest
 

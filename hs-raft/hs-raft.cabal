@@ -77,3 +77,19 @@ test-suite hs-raft-test
                     , tasty ^>=1.5
                     , tasty-quickcheck ^>=0.11
                     , text
+                    
+benchmark raft-cluster
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   bench
+  main-is:          Main.hs
+  ghc-options:      -rtsopts -threaded +RTS -N
+  build-depends:    async
+                  , base
+                  , containers
+                  , deepseq
+                  , hs-raft
+                  , stm
+                  , tasty
+                  , tasty-bench
+                  , text

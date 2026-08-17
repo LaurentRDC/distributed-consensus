@@ -80,9 +80,9 @@ request ::
   (Monad m) =>
   node ->
   entry ->
-  RaftClientT entry node result m (Either Text result)
+  RaftClientT entry node result m (Either Text (node, result))
 request lastKnownLeader =
-  fmap (second NonEmpty.head)
+  fmap (second (second NonEmpty.head))
     . requestMany lastKnownLeader
     . NonEmpty.singleton
 
@@ -91,7 +91,7 @@ requestMany ::
   (Monad m) =>
   node ->
   NonEmpty entry ->
-  RaftClientT entry node result m (Either Text (NonEmpty result))
+  RaftClientT entry node result m (Either Text (node, NonEmpty result))
 requestMany lastKnownLeader entries = do
   (self, (send, recv)) <- MkRaftClientT $ asks (node &&& (sendRequest &&& receiveResponse) . specification)
   resp <- MkRaftClientT $ lift (send lastKnownLeader (MkRequest self entries) >> recv)
@@ -100,4 +100,4 @@ requestMany lastKnownLeader entries = do
     Right (Failure errmsg) -> pure $ Left errmsg
     Right (NotLeader (Just actualLeaderId)) -> requestMany actualLeaderId entries
     Right (NotLeader Nothing) -> pure $ Left "No known leaders"
-    Right (Success _ result) -> pure $ Right result
+    Right (Success leader result) -> pure $ Right (leader, result)
