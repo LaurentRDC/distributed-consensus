@@ -67,6 +67,7 @@ module Network.Consensus.Raft.Transformer.Spec
 where
 
 import Data.Binary (Binary)
+import Data.List.NonEmpty (NonEmpty)
 import Data.Map.Strict (Map)
 import Data.Sequence (Seq)
 import Data.Set (Set)
@@ -83,11 +84,11 @@ import System.Random (StdGen, mkStdGen64)
 -- | A 'Command' comes from clients
 data Command entry
   = Command
-      !entry
       -- | A 'RequestId' allows a leader to wait for a message
       --      before answering the client. This allows a leader to
       --      allow connections from multiple clients.
       !RequestId
+      !entry
   deriving (Eq, Show, Ord, Generic)
 
 instance (Binary entry) => Binary (Command entry)
@@ -260,7 +261,8 @@ data RaftTrace entry result node state
   | DeserializationError node Text
   | -- | Command received by the leader node. If the command needs to be redirected
     --    to another node, this event is not emitted
-    CommandReceived (EventContext node) (Command entry)
+    -- All Commands should have the same request ID
+    CommandReceived (EventContext node) RequestId (NonEmpty entry)
   | CommandResultResponded (EventContext node) (CommandResponse node result)
   | -- TODO: better traching of new joining/leaving cluster
     MembershipChangeInitiated (EventContext node)

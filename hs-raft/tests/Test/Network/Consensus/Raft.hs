@@ -1,4 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -25,13 +24,12 @@ import Control.Monad.Class.MonadAsync (concurrently_, forConcurrently_, race_, w
 import Control.Monad.Class.MonadTest (exploreRaces)
 import Control.Monad.Class.MonadTimer (threadDelay, timeout)
 import Control.Monad.IOSim (IOSim, exploreSimTrace, traceM)
-import qualified Data.Foldable as Foldable
 import Data.Functor ((<&>))
 import Data.IntMap (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.IntSet as IntSet
-import Data.List (genericLength)
-import Data.List.NonEmpty (nonEmpty)
+import Data.List (genericLength, mapAccumL)
+import Data.List.NonEmpty (NonEmpty (..), nonEmpty)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromJust, fromMaybe)
@@ -52,7 +50,7 @@ import Network.Consensus.Raft
 import qualified Network.Consensus.Raft as Raft
 import Network.Consensus.Raft.Admin
 import qualified Network.Consensus.Raft.Admin as Admin
-import Network.Consensus.Raft.Client (RaftClientSpec (..), RaftClientT, Request, Response, request, runRaftClientT)
+import Network.Consensus.Raft.Client (RaftClientSpec (..), RaftClientT, Request, Response, requestMany, runRaftClientT)
 import Test.Network.Consensus.Raft.Properties (allProperties)
 import Test.Network.Consensus.Scenario (checkScenario)
 import Test.Tasty (TestTree, askOption, localOption, testGroup)
@@ -124,7 +122,6 @@ propClusterWith printTrace raceOrNot =
       PrintTrace False -> id
       PrintTrace True -> Debug.traceShowId
     scenario scenarioInputs = do
-      let stateMachineExpectations = expectedResults scenarioInputs.commands
       (harness :: Harness s) <- testHarness debug scenarioInputs
 
       -- In order to detect infinite loops, especially in CI,
@@ -162,7 +159,8 @@ propClusterWith printTrace raceOrNot =
                 -- bound here because I have seen situations where the client never
                 -- receives a reply (due to a bug)
                 (10 * scenarioInputs.electionTimeoutUpperBound)
-                stateMachineExpectations
+                mempty -- initial state
+                scenarioInputs.commands
 
               -- We give an opportunity to all lone servers to leave the cluster
               -- properly before we shut everyone down.
@@ -221,18 +219,20 @@ propClusterWith printTrace raceOrNot =
     runClient ::
       (forall a. RaftClientT Command Node Result (IOSim s) a -> IOSim s a) ->
       Microseconds ->
-      [(Command, State, Result)] ->
+      State ->
+      [NonEmpty Command] ->
       IOSim s ()
-    runClient _ _ [] = pure ()
-    runClient runRequest maxTime ((command, state, expectedResult) : rest) = do
+    runClient _ _ _ [] = pure ()
+    runClient runRequest maxTime state (batch : rest) = do
       threadDelay 10_000
-      timeout (fromIntegral maxTime) (runRequest (request 0 command)) >>= \case
+      let (newState, expectedResults) = expectedResultsBatch state batch
+      timeout (fromIntegral maxTime) (runRequest (requestMany 0 batch)) >>= \case
         Nothing -> fail $ "Client request timed out after " <> show (toInteger maxTime) <> " microseconds"
         -- Command needs to be re-tried
-        Just (Left _) -> runClient runRequest maxTime ((command, state, expectedResult) : rest)
-        Just (Right actualResult) -> do
-          when (actualResult /= expectedResult) (fail "Unexpected state")
-          runClient runRequest maxTime rest
+        Just (Left _) -> runClient runRequest maxTime state (batch : rest)
+        Just (Right actualResults) -> do
+          when (actualResults /= expectedResults) (fail "Unexpected state")
+          runClient runRequest maxTime newState rest
 
 data ScenarioInputs
   = ScenarioInputs
@@ -243,7 +243,7 @@ data ScenarioInputs
     numInitialClusterNodes :: Int,
     numInitialLoneNodes :: Int,
     loneNodesWait :: [(Microseconds, Microseconds)],
-    commands :: [Command]
+    commands :: [NonEmpty Command]
   }
   deriving (Eq, Show)
 
@@ -264,7 +264,9 @@ genScenarioInputs = do
           <$> chooseBoundedIntegral (etoub, 10 * etoub)
           <*> chooseBoundedIntegral (etoub, 10 * etoub)
       )
-  cmds <- flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 30)
+
+  let commandBatch = fmap (fromMaybe (error "impossible!") . nonEmpty) $ flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 3)
+  cmds <- flip vectorOf commandBatch =<< chooseBoundedIntegral (1, 30)
   pure $
     ScenarioInputs
       { heartbeatTimeout = hb,
@@ -468,27 +470,11 @@ step state (Get k) = case Map.lookup k state of
   Nothing -> (state, Err)
   Just v -> (state, Value v)
 
-expectedResults :: [Command] -> [(Command, State, Result)]
-expectedResults [] = []
-expectedResults allCommands@(cmd : cmds) =
-  zipWith (\c (s, r) -> (c, s, r)) allCommands $
-    -- Using foldl' qualified to prevent
-    -- warning of foldl' already being in prelude
-    -- since GHC 9.10
-    reverse $
-      -- Using foldl' qualified to prevent
-      -- warning of foldl' already being in prelude
-      -- since GHC 9.10
-      snd $
-        -- Using foldl' qualified to prevent
-        -- warning of foldl' already being in prelude
-        -- since GHC 9.10
-        Foldable.foldl'
-          ( \(state, results) c ->
-              let (!newState, !result) = step state c in (newState, (state, result) : results)
-          )
-          (let (state, result) = step mempty cmd in (state, [(state, result)]))
-          cmds
+expectedResultsBatch ::
+  State ->
+  NonEmpty Command ->
+  (State, NonEmpty Result)
+expectedResultsBatch = mapAccumL step
 
 setNumRacyTests :: TestTree -> TestTree
 setNumRacyTests tree =

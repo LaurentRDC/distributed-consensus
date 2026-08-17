@@ -22,7 +22,7 @@ import Control.Monitor
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as Text
-import Network.Consensus.Raft (ClusterConfiguration (..), Command (..), CommandResponse (..), EventContext (..), LogIndex, RaftTrace (..))
+import Network.Consensus.Raft (ClusterConfiguration (..), CommandResponse (..), EventContext (..), LogIndex, RaftTrace (..))
 import Test.Network.Consensus.Scenario
   ( Scenario,
     clusterMembershipChangeApplied,
@@ -150,7 +150,7 @@ monotonicallyIncreasingCommitIndexProperty = go mempty <?> "Commit index not inc
 allAcceptedCommandReceiveResponseProperty :: Scenario entry result node state
 allAcceptedCommandReceiveResponseProperty = go
   where
-    go = void $ whenever commandReceived $ \(_, Command _entry reqId) ->
+    go = void $ whenever commandReceived $ \(_, reqId, _) ->
       let thisCommandResponded =
             commandResponded >>= \(_, MkCommandResponse _result' reqId') ->
               predicate $ \_ -> unless (reqId == reqId') Nothing

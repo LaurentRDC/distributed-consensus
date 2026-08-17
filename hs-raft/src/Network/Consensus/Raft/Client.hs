@@ -10,6 +10,7 @@ module Network.Consensus.Raft.Client
     RaftClientSpec (..),
     runRaftClientT,
     request,
+    requestMany,
 
     -- * Communications between clients and clusters
     Request (..),
@@ -20,7 +21,10 @@ where
 import Control.Arrow ((&&&))
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Reader (ReaderT (runReaderT), asks)
+import Data.Bifunctor (second)
 import Data.Binary (Binary)
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
@@ -30,14 +34,14 @@ import Lens.Micro.Platform (makeLenses)
 data Request node entry
   = MkRequest
   { requestOriginator :: !node,
-    requestEntry :: !entry
+    requestEntries :: !(NonEmpty entry)
   }
   deriving (Eq, Show, Generic)
 
 instance (Binary node, Binary entry) => Binary (Request node entry)
 
 data Response node result
-  = Success !node !result
+  = Success !node !(NonEmpty result)
   | Failure !Text
   | NotLeader (Maybe node)
   deriving (Eq, Show, Generic)
@@ -70,17 +74,30 @@ data RaftClientEnv entry node result m
 makeLenses ''RaftClientSpec
 
 -- | Send a request to a Raft cluster.
+--
+-- If you want to send multiple entries in a single call, see 'requestMany'.
 request ::
   (Monad m) =>
   node ->
   entry ->
   RaftClientT entry node result m (Either Text result)
-request lastKnownLeader entry = do
+request lastKnownLeader =
+  fmap (second NonEmpty.head)
+    . requestMany lastKnownLeader
+    . NonEmpty.singleton
+
+-- | Send a request to a Raft cluster including multiple entries.
+requestMany ::
+  (Monad m) =>
+  node ->
+  NonEmpty entry ->
+  RaftClientT entry node result m (Either Text (NonEmpty result))
+requestMany lastKnownLeader entries = do
   (self, (send, recv)) <- MkRaftClientT $ asks (node &&& (sendRequest &&& receiveResponse) . specification)
-  resp <- MkRaftClientT $ lift (send lastKnownLeader (MkRequest self entry) >> recv)
+  resp <- MkRaftClientT $ lift (send lastKnownLeader (MkRequest self entries) >> recv)
   case resp of
     Left errmsg -> pure $ Left errmsg
     Right (Failure errmsg) -> pure $ Left errmsg
-    Right (NotLeader (Just actualLeaderId)) -> request actualLeaderId entry
+    Right (NotLeader (Just actualLeaderId)) -> requestMany actualLeaderId entries
     Right (NotLeader Nothing) -> pure $ Left "No known leaders"
     Right (Success _ result) -> pure $ Right result

@@ -18,6 +18,7 @@ import Control.Monad.Class.MonadTimer (MonadDelay, threadDelay)
 import Control.Monad.Trans.Class (lift)
 import Data.Foldable (for_)
 import Data.Functor ((<&>))
+import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Lens.Micro.Platform (at, use, view, (%=), (.=), (^.))
@@ -43,7 +44,7 @@ import Network.Consensus.Raft.Transformer
     RaftT,
     RaftTrace (..),
     acceptClientRequest,
-    appendLogEntry,
+    appendLogEntries,
     applyLogEntries,
     applySnapshot,
     becomeCandidate,
@@ -203,7 +204,7 @@ handleEvent (EventAdminRequest adminCommand) = handleAdminRequest adminCommand
 handleClientRequest ::
   (Ord node, MonadMVar m, MonadAsync m) =>
   Request node entry -> RaftT entry node state result m ()
-handleClientRequest (MkRequest clientId entry) =
+handleClientRequest (MkRequest clientId entries) =
   use role >>= \case
     NonMember ->
       sendClientResponse clientId (NotLeader Nothing)
@@ -213,9 +214,9 @@ handleClientRequest (MkRequest clientId entry) =
       use currentLeader >>= sendClientResponse clientId . NotLeader
     Leader -> do
       reqId <- acceptClientRequest clientId
-      let command = Command entry reqId
-      trace (`CommandReceived` command)
-      appendLogEntry (LogEntryCommand command)
+      let commands = Command reqId <$> entries
+      trace (\ctx -> CommandReceived ctx reqId entries)
+      appendLogEntries (LogEntryCommand <$> commands)
 
 handleAppendEntries ::
   ( Ord node,
@@ -447,14 +448,18 @@ handleClusterMembershipRequest request = do
               <*> currentSnapshot
             )
             >>= sendRPC requester . IS
-          appendLogEntry
-            ( LogEntryMembershipChange
-                (Joint cluster (Set.insert requester cluster))
+          appendLogEntries
+            ( NonEmpty.singleton
+                ( LogEntryMembershipChange
+                    (Joint cluster (Set.insert requester cluster))
+                )
             )
         ClusterMembershipLeaveRequest _ ->
-          appendLogEntry
-            ( LogEntryMembershipChange
-                (Joint cluster (Set.delete requester cluster))
+          appendLogEntries
+            ( NonEmpty.singleton
+                ( LogEntryMembershipChange
+                    (Joint cluster (Set.delete requester cluster))
+                )
             )
 
 handleClusterMembershipResult ::

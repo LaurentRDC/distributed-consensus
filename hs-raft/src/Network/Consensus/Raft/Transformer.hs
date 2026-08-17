@@ -1,5 +1,6 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE TupleSections #-}
 
 module Network.Consensus.Raft.Transformer
   ( module Network.Consensus.Raft.Transformer.Definition,
@@ -28,7 +29,7 @@ module Network.Consensus.Raft.Transformer
     acceptClientRequest,
     applySnapshot,
     currentSnapshot,
-    appendLogEntry,
+    appendLogEntries,
 
     -- ** Roles
     becomeFollower,
@@ -55,8 +56,11 @@ import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay)
 import Control.Monad.Trans.Class (lift)
 import Data.Foldable (for_, traverse_)
+import qualified Data.Foldable as Foldable
 import Data.Function ((&))
 import Data.Functor (($>), (<&>))
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromJust, isJust)
 import Data.Sequence (ViewR (..))
@@ -209,7 +213,7 @@ sendAppendEntriesTo destination = do
           >>= sendRPC destination . IS
 
 applyEntry :: (MonadSTM m, Ord node, MonadMVar m) => LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
-applyEntry (LogEntryCommand (Command entry requestId)) = do
+applyEntry (LogEntryCommand (Command requestId entry)) = do
   apply <- view (specification . applyLogEntry)
   (newState, result) <- use internalState <&> flip apply entry
   trace (`LogEntryApplied` entry)
@@ -225,7 +229,7 @@ applyEntry (LogEntryMembershipChange clusterConf) = do
   case clusterConf of
     Simple _ -> trace MembershipChangeCompleted $> Nothing
     Joint _before after -> do
-      appendLogEntry (LogEntryMembershipChange (Simple after))
+      appendLogEntries (NonEmpty.singleton (LogEntryMembershipChange (Simple after)))
       pure Nothing
 
 -- | Updates the commit index. Returns 'True' if some log entries can be applied,
@@ -309,17 +313,23 @@ applyLogEntries = do
 
       whenRole Leader $ do
         leaderId <- self
-        -- Initially I tried to use `withMVar requestsVar (... putMVar <some leaf MVar>)`,
-        -- but this caused a rare race condition uncovered by `io-sim`!
-        for_ results $ \response@(MkCommandResponse result requestId) ->
+
+        let resultsByReqId =
+              results
+                & Foldable.toList
+                & map (\(MkCommandResponse result reqId) -> (reqId, NonEmpty.singleton result))
+                & Map.fromListWith (<>)
+                & Map.map NonEmpty.reverse -- Necessary because 'fromListWith' reverses order of applied commands
+        for_ (Map.toList resultsByReqId) $ \(requestId, responses) ->
           use currentClientRequests
             <&> Map.lookup requestId
             >>= \case
               Nothing -> pure () -- TODO: isn't this unexpected?
               Just requester -> do
-                trace (`CommandResultResponded` response)
+                for_ responses $ \response ->
+                  trace (`CommandResultResponded` MkCommandResponse response requestId)
                 -- TODO: reply (and possibly retry) in a separate thread
-                sendClientResponse requester (Success leaderId result)
+                sendClientResponse requester (Success leaderId responses)
                 currentClientRequests %= Map.delete requestId
 
       lastApplied .= currentCommitIndex
@@ -401,12 +411,13 @@ applySnapshot snapshot = do
   clusterConfiguration .= sCluster snapshot
   trace (`SnapshotApplied` sMetadata snapshot)
 
--- | Append a log entry to the log
-appendLogEntry :: (Ord node, MonadMVar m, MonadSTM m) => LogEntry node entry -> RaftT entry node state result m ()
-appendLogEntry entry = do
+-- | Apply one or more entries to the log
+appendLogEntries :: (Ord node, MonadMVar m, MonadSTM m) => NonEmpty (LogEntry node entry) -> RaftT entry node state result m ()
+appendLogEntries entries = do
   ourTerm <- use term
-  commandLog %= (`Log.append` (ourTerm, entry))
-  trace (`LogEntryAppended` entry)
+  commandLog %= (`Log.extend` ((ourTerm,) <$> Seq.fromList (NonEmpty.toList entries)))
+  for_ entries $ \entry ->
+    trace (`LogEntryAppended` entry)
 
   -- TODO: sendAppendEntriesTo in parallel
   whenRole Leader $
