@@ -67,7 +67,6 @@ module Network.Consensus.Raft.Transformer.Spec
 where
 
 import Data.Binary (Binary)
-import Data.List.NonEmpty (NonEmpty)
 import Data.Map.Strict (Map)
 import Data.Sequence (Seq)
 import Data.Set (Set)
@@ -262,7 +261,7 @@ data RaftTrace entry result node state
   | -- | Command received by the leader node. If the command needs to be redirected
     --    to another node, this event is not emitted
     -- All Commands should have the same request ID
-    CommandReceived (EventContext node) RequestId (NonEmpty entry)
+    CommandReceived (EventContext node) RequestId entry
   | CommandResultResponded (EventContext node) (CommandResponse node result)
   | -- TODO: better traching of new joining/leaving cluster
     MembershipChangeInitiated (EventContext node)

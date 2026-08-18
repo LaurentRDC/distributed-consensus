@@ -17,8 +17,6 @@ import Control.Monad (replicateM, (>=>))
 import Data.Functor ((<&>))
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
-import Data.List.NonEmpty (NonEmpty ((:|)))
-import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -28,8 +26,14 @@ import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Network.Consensus.Raft (Config (..), Microseconds, RPC, RPCResult, RaftSpec (..), runRaftT)
 import qualified Network.Consensus.Raft as Raft
-import Network.Consensus.Raft.Admin
+import Network.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Network.Consensus.Raft.Client
+  ( RaftClientSpec (..),
+    Request,
+    Response,
+    request,
+    runRaftClientT,
+  )
 import Test.Tasty (withResource)
 import Test.Tasty.Bench (bench, bgroup, defaultMain, nfIO)
 
@@ -39,49 +43,30 @@ main = do
     [ withResource startCluster stopCluster $ \getClusterHandle ->
         bgroup
           "Benchmark"
-          [ let unloadedLatency batchSize =
-                  bench ("Batch size " <> show batchSize) $ nfIO $ do
-                    cluster <- getClusterHandle
-                    cluster.runRequest
-                      ( Get 'a'
-                          :| [ Get c
-                             | c <-
-                                 take
-                                   (pred batchSize)
-                                   (cycle ['b' ..])
-                             ]
-                      )
-             in bgroup
-                  "Unloaded latency"
-                  [ unloadedLatency 1,
-                    unloadedLatency 100,
-                    unloadedLatency 1_000
-                  ],
-            let unloadedThroughput batchSize =
-                  bench ("Batch size " <> show batchSize) $
-                    nfIO $
-                      do
-                        cluster <- getClusterHandle
-                        let batch =
-                              Get 'a'
-                                :| [ Get c
-                                   | c <-
-                                       take
-                                         (pred batchSize)
-                                         (cycle ['b' ..])
-                                   ]
-                        replicateM (1000 `div` batchSize) $ cluster.runRequest batch
-             in bgroup
-                  "Unloaded throughput (1000 commands)"
-                  [ unloadedThroughput 1,
-                    unloadedThroughput 10,
-                    unloadedThroughput 100
-                  ]
+          [ unloadedLatency getClusterHandle,
+            bgroup
+              "Unloaded throughput"
+              [ unloadedThroughput getClusterHandle 1,
+                unloadedThroughput getClusterHandle 10,
+                unloadedThroughput getClusterHandle 100
+              ]
           ]
     ]
+  where
+    unloadedLatency getClusterHandle =
+      bench "Unloaded latency " $ nfIO $ do
+        cluster <- getClusterHandle
+        cluster.runRequest (Get 'a')
+
+    unloadedThroughput getClusterHandle batchSize =
+      bench (show batchSize <> " commands") $
+        nfIO $
+          do
+            cluster <- getClusterHandle
+            replicateM batchSize (cluster.runRequest (Get 'a'))
 
 data Cluster = Cluster
-  { runRequest :: NonEmpty Command -> IO (NonEmpty Result),
+  { runRequest :: Command -> IO Result,
     runShutDown :: IO ()
   }
 
@@ -97,7 +82,7 @@ startCluster = do
       }
   where
     waitUntilLeaderElected harness =
-      runClientRequest harness 0 (NonEmpty.singleton (Get 'a')) >>= \case
+      runClientRequest harness 0 (Get 'a') >>= \case
         Left _ -> threadDelay 10_000 >> waitUntilLeaderElected harness
         Right (leader, _) -> pure leader
 
@@ -205,7 +190,7 @@ mkServer network hbto etolb etoub seed node =
 data Harness
   = MkHarness
   { clusterServers :: IntMap Server,
-    runClientRequest :: Node -> NonEmpty Command -> IO (Either Text (Node, NonEmpty Result))
+    runClientRequest :: Node -> Command -> IO (Either Text (Node, Result))
   }
 
 benchHarness ::
@@ -229,9 +214,9 @@ benchHarness
         { clusterServers =
             IntMap.fromList $
               map (\(serverSeed, n) -> (n, mkServer' serverSeed (fromIntegral n))) serverNodesWithSeeds,
-          runClientRequest = \leader cds ->
+          runClientRequest = \leader comm ->
             runRaftClientT
-              (requestMany leader cds)
+              (request leader comm)
               clientNode
               (clientSpec networkFabric)
         }

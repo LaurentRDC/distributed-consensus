@@ -155,6 +155,7 @@ server = do
       labelThisThread "receiceClientRequests"
       let recv = spec ^. receiveClientRequest
       forever $ do
+        -- TODO: drain ALL of the requests, for pipelining
         recv >>= \case
           Left errMsg -> trace' (`DeserializationError` errMsg)
           Right request -> atomically $ writeTQueue queue (EventIncomingClientRequest request)
@@ -204,7 +205,7 @@ handleEvent (EventAdminRequest adminCommand) = handleAdminRequest adminCommand
 handleClientRequest ::
   (Ord node, MonadMVar m, MonadAsync m) =>
   Request node entry -> RaftT entry node state result m ()
-handleClientRequest (MkRequest clientId entries) =
+handleClientRequest (MkRequest clientId entry) =
   use role >>= \case
     NonMember ->
       sendClientResponse clientId (NotLeader Nothing)
@@ -214,9 +215,9 @@ handleClientRequest (MkRequest clientId entries) =
       use currentLeader >>= sendClientResponse clientId . NotLeader
     Leader -> do
       reqId <- acceptClientRequest clientId
-      let commands = Command reqId <$> entries
-      trace (\ctx -> CommandReceived ctx reqId entries)
-      appendLogEntries (LogEntryCommand <$> commands)
+      let command = Command reqId entry
+      trace (\ctx -> CommandReceived ctx reqId entry)
+      appendLogEntries $ NonEmpty.singleton $ LogEntryCommand command
 
 handleAppendEntries ::
   ( Ord node,

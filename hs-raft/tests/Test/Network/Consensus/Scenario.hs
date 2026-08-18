@@ -38,7 +38,6 @@ import Control.Monad.Class.MonadTimer (MonadDelay (..))
 import Control.Monad.IOSim (SimEvent, SimEventType (EventLog), SimResult, Trace, selectTraceEvents)
 import Control.Monitor
 import Data.Dynamic (Typeable, fromDynamic)
-import Data.List.NonEmpty (NonEmpty)
 import qualified Data.Text as Text
 import Data.Word (Word64)
 import Network.Consensus.Raft (ClusterConfiguration, CommandResponse, Event (..), EventContext, LogIndex, RPC (..), RPCResult, RaftTrace (..), RequestId, Term)
@@ -133,9 +132,9 @@ votedFor = predicate $ \case
   VotedFor ctx candidateTerm candidateNode -> Just (ctx, candidateTerm, candidateNode)
   _ -> Nothing
 
-commandReceived :: Predicate (RaftTrace entry result node state) (EventContext node, RequestId, NonEmpty entry)
+commandReceived :: Predicate (RaftTrace entry result node state) (EventContext node, RequestId, entry)
 commandReceived = predicate $ \case
-  (CommandReceived ctx reqId entries) -> Just (ctx, reqId, entries)
+  (CommandReceived ctx reqId entry) -> Just (ctx, reqId, entry)
   _ -> Nothing
 
 commandResponded :: Predicate (RaftTrace entry result node state) (EventContext node, CommandResponse node result)

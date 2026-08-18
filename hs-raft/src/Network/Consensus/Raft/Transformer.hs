@@ -326,10 +326,10 @@ applyLogEntries = do
             >>= \case
               Nothing -> pure () -- TODO: isn't this unexpected?
               Just requester -> do
-                for_ responses $ \response ->
+                for_ responses $ \response -> do
+                  -- TODO: reply (and possibly retry) in a separate thread
+                  sendClientResponse requester (Success leaderId response)
                   trace (`CommandResultResponded` MkCommandResponse response requestId)
-                -- TODO: reply (and possibly retry) in a separate thread
-                sendClientResponse requester (Success leaderId responses)
                 currentClientRequests %= Map.delete requestId
 
       lastApplied .= currentCommitIndex

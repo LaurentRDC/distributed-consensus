@@ -30,8 +30,8 @@ import Data.Functor ((<&>))
 import Data.IntMap (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.IntSet as IntSet
-import Data.List (genericLength, mapAccumL)
-import Data.List.NonEmpty (NonEmpty (..), nonEmpty)
+import Data.List (genericLength)
+import Data.List.NonEmpty (nonEmpty)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromJust, fromMaybe)
@@ -53,7 +53,7 @@ import Network.Consensus.Raft
 import qualified Network.Consensus.Raft as Raft
 import Network.Consensus.Raft.Admin
 import qualified Network.Consensus.Raft.Admin as Admin
-import Network.Consensus.Raft.Client (RaftClientSpec (..), RaftClientT, Request, Response, requestMany, runRaftClientT)
+import Network.Consensus.Raft.Client (RaftClientSpec (..), RaftClientT, Request, Response, request, runRaftClientT)
 import Test.Network.Consensus.Raft.Properties (allProperties)
 import Test.Network.Consensus.Scenario (checkScenario)
 import Test.Tasty (TestTree, askOption, localOption, testGroup)
@@ -231,16 +231,16 @@ propClusterWith printTrace updateExplorationOptions raceOrNot =
       (forall a. RaftClientT Command Node Result (IOSim s) a -> IOSim s a) ->
       Microseconds ->
       State ->
-      [NonEmpty Command] ->
+      [Command] ->
       IOSim s ()
     runClient _ _ _ [] = pure ()
-    runClient runRequest maxTime state (batch : rest) = do
+    runClient runRequest maxTime state (command : rest) = do
       threadDelay 10_000
-      let (newState, expectedResults) = expectedResultsBatch state batch
-      timeout (fromIntegral maxTime) (runRequest (requestMany 0 batch)) >>= \case
+      let (newState, expectedResults) = step state command
+      timeout (fromIntegral maxTime) (runRequest (request 0 command)) >>= \case
         Nothing -> fail $ "Client request timed out after " <> show (toInteger maxTime) <> " microseconds"
         -- Command needs to be re-tried
-        Just (Left _) -> runClient runRequest maxTime state (batch : rest)
+        Just (Left _) -> runClient runRequest maxTime state (command : rest)
         Just (Right (_leaderId, actualResults)) -> do
           when (actualResults /= expectedResults) (fail "Unexpected state")
           runClient runRequest maxTime newState rest
@@ -254,7 +254,7 @@ data ScenarioInputs
     numInitialClusterNodes :: Int,
     numInitialLoneNodes :: Int,
     loneNodesWait :: [(Microseconds, Microseconds)],
-    commands :: [NonEmpty Command]
+    commands :: [Command]
   }
   deriving (Eq, Show)
 
@@ -276,8 +276,7 @@ genScenarioInputs = do
           <*> chooseBoundedIntegral (etoub, 10 * etoub)
       )
 
-  let commandBatch = fmap (fromMaybe (error "impossible!") . nonEmpty) $ flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 3)
-  cmds <- flip vectorOf commandBatch =<< chooseBoundedIntegral (1, 30)
+  cmds <- flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 30)
   pure $
     ScenarioInputs
       { heartbeatTimeout = hb,
@@ -437,13 +436,13 @@ testHarness
 send :: (MonadSTM m) => IntMap (TQueue m a) -> Node -> a -> m ()
 send mailbox node message =
   case IntMap.lookup (fromIntegral node) mailbox of
-    Nothing -> error $ "Mailbox badly configures: missing node " <> show node
+    Nothing -> error $ "Mailbox badly configured: missing node " <> show node
     Just queue -> atomically $ writeTQueue queue message
 
 receive :: (MonadSTM m) => IntMap (TQueue m a) -> Node -> m a
 receive mailbox node =
   case IntMap.lookup (fromIntegral node) mailbox of
-    Nothing -> error $ "Mailbox badly configures: missing node " <> show node
+    Nothing -> error $ "Mailbox badly configured: missing node " <> show node
     Just queue -> atomically $ readTQueue queue
 
 -- Simple key-value store
@@ -480,12 +479,6 @@ step state (Delete k) = (Map.delete k state, Ok)
 step state (Get k) = case Map.lookup k state of
   Nothing -> (state, Err)
   Just v -> (state, Value v)
-
-expectedResultsBatch ::
-  State ->
-  NonEmpty Command ->
-  (State, NonEmpty Result)
-expectedResultsBatch = mapAccumL step
 
 setNumRacyTests :: TestTree -> TestTree
 setNumRacyTests tree =
