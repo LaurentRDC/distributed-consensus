@@ -12,77 +12,140 @@ module Network.Consensus.Raft.Client
     request,
 
     -- * Communications between clients and clusters
-    Request (..),
-    Response (..),
+    ClientRequestId (..),
+    ClientRequest,
+    ClientResponse,
+    ClientResult (..),
   )
 where
 
 import Control.Arrow ((&&&))
-import Control.Monad.Trans.Class (lift)
+import Control.Concurrent.Class.MonadSTM (MonadSTM, TMVar, TVar, atomically, newEmptyTMVar, newTVarIO, putTMVar, readTMVar, readTVar, writeTVar)
+import Control.Monad.Class.MonadAsync (MonadAsync, withAsync)
+import Control.Monad.Trans.Class (MonadTrans, lift)
 import Control.Monad.Trans.Reader (ReaderT (runReaderT), asks)
 import Data.Binary (Binary)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
+import Network.Consensus.Raft.Messaging (Request (..), Response (..))
 
 -- Alphabet for communicating with clients
 
-data Request node entry
-  = MkRequest
-  { requestOriginator :: !node,
-    requestEntry :: !entry
-  }
-  deriving (Eq, Show, Generic)
+-- | Client-sourced request ID. This allows to correlate multiple client
+-- side-responses.
+newtype ClientRequestId = ClientRequestId Word64
+  deriving stock (Generic, Eq, Ord, Show)
+  deriving newtype (Real, Binary, Enum, Num, Integral)
 
-instance (Binary node, Binary entry) => Binary (Request node entry)
+type ClientRequest node entry = Request ClientRequestId node entry
 
-data Response node result
-  = Success !node !result
+data ClientResult node result
+  = Success !result
   | Failure !Text
-  | NotLeader (Maybe node)
+  | NotLeader
   deriving (Eq, Show, Generic)
 
-instance (Binary node, Binary result) => Binary (Response node result)
+instance (Binary node, Binary result) => Binary (ClientResult node result)
+
+type ClientResponse node result = Response ClientRequestId node (ClientResult node result)
 
 newtype RaftClientT entry node result m a
   = MkRaftClientT (ReaderT (RaftClientEnv entry node result m) m a)
   deriving (Functor, Applicative, Monad)
 
+instance MonadTrans (RaftClientT entry node result) where
+  lift = MkRaftClientT . lift
+
 data RaftClientSpec entry node result m = MkRaftClientSpec
-  { sendRequest :: node -> Request node entry -> m (),
-    receiveResponse :: m (Either Text (Response node result))
+  { sendRequest :: node -> ClientRequest node entry -> m (),
+    receiveResponse :: m (ClientResponse node result)
   }
 
 runRaftClientT ::
+  (MonadAsync m) =>
   RaftClientT entry node result m a ->
   -- | self identification
   node ->
   RaftClientSpec entry node result m ->
   m a
-runRaftClientT (MkRaftClientT f) self spec = runReaderT f (MkRaftClientEnv self spec)
+runRaftClientT (MkRaftClientT f) self spec = do
+  nRId <- newTVarIO 0
+  mbox <- newTVarIO mempty
+  let recvLoop = do
+        receiveResponse spec >>= \resp -> do
+          let reqId = responseRequestId resp
+          atomically $ do
+            box <- readTVar mbox
+            case Map.lookup reqId box of
+              Nothing -> pure ()
+              Just var -> putTMVar var resp
+          recvLoop
+
+  withAsync recvLoop $ \_ ->
+    runReaderT
+      f
+      ( MkRaftClientEnv
+          { node = self,
+            nextRequestId = nRId,
+            specification = spec,
+            mailbox = mbox
+          }
+      )
 
 data RaftClientEnv entry node result m
   = MkRaftClientEnv
   { node :: !node,
-    specification :: RaftClientSpec entry node result m
+    nextRequestId :: !(TVar m ClientRequestId),
+    specification :: RaftClientSpec entry node result m,
+    mailbox :: TVar m (Map ClientRequestId (TMVar m (ClientResponse node result)))
   }
 
 makeLenses ''RaftClientSpec
 
 -- | Send a request to a Raft cluster.
 --
--- If you want to send multiple entries in a single call, see 'requestMany'.
+-- It is perfectly safe, and encouraged, to send separate requests in
+-- separate threads.
 request ::
-  (Monad m) =>
+  (MonadSTM m) =>
   node ->
   entry ->
   RaftClientT entry node result m (Either Text (node, result))
 request lastKnownLeader entry = do
-  (self, (send, recv)) <- MkRaftClientT $ asks (node &&& (sendRequest &&& receiveResponse) . specification)
-  resp <- MkRaftClientT $ lift (send lastKnownLeader (MkRequest self entry) >> recv)
-  case resp of
-    Left errmsg -> pure $ Left errmsg
-    Right (Failure errmsg) -> pure $ Left errmsg
-    Right (NotLeader (Just actualLeaderId)) -> request actualLeaderId entry
-    Right (NotLeader Nothing) -> pure $ Left "No known leaders"
-    Right (Success leader result) -> pure $ Right (leader, result)
+  (self, send) <- MkRaftClientT $ asks (node &&& sendRequest . specification)
+  mbox <- MkRaftClientT $ asks mailbox
+  reqIdVar <- MkRaftClientT $ asks nextRequestId
+  lift
+    ( do
+        (reqId, resultVar) <- atomically $ do
+          r <- readTVar reqIdVar
+          writeTVar reqIdVar (succ r)
+
+          mbox' <- readTVar mbox
+          resultVar <- newEmptyTMVar
+          writeTVar mbox (Map.insert r resultVar mbox')
+
+          pure (r, resultVar)
+
+        send
+          lastKnownLeader
+          (MkRequest reqId self entry)
+
+        atomically
+          ( do
+              resp <- readTMVar resultVar
+              mbox' <- readTVar mbox
+              writeTVar mbox (Map.delete reqId mbox')
+              pure resp
+          )
+    )
+    >>= \case
+      MkResponse _ _ (Failure errmsg) -> pure $ Left errmsg
+      MkResponse _ (Just actualLeaderId) NotLeader -> request actualLeaderId entry
+      MkResponse _ (Just leader) (Success result) -> pure $ Right (leader, result)
+      -- TODO: what if leader is @Nothing@ but response is `Success`??
+      MkResponse _ Nothing _ -> pure $ Left "No known leaders"

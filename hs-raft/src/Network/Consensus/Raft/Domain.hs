@@ -4,7 +4,10 @@
 
 module Network.Consensus.Raft.Domain
   ( Term,
+    InternalRequestId,
     RequestId,
+    mkRequestId,
+    clientRequestId,
     Role (..),
     ClusterConfiguration (..),
     allNodes,
@@ -16,18 +19,35 @@ import Data.Binary (Binary)
 import Data.Int (Int64)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Word (Word64)
 import GHC.Generics (Generic)
+import Network.Consensus.Raft.Client (ClientRequestId)
 
 -- | Election term
 newtype Term = Term Int64
   deriving stock (Generic, Eq, Ord, Show)
   deriving newtype (Real, Binary, Enum, Num, Integral)
 
--- | A 'RequestId' dentifies a request from a client,
--- uniquely for each leader.
-newtype RequestId = RequestId Int64
+newtype InternalRequestId = InternalRequestId Word64
   deriving stock (Generic, Eq, Ord, Show)
   deriving newtype (Real, Binary, Enum, Num, Integral)
+
+-- | A 'RequestId' dentifies a request from a client,
+-- uniquely for each leader.
+--
+-- In order to support multiple concurrent clients,
+-- we mix the client-provided ID with a monotonic
+-- internal ID
+data RequestId = RequestId
+  { internalRequestId :: !InternalRequestId,
+    clientRequestId :: !ClientRequestId
+  }
+  deriving stock (Generic, Eq, Ord, Show)
+
+instance Binary RequestId
+
+mkRequestId :: InternalRequestId -> ClientRequestId -> RequestId
+mkRequestId = RequestId
 
 data Role
   = Leader

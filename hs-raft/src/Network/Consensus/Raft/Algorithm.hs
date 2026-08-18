@@ -18,16 +18,18 @@ import Control.Monad.Class.MonadTimer (MonadDelay, threadDelay)
 import Control.Monad.Trans.Class (lift)
 import Data.Foldable (for_)
 import Data.Functor ((<&>))
+import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Lens.Micro.Platform (at, use, view, (%=), (.=), (^.))
-import Network.Consensus.Raft.Admin (AdminCommand (..), AdminResponse (..))
+import Network.Consensus.Raft.Admin (AdminCommand (..), AdminRequest)
 import qualified Network.Consensus.Raft.Admin as Admin
-import Network.Consensus.Raft.Client (Request (..), Response (..))
+import Network.Consensus.Raft.Client (ClientRequest, ClientResult (..))
 import Network.Consensus.Raft.Domain
 import Network.Consensus.Raft.Log (LogIndex, Lookup (..), Snapshot (Snapshot, sMetadata), SnapshotMetadata (..), lastLogIndex, (!?))
 import qualified Network.Consensus.Raft.Log as Log
+import Network.Consensus.Raft.Messaging (Request (..), Response (..))
 import Network.Consensus.Raft.Transformer
   ( AppendEntries (..),
     AppendEntriesResult (..),
@@ -43,7 +45,7 @@ import Network.Consensus.Raft.Transformer
     RPCResult (..),
     RaftT,
     RaftTrace (..),
-    acceptClientRequest,
+    acceptClientRequests,
     appendLogEntries,
     applyLogEntries,
     applySnapshot,
@@ -64,7 +66,7 @@ import Network.Consensus.Raft.Transformer
     nextIndex,
     peers,
     receiveAdminRequest,
-    receiveClientRequest,
+    receiveClientRequests,
     receiveRPC,
     receiveRPCResult,
     resetElectionTimer,
@@ -86,7 +88,7 @@ import Network.Consensus.Raft.Transformer
     whenRole,
     yesVotes,
   )
-import Network.Consensus.Raft.Transformer.Spec (AdminRequest (..), ClusterMembershipError (..))
+import Network.Consensus.Raft.Transformer.Spec (ClusterMembershipError (..))
 
 server ::
   ( Ord node,
@@ -103,10 +105,10 @@ server = do
   s <- self
 
   let trace' makeTrace = spec ^. tracer $ makeTrace s
-  t1 <- lift $ async $ receiveRPCs spec queue trace'
-  t2 <- lift $ async $ receiveRPCResults spec queue trace'
-  t3 <- lift $ async $ receiveClientRequests spec queue trace'
-  t4 <- lift $ async $ receiveAdminRequests spec queue trace'
+  t1 <- lift $ async $ receiveRPCsThread spec queue trace'
+  t2 <- lift $ async $ receiveRPCResultsThread spec queue trace'
+  t3 <- lift $ async $ receiveClientRequestsThread spec queue
+  t4 <- lift $ async $ receiveAdminRequestsThread spec queue trace'
   let receiveLoops = [t1, t2, t3, t4]
   for_ receiveLoops (lift . link)
 
@@ -137,29 +139,25 @@ server = do
   for_ receiveLoops (lift . cancel)
   trace GracefulShutdown
   where
-    receiveRPCs spec queue trace' = do
+    receiveRPCsThread spec queue trace' = do
       labelThisThread "receiceRPCs"
       let recv = spec ^. receiveRPC
       forever $ do
         recv >>= \case
           Left errMsg -> trace' (`DeserializationError` errMsg)
           Right rpc -> atomically $ writeTQueue queue (EventRPC rpc)
-    receiveRPCResults spec queue trace' = do
+    receiveRPCResultsThread spec queue trace' = do
       labelThisThread "receiceRPCResults"
       let recv = spec ^. receiveRPCResult
       forever $ do
         recv >>= \case
           Left errMsg -> trace' (`DeserializationError` errMsg)
           Right rpcResult -> atomically $ writeTQueue queue (EventRPCResult rpcResult)
-    receiveClientRequests spec queue trace' = do
+    receiveClientRequestsThread spec queue = do
       labelThisThread "receiceClientRequests"
-      let recv = spec ^. receiveClientRequest
-      forever $ do
-        -- TODO: drain ALL of the requests, for pipelining
-        recv >>= \case
-          Left errMsg -> trace' (`DeserializationError` errMsg)
-          Right request -> atomically $ writeTQueue queue (EventIncomingClientRequest request)
-    receiveAdminRequests spec queue trace' = do
+      let recv = spec ^. receiveClientRequests
+      forever $ recv >>= atomically . writeTQueue queue . EventIncomingClientRequest
+    receiveAdminRequestsThread spec queue trace' = do
       labelThisThread "receiveAdminRequests"
       let recv = spec ^. receiveAdminRequest
       forever $ do
@@ -185,7 +183,7 @@ handleEvent EventElectionTimeout = do
       trace ElectionTriggered
     becomeCandidate
 handleEvent EventHeartBeatTimeout = sendHeartbeat
-handleEvent (EventIncomingClientRequest request) = handleClientRequest request
+handleEvent (EventIncomingClientRequest requests) = handleClientRequest requests
 handleEvent (EventRPC (RequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm)) =
   handleRequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm
 handleEvent (EventRPC (HeartBeat aeTerm senderNodeId _lastLogIndex _aeCommitIndex)) =
@@ -204,20 +202,28 @@ handleEvent (EventAdminRequest adminCommand) = handleAdminRequest adminCommand
 
 handleClientRequest ::
   (Ord node, MonadMVar m, MonadAsync m) =>
-  Request node entry -> RaftT entry node state result m ()
-handleClientRequest (MkRequest clientId entry) =
+  NonEmpty (ClientRequest node entry) -> RaftT entry node state result m ()
+handleClientRequest requests = do
+  mLeaderId <- use currentLeader
   use role >>= \case
-    NonMember ->
-      sendClientResponse clientId (NotLeader Nothing)
+    NonMember -> do
+      for_ requests $ \(MkRequest reqId clientId _) ->
+        -- TODO: reply in parallel
+        sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
     Candidate ->
-      sendClientResponse clientId (NotLeader Nothing)
+      for_ requests $ \(MkRequest reqId clientId _) ->
+        -- TODO: reply in parallel
+        sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
     Follower ->
-      use currentLeader >>= sendClientResponse clientId . NotLeader
+      for_ requests $ \(MkRequest reqId clientId _) ->
+        sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
     Leader -> do
-      reqId <- acceptClientRequest clientId
-      let command = Command reqId entry
-      trace (\ctx -> CommandReceived ctx reqId entry)
-      appendLogEntries $ NonEmpty.singleton $ LogEntryCommand command
+      reqIds <- acceptClientRequests requests
+      let commands = NonEmpty.zipWith Command reqIds (requestPayload <$> requests)
+      -- TODO: trace in separate thread?
+      for_ commands $ \(Command rid entry) ->
+        trace (\ctx -> CommandReceived ctx rid entry)
+      appendLogEntries $ LogEntryCommand <$> commands
 
 handleAppendEntries ::
   ( Ord node,
@@ -489,19 +495,20 @@ handleClusterMembershipResult = \case
     clusterMembershipErrorPeer (OngoingClusterMembershipChange n) = n
 
 handleAdminRequest :: (MonadMVar m) => AdminRequest node -> RaftT entry node state result m ()
-handleAdminRequest req@(AdminRequest reqId adminId command) = do
+handleAdminRequest req@(MkRequest reqId adminId command) = do
   trace (`AdminRequestReceived` req)
+  mLeaderId <- use currentLeader
   case command of
     ShutDown -> do
       view exitLock >>= lift . (`putMVar` ())
-      sendAdminResponse adminId (AdminResponse reqId Admin.ShutdownInitiated)
+      sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.ShutdownInitiated)
     (JoinCluster target) -> do
       self >>= sendRPC target . CM . ClusterMembershipJoinRequest
-      sendAdminResponse adminId (AdminResponse reqId Admin.JoinInitiated)
+      sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.JoinInitiated)
     LeaveCluster ->
       use currentLeader
         >>= \case
-          Nothing -> sendAdminResponse adminId (AdminResponse reqId (Admin.NotLeader Nothing))
+          Nothing -> sendAdminResponse adminId (MkResponse reqId mLeaderId (Admin.NotLeader Nothing))
           Just leaderId -> do
             self >>= sendRPC leaderId . CM . ClusterMembershipLeaveRequest
-            sendAdminResponse adminId (AdminResponse reqId Admin.LeaveInitiated)
+            sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.LeaveInitiated)

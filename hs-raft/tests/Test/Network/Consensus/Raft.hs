@@ -20,7 +20,7 @@ module Test.Network.Consensus.Raft
 where
 
 import Control.Concurrent.Class.MonadMVar (MVar, newEmptyMVar, putMVar, takeMVar)
-import Control.Concurrent.Class.MonadSTM (MonadSTM, TQueue, atomically, newTQueueIO, readTQueue, writeTQueue)
+import Control.Concurrent.Class.MonadSTM (MonadSTM, TQueue, atomically, flushTQueue, newTQueueIO, readTQueue, retry, writeTQueue)
 import Control.Monad (replicateM, when)
 import Control.Monad.Class.MonadAsync (concurrently_, forConcurrently_, race_, withAsync)
 import Control.Monad.Class.MonadTest (exploreRaces)
@@ -31,7 +31,7 @@ import Data.IntMap (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.IntSet as IntSet
 import Data.List (genericLength)
-import Data.List.NonEmpty (nonEmpty)
+import Data.List.NonEmpty (NonEmpty, nonEmpty)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromJust, fromMaybe)
@@ -53,7 +53,7 @@ import Network.Consensus.Raft
 import qualified Network.Consensus.Raft as Raft
 import Network.Consensus.Raft.Admin
 import qualified Network.Consensus.Raft.Admin as Admin
-import Network.Consensus.Raft.Client (RaftClientSpec (..), RaftClientT, Request, Response, request, runRaftClientT)
+import Network.Consensus.Raft.Client (ClientRequest, ClientResponse, RaftClientSpec (..), RaftClientT, request, runRaftClientT)
 import Test.Network.Consensus.Raft.Properties (allProperties)
 import Test.Network.Consensus.Scenario (checkScenario)
 import Test.Tasty (TestTree, askOption, localOption, testGroup)
@@ -301,8 +301,8 @@ data NetworkFabric s
   = MkNetworkFabric
   { rpcMailbox :: Mailbox s (RPC Node Command State),
     rpcResultsMailbox :: Mailbox s (RPCResult Node Result),
-    requestsMailbox :: Mailbox s (Request Node Command),
-    responsesMailbox :: Mailbox s (Response Node Result),
+    requestsMailbox :: Mailbox s (ClientRequest Node Command),
+    responsesMailbox :: Mailbox s (ClientResponse Node Result),
     adminMailbox :: Mailbox s (AdminRequest Node),
     adminResponsesMailbox :: Mailbox s (AdminResponse Node)
   }
@@ -347,7 +347,7 @@ mkServer debug network hbto etolb etoub seed node =
             _sendAdminResponse = send network.adminResponsesMailbox,
             _receiveRPC = receive network.rpcMailbox node <&> Right,
             _receiveRPCResult = receive network.rpcResultsMailbox node <&> Right,
-            _receiveClientRequest = receive network.requestsMailbox node <&> Right,
+            _receiveClientRequests = receiveAll network.requestsMailbox node,
             _receiveAdminRequest = receive network.adminMailbox node <&> Right,
             -- We debug-print events here, rather than in `checkScenario`,
             -- because `checkScenario` can fail and produce no trace.
@@ -424,7 +424,7 @@ testHarness
         MkRaftClientSpec
           { sendRequest = send network.requestsMailbox,
             receiveResponse =
-              receive network.responsesMailbox clientNode <&> Right
+              receive network.responsesMailbox clientNode
           }
 
       adminSpec network =
@@ -444,6 +444,16 @@ receive mailbox node =
   case IntMap.lookup (fromIntegral node) mailbox of
     Nothing -> error $ "Mailbox badly configured: missing node " <> show node
     Just queue -> atomically $ readTQueue queue
+
+receiveAll :: (MonadSTM m) => IntMap (TQueue m a) -> Node -> m (NonEmpty a)
+receiveAll mailbox node =
+  case IntMap.lookup (fromIntegral node) mailbox of
+    Nothing -> error $ "Mailbox badly configures: missing node " <> show node
+    Just queue ->
+      atomically $
+        flushTQueue queue <&> nonEmpty >>= \case
+          Nothing -> retry
+          Just xs -> pure xs
 
 -- Simple key-value store
 

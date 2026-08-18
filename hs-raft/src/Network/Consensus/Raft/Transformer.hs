@@ -26,7 +26,7 @@ module Network.Consensus.Raft.Transformer
     nextElectionTimeout,
     updateTerm,
     trace,
-    acceptClientRequest,
+    acceptClientRequests,
     applySnapshot,
     currentSnapshot,
     appendLogEntries,
@@ -67,12 +67,14 @@ import Data.Sequence (ViewR (..))
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Traversable (for)
 import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (<%=), (^.))
 import Network.Consensus.Raft.Admin (AdminResponse)
-import Network.Consensus.Raft.Client (Response (..))
-import Network.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId, Role (..), Term, allNodes, hasQuorum)
+import Network.Consensus.Raft.Client (ClientRequest, ClientResponse, ClientResult (..))
+import Network.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId (clientRequestId), Role (..), Term, allNodes, hasQuorum, mkRequestId)
 import Network.Consensus.Raft.Log (Lookup (..), Snapshot (Snapshot, sData, sMetadata), SnapshotMetadata (..), absoluteIndex, logEntries, sCluster)
 import qualified Network.Consensus.Raft.Log as Log
+import Network.Consensus.Raft.Messaging (Request (..), Response (..))
 import Network.Consensus.Raft.Timer (Microseconds, resetTimer)
 import Network.Consensus.Raft.Transformer.Definition
 import Network.Consensus.Raft.Transformer.Spec hiding (sendAdminResponse, sendClientResponse, sendRPC, sendRPCResult)
@@ -128,7 +130,7 @@ sendRPCResult node rpc = do
   spec <- view specification
   lift $ (spec ^. Spec.sendRPCResult) node rpc
 
-sendClientResponse :: (Monad m) => node -> Response node result -> RaftT entry node state result m ()
+sendClientResponse :: (Monad m) => node -> ClientResponse node result -> RaftT entry node state result m ()
 sendClientResponse node response = do
   spec <- view specification
   lift $ (spec ^. Spec.sendClientResponse) node response
@@ -213,13 +215,13 @@ sendAppendEntriesTo destination = do
           >>= sendRPC destination . IS
 
 applyEntry :: (MonadSTM m, Ord node, MonadMVar m) => LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
-applyEntry (LogEntryCommand (Command requestId entry)) = do
+applyEntry (LogEntryCommand (Command reqId entry)) = do
   apply <- view (specification . applyLogEntry)
   (newState, result) <- use internalState <&> flip apply entry
   trace (`LogEntryApplied` entry)
 
   internalState .= newState
-  pure $ Just (MkCommandResponse result requestId)
+  pure $ Just (MkCommandResponse result reqId)
 applyEntry (LogEntryMembershipChange clusterConf) = do
   assign clusterConfiguration clusterConf
   trace (`MembershipChangeApplied` clusterConf)
@@ -320,17 +322,17 @@ applyLogEntries = do
                 & map (\(MkCommandResponse result reqId) -> (reqId, NonEmpty.singleton result))
                 & Map.fromListWith (<>)
                 & Map.map NonEmpty.reverse -- Necessary because 'fromListWith' reverses order of applied commands
-        for_ (Map.toList resultsByReqId) $ \(requestId, responses) ->
+        for_ (Map.toList resultsByReqId) $ \(reqId, responses) ->
           use currentClientRequests
-            <&> Map.lookup requestId
+            <&> Map.lookup reqId
             >>= \case
               Nothing -> pure () -- TODO: isn't this unexpected?
               Just requester -> do
                 for_ responses $ \response -> do
                   -- TODO: reply (and possibly retry) in a separate thread
-                  sendClientResponse requester (Success leaderId response)
-                  trace (`CommandResultResponded` MkCommandResponse response requestId)
-                currentClientRequests %= Map.delete requestId
+                  sendClientResponse requester (MkResponse (clientRequestId reqId) (Just leaderId) (Success response))
+                  trace (`CommandResultResponded` MkCommandResponse response reqId)
+                currentClientRequests %= Map.delete reqId
 
       lastApplied .= currentCommitIndex
       trace (`LastAppliedIndexIncreasedTo` currentCommitIndex)
@@ -374,16 +376,17 @@ updateTerm update = do
   pure (currTerm, newTerm)
 
 -- | Set up a callback for a client request
-acceptClientRequest ::
+acceptClientRequests ::
   (MonadMVar m) =>
   -- | Client node
-  node ->
-  RaftT entry node state result m RequestId
-acceptClientRequest clientId = do
-  requestId <- nextRequestId <%= succ
-  currentClientRequests %= Map.insert requestId clientId
-
-  pure requestId
+  NonEmpty (ClientRequest node entry) ->
+  RaftT entry node state result m (NonEmpty RequestId)
+acceptClientRequests requests = do
+  for requests $ \(MkRequest clientReqId clientId _) -> do
+    internalRequestId <- nextRequestId <%= succ
+    let reqId = mkRequestId internalRequestId clientReqId
+    currentClientRequests %= Map.insert reqId clientId
+    pure reqId
 
 currentSnapshot :: (Monad m) => RaftT entry node state result m (Snapshot node state)
 currentSnapshot =

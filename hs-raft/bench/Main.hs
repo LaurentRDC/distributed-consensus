@@ -10,13 +10,14 @@
 module Main (main) where
 
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async
-import Control.Concurrent.STM (TQueue, atomically, newTQueueIO, readTQueue, writeTQueue)
+import Control.Concurrent.Async (async, cancel, forConcurrently_)
+import Control.Concurrent.STM (TQueue, atomically, flushTQueue, newTQueueIO, readTQueue, retry, writeTQueue)
 import Control.DeepSeq (NFData)
 import Control.Monad (replicateM, (>=>))
 import Data.Functor ((<&>))
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
+import Data.List.NonEmpty (NonEmpty, nonEmpty)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -28,9 +29,9 @@ import Network.Consensus.Raft (Config (..), Microseconds, RPC, RPCResult, RaftSp
 import qualified Network.Consensus.Raft as Raft
 import Network.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Network.Consensus.Raft.Client
-  ( RaftClientSpec (..),
-    Request,
-    Response,
+  ( ClientRequest,
+    ClientResponse,
+    RaftClientSpec (..),
     request,
     runRaftClientT,
   )
@@ -131,8 +132,8 @@ data NetworkFabric
   = MkNetworkFabric
   { rpcMailbox :: Mailbox (RPC Node Command State),
     rpcResultsMailbox :: Mailbox (RPCResult Node Result),
-    requestsMailbox :: Mailbox (Request Node Command),
-    responsesMailbox :: Mailbox (Response Node Result),
+    requestsMailbox :: Mailbox (ClientRequest Node Command),
+    responsesMailbox :: Mailbox (ClientResponse Node Result),
     adminMailbox :: Mailbox (AdminRequest Node),
     adminResponsesMailbox :: Mailbox (AdminResponse Node)
   }
@@ -181,7 +182,7 @@ mkServer network hbto etolb etoub seed node =
             _sendAdminResponse = send network.adminResponsesMailbox,
             _receiveRPC = receive network.rpcMailbox node <&> Right,
             _receiveRPCResult = receive network.rpcResultsMailbox node <&> Right,
-            _receiveClientRequest = receive network.requestsMailbox node <&> Right,
+            _receiveClientRequests = receiveAll network.requestsMailbox node,
             _receiveAdminRequest = receive network.adminMailbox node <&> Right,
             _tracer = \_ -> pure ()
           }
@@ -231,7 +232,7 @@ benchHarness
         MkRaftClientSpec
           { sendRequest = send network.requestsMailbox,
             receiveResponse =
-              receive network.responsesMailbox clientNode <&> Right
+              receive network.responsesMailbox clientNode
           }
 
 send :: IntMap (TQueue a) -> Node -> a -> IO ()
@@ -245,6 +246,16 @@ receive mailbox node =
   case IntMap.lookup (fromIntegral node) mailbox of
     Nothing -> error $ "Mailbox badly configures: missing node " <> show node
     Just queue -> atomically $ readTQueue queue
+
+receiveAll :: IntMap (TQueue a) -> Node -> IO (NonEmpty a)
+receiveAll mailbox node =
+  case IntMap.lookup (fromIntegral node) mailbox of
+    Nothing -> error $ "Mailbox badly configures: missing node " <> show node
+    Just queue ->
+      atomically $
+        flushTQueue queue <&> nonEmpty >>= \case
+          Nothing -> retry
+          Just xs -> pure xs
 
 -- Simple key-value store
 

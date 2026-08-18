@@ -36,6 +36,7 @@ library
     other-modules:    Network.Consensus.Raft.Algorithm
                       Network.Consensus.Raft.Domain
                       Network.Consensus.Raft.Log
+                      Network.Consensus.Raft.Messaging
                       Network.Consensus.Raft.Transformer
                       Network.Consensus.Raft.Transformer.Definition
                       Network.Consensus.Raft.Transformer.Spec
@@ -77,7 +78,7 @@ test-suite hs-raft-test
                     , tasty ^>=1.5
                     , tasty-quickcheck ^>=0.11
                     , text
-                    
+
 benchmark raft-cluster
   import:           warnings
   type:             exitcode-stdio-1.0

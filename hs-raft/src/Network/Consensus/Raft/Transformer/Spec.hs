@@ -22,7 +22,7 @@ module Network.Consensus.Raft.Transformer.Spec
     sendAdminResponse,
     receiveRPC,
     receiveRPCResult,
-    receiveClientRequest,
+    receiveClientRequests,
     receiveAdminRequest,
     tracer,
 
@@ -57,7 +57,7 @@ module Network.Consensus.Raft.Transformer.Spec
     ClusterMembershipRequest (..),
     ClusterMembershipResult (..),
     ClusterMembershipError (..),
-    AdminRequest (..),
+    AdminRequest,
     Event (..),
     RPC (..),
     RPCResult (..),
@@ -67,6 +67,7 @@ module Network.Consensus.Raft.Transformer.Spec
 where
 
 import Data.Binary (Binary)
+import Data.List.NonEmpty (NonEmpty)
 import Data.Map.Strict (Map)
 import Data.Sequence (Seq)
 import Data.Set (Set)
@@ -74,9 +75,9 @@ import Data.Text (Text)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
-import Network.Consensus.Raft.Admin (AdminRequest (..), AdminResponse)
-import Network.Consensus.Raft.Client (Request, Response)
-import Network.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId, Role (..), Term)
+import Network.Consensus.Raft.Admin (AdminRequest, AdminResponse)
+import Network.Consensus.Raft.Client (ClientRequest, ClientResponse)
+import Network.Consensus.Raft.Domain (ClusterConfiguration (..), InternalRequestId, RequestId, Role (..), Term)
 import Network.Consensus.Raft.Log (Log, LogIndex, Snapshot, SnapshotMetadata, newLog)
 import System.Random (StdGen, mkStdGen64)
 
@@ -216,7 +217,7 @@ instance (Binary node, Binary result) => Binary (RPCResult node result)
 data Event node entry result state
   = EventElectionTimeout
   | EventHeartBeatTimeout
-  | EventIncomingClientRequest (Request node entry)
+  | EventIncomingClientRequest (NonEmpty (ClientRequest node entry))
   | EventRPC (RPC node entry state)
   | EventRPCResult (RPCResult node result)
   | EventAdminRequest (AdminRequest node)
@@ -290,14 +291,18 @@ data RaftSpec entry node state result m = MkRaftSpec
     _applyLogEntry :: state -> entry -> (state, result),
     _sendRPC :: node -> RPC node entry state -> m (),
     _sendRPCResult :: node -> RPCResult node result -> m (),
-    _sendClientResponse :: node -> Response node result -> m (),
+    _sendClientResponse :: node -> ClientResponse node result -> m (),
     _sendAdminResponse :: node -> AdminResponse node -> m (),
     -- We use 'Text' to represent deserialization errors because this is
     -- easiest to represent to the user. I don't think it's worth adding
     -- yet another type variable to the spec.
     _receiveRPC :: m (Either Text (RPC node entry state)),
     _receiveRPCResult :: m (Either Text (RPCResult node result)),
-    _receiveClientRequest :: m (Either Text (Request node entry)),
+    -- | Receive client requests.
+    -- This call should block until at least one request is available. If
+    -- your software stack allows for it, queueing requests allows
+    -- for pipelined processing which is much more efficient.
+    _receiveClientRequests :: m (NonEmpty (ClientRequest node entry)),
     _receiveAdminRequest :: m (Either Text (AdminRequest node)),
     _tracer :: RaftTrace entry result node state -> m ()
   }
@@ -318,7 +323,7 @@ data RaftState node entry state = MkRaftState
     _matchIndex :: Map node LogIndex,
     -- | Set of votes received in the current term
     _yesVotes :: !(Set node),
-    _nextRequestId :: !RequestId,
+    _nextRequestId :: !InternalRequestId,
     _currentClientRequests :: !(Map RequestId node),
     _randomGen :: !StdGen
   }

@@ -16,8 +16,8 @@ module Network.Consensus.Raft.Admin
     shutDown,
 
     -- * Communications between admins and clusters
-    AdminRequest (..),
-    AdminResponse (..),
+    AdminRequest,
+    AdminResponse,
     AdminCommand (..),
     AdminCommandResult (..),
   )
@@ -36,6 +36,7 @@ import Data.Text (Text)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
+import Network.Consensus.Raft.Messaging (Request (..), Response (..))
 
 data AdminCommand node
   = JoinCluster
@@ -51,14 +52,7 @@ newtype AdminRequestId = AdminRequestId Word64
   deriving stock (Generic, Eq, Ord, Show)
   deriving newtype (Real, Binary, Enum, Num, Integral)
 
-data AdminRequest node = AdminRequest
-  { adminRequestId :: !AdminRequestId,
-    adminRequestAdmin :: !node,
-    adminRequest :: !(AdminCommand node)
-  }
-  deriving (Eq, Show, Generic)
-
-instance (Binary node) => Binary (AdminRequest node)
+type AdminRequest node = Request AdminRequestId node (AdminCommand node)
 
 data AdminCommandResult node
   = JoinInitiated
@@ -73,13 +67,7 @@ data AdminCommandResult node
 
 instance (Binary node) => Binary (AdminCommandResult node)
 
-data AdminResponse node = AdminResponse
-  { adminResponseId :: !AdminRequestId,
-    adminResponse :: !(AdminCommandResult node)
-  }
-  deriving (Eq, Show, Generic)
-
-instance (Binary node) => Binary (AdminResponse node)
+type AdminResponse node = Response AdminRequestId node (AdminCommandResult node)
 
 newtype RaftAdminT node m a
   = MkRaftAdminT (ReaderT (RaftAdminEnv node m) m a)
@@ -117,12 +105,12 @@ runRaftAdminT (MkRaftAdminT f) self spec = do
         receiveAdminResponse spec >>= \case
           Left _ -> recvLoop
           Right resp -> do
-            let adminReqId = adminResponseId resp
+            let adminReqId = responseRequestId resp
             atomically $ do
               box <- readTVar mbox
               case Map.lookup adminReqId box of
                 Nothing -> pure ()
-                Just var -> putTMVar var (adminResponse resp)
+                Just var -> putTMVar var (responsePayload resp)
             recvLoop
 
   withAsync recvLoop $ \_ ->
@@ -151,7 +139,7 @@ sendAdminCommand contact command = do
   mbox <- asks mailbox
   reqIdVar <- asks nextRequestId
   lift $ do
-    (requestId, resultVar) <- atomically $ do
+    (rid, resultVar) <- atomically $ do
       r <- readTVar reqIdVar
       writeTVar reqIdVar (succ r)
 
@@ -163,17 +151,17 @@ sendAdminCommand contact command = do
 
     send
       contact
-      AdminRequest
-        { adminRequestId = requestId,
-          adminRequestAdmin = admin,
-          adminRequest = command
+      MkRequest
+        { requestId = rid,
+          requestOriginator = admin,
+          requestPayload = command
         }
 
     atomically
       ( do
           resp <- readTMVar resultVar
           mbox' <- readTVar mbox
-          writeTVar mbox (Map.delete requestId mbox')
+          writeTVar mbox (Map.delete rid mbox')
           pure resp
       )
 

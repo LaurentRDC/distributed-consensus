@@ -40,8 +40,8 @@ import Control.Monitor
 import Data.Dynamic (Typeable, fromDynamic)
 import qualified Data.Text as Text
 import Data.Word (Word64)
-import Network.Consensus.Raft (ClusterConfiguration, CommandResponse, Event (..), EventContext, LogIndex, RPC (..), RPCResult, RaftTrace (..), RequestId, Term)
-import Network.Consensus.Raft.Admin (AdminCommand (..), AdminRequest (..))
+import Network.Consensus.Raft (ClusterConfiguration, CommandResponse, Event (..), EventContext, LogIndex, RPC (..), RPCResult, RaftTrace (..), Request (..), RequestId, Term)
+import Network.Consensus.Raft.Admin (AdminCommand (..))
 import System.Random.Stateful (mkStdGen64, uniformR, uniformShuffleList)
 import Test.Tasty.QuickCheck
 
@@ -144,12 +144,12 @@ commandResponded = predicate $ \case
 
 joinClusterCommandReceived :: Predicate (RaftTrace entry result node state) (EventContext node)
 joinClusterCommandReceived = predicate $ \case
-  (AdminRequestReceived ctx (AdminRequest _ _ (JoinCluster _))) -> Just ctx
+  (AdminRequestReceived ctx (MkRequest _ _ (JoinCluster _))) -> Just ctx
   _ -> Nothing
 
 leaveClusterCommandReceived :: Predicate (RaftTrace entry result node state) (EventContext node)
 leaveClusterCommandReceived = predicate $ \case
-  (AdminRequestReceived ctx (AdminRequest _ _ LeaveCluster)) -> Just ctx
+  (AdminRequestReceived ctx (MkRequest _ _ LeaveCluster)) -> Just ctx
   _ -> Nothing
 
 joinedCluster :: Predicate (RaftTrace entry result node state) (EventContext node)
