@@ -77,8 +77,8 @@ import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
 import Network.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Network.Consensus.Raft.Client (ClientRequest, ClientResponse)
-import Network.Consensus.Raft.Domain (ClusterConfiguration (..), InternalRequestId, RequestId, Role (..), Term)
-import Network.Consensus.Raft.Log (Log, LogIndex, Snapshot, SnapshotMetadata, newLog)
+import Network.Consensus.Raft.Domain (ClusterConfiguration (..), InternalRequestId, LogIndex, RequestId, Role (..), Snapshot, SnapshotMetadata, Term)
+import Network.Consensus.Raft.Log (Log, newLog)
 import System.Random (StdGen, mkStdGen64)
 
 -- | A 'Command' comes from clients
@@ -351,7 +351,7 @@ initialRaftState initRole seed clusterConf initialState =
       _internalState = initialState,
       _votedFor = Nothing,
       _currentLeader = Nothing,
-      _commandLog = newLog initialState clusterConf,
+      _commandLog = newLog,
       _commitIndex = 0,
       _lastApplied = 0,
       _nextIndex = mempty,

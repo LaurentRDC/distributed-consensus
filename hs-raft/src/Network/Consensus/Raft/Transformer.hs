@@ -71,8 +71,8 @@ import Data.Traversable (for)
 import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (<%=), (^.))
 import Network.Consensus.Raft.Admin (AdminResponse)
 import Network.Consensus.Raft.Client (ClientRequest, ClientResponse, ClientResult (..))
-import Network.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId (clientRequestId), Role (..), Term, allNodes, hasQuorum, mkRequestId)
-import Network.Consensus.Raft.Log (Lookup (..), Snapshot (Snapshot, sData, sMetadata), SnapshotMetadata (..), absoluteIndex, logEntries, sCluster)
+import Network.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId (clientRequestId), Role (..), Snapshot (..), SnapshotMetadata (..), Term, allNodes, hasQuorum, mkRequestId)
+import Network.Consensus.Raft.Log (Lookup (..), absoluteIndex, logEntries)
 import qualified Network.Consensus.Raft.Log as Log
 import Network.Consensus.Raft.Messaging (Request (..), Response (..))
 import Network.Consensus.Raft.Timer (Microseconds, resetTimer)
@@ -409,7 +409,8 @@ applySnapshot snapshot = do
   -- TODO: initiate the snapshot write in a separate
   -- thread, with a finalizer to apply the snapshot to the log
   lift $ (spec ^. writeSnapshot) s snapshot
-  commandLog %= Log.applySnapshot snapshot
+
+  commandLog %= Log.applySnapshot snapshot.sMetadata
   internalState .= sData snapshot
   clusterConfiguration .= sCluster snapshot
   trace (`SnapshotApplied` sMetadata snapshot)

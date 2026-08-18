@@ -27,7 +27,7 @@ import Network.Consensus.Raft.Admin (AdminCommand (..), AdminRequest)
 import qualified Network.Consensus.Raft.Admin as Admin
 import Network.Consensus.Raft.Client (ClientRequest, ClientResult (..))
 import Network.Consensus.Raft.Domain
-import Network.Consensus.Raft.Log (LogIndex, Lookup (..), Snapshot (Snapshot, sMetadata), SnapshotMetadata (..), lastLogIndex, (!?))
+import Network.Consensus.Raft.Log (Lookup (..), lastLogIndex, (!?))
 import qualified Network.Consensus.Raft.Log as Log
 import Network.Consensus.Raft.Messaging (Request (..), Response (..))
 import Network.Consensus.Raft.Transformer
@@ -246,7 +246,7 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
 
     -- Consistency check
     entries <- use commandLog
-    let Snapshot (SnapshotMetadata lastIx _) _ _ = Log.lSnapshot entries
+    let (SnapshotMetadata lastIx _) = Log.lSnapshotMetadata entries
         logIsConsistent =
           case entries !? prevLogIndex of
             NotFound -> prevLogIndex == 0

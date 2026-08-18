@@ -5,13 +5,11 @@ module Network.Consensus.Raft
     module Network.Consensus.Raft.Messaging,
     module Network.Consensus.Raft.Transformer,
     Microseconds (Microseconds),
-    LogIndex,
   )
 where
 
 import Network.Consensus.Raft.Algorithm
 import Network.Consensus.Raft.Domain
-import Network.Consensus.Raft.Log (LogIndex)
 import Network.Consensus.Raft.Messaging
 import Network.Consensus.Raft.Timer (Microseconds (..))
 import Network.Consensus.Raft.Transformer

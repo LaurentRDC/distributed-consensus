@@ -12,6 +12,11 @@ module Network.Consensus.Raft.Domain
     ClusterConfiguration (..),
     allNodes,
     hasQuorum,
+    LogIndex,
+
+    -- * Snapshots
+    Snapshot (..),
+    SnapshotMetadata (..),
   )
 where
 
@@ -97,3 +102,28 @@ hasQuorum (Simple members) votes = Set.size (Set.intersection members votes) > S
 hasQuorum (Joint members1 members2) votes =
   hasQuorum (Simple members1) votes
     && hasQuorum (Simple members2) votes
+
+-- | 'LogIndex' is an absolute position within the 'Log'.
+--
+-- Note that the 'Log' may not have the elements associated with a given
+-- 'LogIndex' due to compaction.
+newtype LogIndex = LogIndex Int64
+  deriving stock (Generic, Eq, Ord, Show)
+  deriving newtype (Real, Enum, Num, Binary, Integral)
+
+data SnapshotMetadata = SnapshotMetadata
+  { smLastIncludedIndex :: !LogIndex,
+    smLastIncludedTerm :: !Term
+  }
+  deriving (Eq, Ord, Show, Generic)
+
+instance Binary SnapshotMetadata
+
+data Snapshot node state = Snapshot
+  { sMetadata :: !SnapshotMetadata,
+    sData :: !state,
+    sCluster :: !(ClusterConfiguration node)
+  }
+  deriving (Eq, Ord, Show, Generic)
+
+instance (Binary state, Binary node) => Binary (Snapshot node state)
