@@ -221,6 +221,7 @@ data Event node entry result state
   | EventRPC (RPC node entry state)
   | EventRPCResult (RPCResult node result)
   | EventAdminRequest (AdminRequest node)
+  | EventSnapshotPersisted (Snapshot node state)
   deriving (Eq, Show)
 
 data EventContext node

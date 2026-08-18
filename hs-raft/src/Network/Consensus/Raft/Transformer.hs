@@ -27,6 +27,7 @@ module Network.Consensus.Raft.Transformer
     updateTerm,
     trace,
     acceptClientRequests,
+    persistSnapshot,
     applySnapshot,
     currentSnapshot,
     appendLogEntries,
@@ -48,8 +49,8 @@ where
 
 import Control.Concurrent.Class.MonadMVar (MonadMVar, takeMVar)
 import Control.Concurrent.Class.MonadSTM (atomically, readTQueue, writeTQueue)
-import Control.Monad (unless, when)
-import Control.Monad.Class.MonadAsync (MonadAsync, mapConcurrently_, race)
+import Control.Monad (unless, void, when)
+import Control.Monad.Class.MonadAsync (MonadAsync, async, mapConcurrently_, race)
 import Control.Monad.Class.MonadFork (MonadFork)
 import Control.Monad.Class.MonadSTM (MonadSTM)
 import Control.Monad.Class.MonadThrow (MonadMask)
@@ -214,7 +215,7 @@ sendAppendEntriesTo destination = do
         )
           >>= sendRPC destination . IS
 
-applyEntry :: (MonadSTM m, Ord node, MonadMVar m) => LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
+applyEntry :: (Ord node, MonadMVar m, MonadAsync m) => LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
 applyEntry (LogEntryCommand (Command reqId entry)) = do
   apply <- view (specification . applyLogEntry)
   (newState, result) <- use internalState <&> flip apply entry
@@ -293,7 +294,7 @@ updateCommitIndex = do
 
 -- | Update the commit index, and apply log entries if there are
 -- any log entries that /can/ be applied.
-applyLogEntries :: (Ord node, MonadMVar m, MonadSTM m) => RaftT entry node state result m ()
+applyLogEntries :: (Ord node, MonadMVar m, MonadAsync m) => RaftT entry node state result m ()
 applyLogEntries = do
   isTimeToCommit <- updateCommitIndex
   when isTimeToCommit $ do
@@ -343,7 +344,7 @@ applyLogEntries = do
           entries' <- use commandLog
           when
             (Seq.length (logEntries entries') > maxLog)
-            (currentSnapshot >>= applySnapshot)
+            (currentSnapshot >>= persistSnapshot)
 
 nextElectionTimeout :: (Monad m) => RaftT entry node state result m Microseconds
 nextElectionTimeout = do
@@ -398,25 +399,35 @@ currentSnapshot =
     <*> use internalState
     <*> use clusterConfiguration
 
+-- | Serialize the snapshot in a separate thread.
+--
+-- An event will be emitted to run `applySnapshot`
+persistSnapshot :: (MonadAsync m) => Snapshot node state -> RaftT entry node state result m ()
+persistSnapshot snapshot = do
+  s <- self
+  spec <- view specification
+  queue <- view eventQueue
+
+  void $ lift $ async $ do
+    (spec ^. writeSnapshot) s snapshot
+    atomically $
+      writeTQueue
+        queue
+        (EventSnapshotPersisted snapshot)
+
 -- | Apply a snapshot to the internal state.
 --
 -- This can be used by any node on itself, or
 -- as part of the 'InstallSnapshot' remote procedure call.
 applySnapshot :: (Monad m) => Snapshot node state -> RaftT entry node state result m ()
 applySnapshot snapshot = do
-  s <- self
-  spec <- view specification
-  -- TODO: initiate the snapshot write in a separate
-  -- thread, with a finalizer to apply the snapshot to the log
-  lift $ (spec ^. writeSnapshot) s snapshot
-
   commandLog %= Log.applySnapshot snapshot.sMetadata
   internalState .= sData snapshot
   clusterConfiguration .= sCluster snapshot
   trace (`SnapshotApplied` sMetadata snapshot)
 
 -- | Apply one or more entries to the log
-appendLogEntries :: (Ord node, MonadMVar m, MonadSTM m) => NonEmpty (LogEntry node entry) -> RaftT entry node state result m ()
+appendLogEntries :: (Ord node, MonadMVar m, MonadAsync m) => NonEmpty (LogEntry node entry) -> RaftT entry node state result m ()
 appendLogEntries entries = do
   ourTerm <- use term
   commandLog %= (`Log.extend` ((ourTerm,) <$> Seq.fromList (NonEmpty.toList entries)))

@@ -9,7 +9,7 @@ module Network.Consensus.Raft.Algorithm
 where
 
 import Control.Concurrent.Class.MonadMVar (MonadMVar, putMVar)
-import Control.Concurrent.Class.MonadSTM (MonadSTM, atomically, writeTQueue)
+import Control.Concurrent.Class.MonadSTM (atomically, writeTQueue)
 import Control.Monad (forever, unless, when)
 import Control.Monad.Class.MonadAsync (MonadAsync, async, cancel, link)
 import Control.Monad.Class.MonadFork (MonadFork, labelThisThread)
@@ -65,6 +65,7 @@ import Network.Consensus.Raft.Transformer
     matchIndex,
     nextIndex,
     peers,
+    persistSnapshot,
     receiveAdminRequest,
     receiveClientRequests,
     receiveRPC,
@@ -199,6 +200,7 @@ handleEvent (EventRPCResult (ISR installSnapshotResult)) =
   handleInstallSnapshotResult installSnapshotResult
 handleEvent (EventRPCResult (CMR clusterMembershipResult)) = handleClusterMembershipResult clusterMembershipResult
 handleEvent (EventAdminRequest adminCommand) = handleAdminRequest adminCommand
+handleEvent (EventSnapshotPersisted snapshot) = applySnapshot snapshot
 
 handleClientRequest ::
   (Ord node, MonadMVar m, MonadAsync m) =>
@@ -273,7 +275,7 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
           applyLogEntries
 
 handleAppendEntriesResult ::
-  (Ord node, MonadMVar m, MonadSTM m) =>
+  (Ord node, MonadMVar m, MonadAsync m) =>
   AppendEntriesResult node result ->
   RaftT entry node state result m ()
 handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode responderSuccess responderLogIndex) = do
@@ -388,7 +390,7 @@ handleRequestVoteResult voter voterTerm votedForUs = do
             trace (`VoteDeniedFrom` voter)
 
 handleInstallSnapshot ::
-  (MonadMVar m) =>
+  (MonadMVar m, MonadAsync m) =>
   InstallSnapshot node state -> RaftT entry node state result m ()
 handleInstallSnapshot (InstallSnapshot leaderTerm leaderNode snapshot) =
   handleTermNumber leaderTerm >>= \case
@@ -396,7 +398,7 @@ handleInstallSnapshot (InstallSnapshot leaderTerm leaderNode snapshot) =
       -- old term
       pure () -- TODO: what do I do here?
     _ -> whenRole Follower $ do
-      applySnapshot snapshot
+      persistSnapshot snapshot
       InstallSnapshotResult
         <$> use term
         <*> (view configuration <&> nodeId)
@@ -420,7 +422,7 @@ handleInstallSnapshotResult (InstallSnapshotResult responderTerm responderNode (
     -- send the rest of the logs
     sendAppendEntriesTo responderNode
 
-handleClusterMembershipRequest :: (Ord node, MonadMVar m, MonadSTM m) => ClusterMembershipRequest node -> RaftT entry node state result m ()
+handleClusterMembershipRequest :: (Ord node, MonadMVar m, MonadAsync m) => ClusterMembershipRequest node -> RaftT entry node state result m ()
 handleClusterMembershipRequest request = do
   let (requester, resultCtor) = case request of
         ClusterMembershipJoinRequest r -> (r, ClusterMembershipJoinResult)
