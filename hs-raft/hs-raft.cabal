@@ -64,6 +64,7 @@ test-suite hs-raft-test
                       Control.Monitor.Predicate
                       Control.Monitor.Reason
                       Test.Network.Consensus.Raft
+                      Test.Network.Consensus.Raft.Options
                       Test.Network.Consensus.Raft.Properties
                       Test.Network.Consensus.Scenario
     ghc-options:      -rtsopts -threaded +RTS -N

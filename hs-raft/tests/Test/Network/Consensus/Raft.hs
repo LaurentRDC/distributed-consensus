@@ -12,10 +12,6 @@
 
 module Test.Network.Consensus.Raft
   ( tests,
-    NumRacyTests,
-    ScheduleBound,
-    BranchingFactor,
-    PrintTrace,
   )
 where
 
@@ -25,7 +21,7 @@ import Control.Monad (replicateM, when)
 import Control.Monad.Class.MonadAsync (concurrently_, forConcurrently_, race_, withAsync)
 import Control.Monad.Class.MonadTest (exploreRaces)
 import Control.Monad.Class.MonadTimer (threadDelay, timeout)
-import Control.Monad.IOSim (ExplorationOptions, IOSim, exploreSimTrace, traceM, withBranching, withScheduleBound)
+import Control.Monad.IOSim (ExplorationOptions, IOSim, exploreSimTrace, traceM)
 import Data.Functor ((<&>))
 import Data.IntMap (IntMap)
 import qualified Data.IntMap.Strict as IntMap
@@ -34,11 +30,9 @@ import Data.List (genericLength)
 import Data.List.NonEmpty (NonEmpty, nonEmpty)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromJust, fromMaybe)
-import Data.Monoid (Endo (..))
+import Data.Maybe (fromJust)
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Tagged (Tagged (..))
 import qualified Data.Text.Lazy as Text
 import Data.Word (Word64)
 import qualified Debug.Trace as Debug
@@ -54,20 +48,14 @@ import qualified Network.Consensus.Raft as Raft
 import Network.Consensus.Raft.Admin
 import qualified Network.Consensus.Raft.Admin as Admin
 import Network.Consensus.Raft.Client (ClientRequest, ClientResponse, RaftClientSpec (..), RaftClientT, request, runRaftClientT)
+import Test.Network.Consensus.Raft.Options (PrintTrace (..), setNumRacyTests, withExplorationOptions, withPrintTraceOption)
 import Test.Network.Consensus.Raft.Properties (allProperties)
 import Test.Network.Consensus.Scenario (checkScenario)
-import Test.Tasty (TestTree, askOption, localOption, testGroup)
-import Test.Tasty.Options
-  ( IsOption (..),
-    mkFlagCLParser,
-    safeRead,
-    safeReadBool,
-  )
+import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck
   ( Arbitrary (arbitrary),
     Gen,
     Property,
-    QuickCheckTests (QuickCheckTests),
     Testable (property),
     chooseBoundedIntegral,
     chooseInt,
@@ -489,70 +477,3 @@ step state (Delete k) = (Map.delete k state, Ok)
 step state (Get k) = case Map.lookup k state of
   Nothing -> (state, Err)
   Just v -> (state, Value v)
-
-setNumRacyTests :: TestTree -> TestTree
-setNumRacyTests tree =
-  -- These tests are potentially very long. We want a small default (here, 3),
-  -- but with the ability to set it to a larger or smaller number at weill.
-  --
-  -- 'QuickCheckTests' doesn't allow this, as its default is 100, which is much
-  -- too large
-  askOption $ \(NumRacyTests n) ->
-    let numTests = fromMaybe 3 n
-     in localOption (QuickCheckTests numTests) tree
-
-newtype NumRacyTests
-  = NumRacyTests (Maybe Int)
-  deriving (Eq, Ord, Show)
-
-withExplorationOptions :: ((ExplorationOptions -> ExplorationOptions) -> TestTree) -> TestTree
-withExplorationOptions f =
-  askOption $ \(ScheduleBound mBound) ->
-    askOption $ \(BranchingFactor mFactor) ->
-      f
-        ( appEndo $
-            mconcat
-              [ maybe mempty (Endo . withScheduleBound) mBound,
-                maybe mempty (Endo . withBranching) mFactor
-              ]
-        )
-
-instance IsOption NumRacyTests where
-  defaultValue = NumRacyTests Nothing
-  parseValue s = NumRacyTests . Just <$> safeRead s
-  optionName = Tagged "num-racy-tests"
-  optionHelp = Tagged "Number of racy tests to run"
-
-newtype ScheduleBound
-  = ScheduleBound (Maybe Int)
-  deriving (Eq, Ord, Show)
-
-instance IsOption ScheduleBound where
-  defaultValue = ScheduleBound Nothing
-  parseValue s = ScheduleBound . Just <$> safeRead s
-  optionName = Tagged "schedule-bound"
-  optionHelp = Tagged "Upper bound on the number of schedules with race reversals that will be explored."
-
-newtype BranchingFactor
-  = BranchingFactor (Maybe Int)
-  deriving (Eq, Ord, Show)
-
-instance IsOption BranchingFactor where
-  defaultValue = BranchingFactor Nothing
-  parseValue s = BranchingFactor . Just <$> safeRead s
-  optionName = Tagged "branching-factor"
-  optionHelp = Tagged "Number of alternative schedules explored per race reversal."
-
-withPrintTraceOption :: (PrintTrace -> TestTree) -> TestTree
-withPrintTraceOption = askOption
-
-newtype PrintTrace
-  = PrintTrace Bool
-  deriving (Eq, Ord, Show)
-
-instance IsOption PrintTrace where
-  defaultValue = PrintTrace False
-  optionName = Tagged "print-trace"
-  parseValue = fmap PrintTrace . safeReadBool
-  optionHelp = Tagged "Print the execution trace. This is generally only useful for a specific test replay."
-  optionCLParser = mkFlagCLParser mempty (PrintTrace True)

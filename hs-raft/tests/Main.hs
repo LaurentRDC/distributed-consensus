@@ -3,7 +3,8 @@
 module Main (main) where
 
 import Data.Proxy (Proxy (..))
-import Test.Network.Consensus.Raft (BranchingFactor, NumRacyTests, PrintTrace, ScheduleBound, tests)
+import Test.Network.Consensus.Raft (tests)
+import Test.Network.Consensus.Raft.Options (BranchingFactor, NumRacyTests, PrintTrace, ScheduleBound)
 import Test.Tasty (defaultIngredients, defaultMainWithIngredients, includingOptions, testGroup)
 import Test.Tasty.Options (OptionDescription (..))
 
