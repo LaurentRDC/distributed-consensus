@@ -38,26 +38,42 @@ newtype RelativeLogIndex = RelativeLogIndex LogIndex
   deriving newtype (Real, Enum, Num, Integral)
 
 data Log node state entry = Log
-  { lEntries :: !(Seq entry),
-    lSnapshotMetadata :: !SnapshotMetadata
+  { lEntries :: !(Seq (Term, entry)),
+    lSnapshotMetadata :: !SnapshotMetadata,
+    -- Metadata stored for performance reasons
+    lLastIndex :: !LogIndex,
+    lLastTerm :: !Term
   }
 
 relativeIndex :: Log node state entry -> LogIndex -> RelativeLogIndex
-relativeIndex (Log _ ((SnapshotMetadata !lastIx _))) !ix = RelativeLogIndex $ ix - lastIx
+relativeIndex (Log _ ((SnapshotMetadata !lastIx _)) _ _) !ix = RelativeLogIndex $ ix - lastIx
+{-# INLINEABLE relativeIndex #-}
 
 absoluteIndex :: Log node state entry -> RelativeLogIndex -> LogIndex
-absoluteIndex (Log _ ((SnapshotMetadata !lastIx _))) (RelativeLogIndex ix) = ix + lastIx
+absoluteIndex (Log _ ((SnapshotMetadata !lastIx _)) _ _) (RelativeLogIndex !ix) = ix + lastIx
+{-# INLINEABLE absoluteIndex #-}
 
-append :: Log node state entry -> entry -> Log node state entry
-Log es sn `append` newEntry = Log (es Seq.|> newEntry) sn
+append :: Log node state entry -> (Term, entry) -> Log node state entry
+Log es sn lst _ `append` (!term, !newEntry) = Log (es Seq.|> (term, newEntry)) sn (succ lst) term
+{-# INLINEABLE append #-}
 
-extend :: Log node state entry -> Seq entry -> Log node state entry
-Log es sn `extend` newEntries = Log (es Seq.>< newEntries) sn
+extend :: Log node state entry -> Seq (Term, entry) -> Log node state entry
+Log es sn lst lt `extend` !newEntries =
+  Log
+    (es Seq.>< newEntries)
+    sn
+    (lst + fromIntegral (Seq.length newEntries))
+    newLastTerm
+  where
+    newLastTerm = case Seq.viewr newEntries of
+      Seq.EmptyR -> lt
+      (_ Seq.:> (t, _)) -> t
+{-# INLINEABLE extend #-}
 
 keepEntriesUpTo :: Log node state entry -> LogIndex -> Log node state entry
-log'@(Log es sn@((SnapshotMetadata lastIx _))) `keepEntriesUpTo` ix
-  | ix <= lastIx = Log Seq.empty sn
-  | otherwise = Log (Seq.take (fromIntegral $ relativeIndex log' ix) es) sn
+log'@(Log es sn@((SnapshotMetadata lastIx _)) lst lt) `keepEntriesUpTo` ix
+  | ix <= lastIx = Log Seq.empty sn lst lt
+  | otherwise = Log (Seq.take (fromIntegral $ relativeIndex log' ix) es) sn lst lt
 
 data Lookup a
   = LogIndexInSnapshot SnapshotMetadata
@@ -65,28 +81,32 @@ data Lookup a
   | NotFound
   deriving (Functor)
 
-(!?) :: Log node state entry -> LogIndex -> Lookup entry
-(!?) log'@(Log es meta@(SnapshotMetadata lst _)) ix
+(!?) :: Log node state entry -> LogIndex -> Lookup (Term, entry)
+(!?) log'@(Log es meta@(SnapshotMetadata lst _) _ _) ix
   | ix <= lst = LogIndexInSnapshot meta
   | otherwise =
       maybe NotFound Found $
         es Seq.!? fromIntegral (relativeIndex log' ix)
 
-logEntries :: Log node state entry -> Seq entry
+logEntries :: Log node state entry -> Seq (Term, entry)
 logEntries = lEntries
 
 newLog :: Log node state entry
-newLog = Log mempty (SnapshotMetadata 0 0)
+newLog = Log mempty (SnapshotMetadata 0 0) 0 0
 
 lastLogIndex :: Log node state entry -> LogIndex
-lastLogIndex (Log entries ((SnapshotMetadata lastSnapshotIndex _))) =
-  lastSnapshotIndex + fromIntegral (Seq.length entries)
+lastLogIndex = lLastIndex
+{-# INLINE lastLogIndex #-}
 
-lastLogInfo :: Log node state (Term, entry) -> (LogIndex, Term)
-lastLogInfo (Log Seq.Empty (SnapshotMetadata ix t)) = (ix, t)
-lastLogInfo log'@(Log (_ Seq.:|> (lastEntryTerm, _)) _) = (lastLogIndex log', lastEntryTerm)
+lastLogInfo :: Log node state entry -> (LogIndex, Term)
+lastLogInfo (Log _ _ lix lt) = (lix, lt)
+{-# INLINE lastLogInfo #-}
 
 applySnapshot :: SnapshotMetadata -> Log node state entry -> Log node state entry
 applySnapshot newSnapshot@((SnapshotMetadata absoluteLastIndex _)) log' =
   let relativeLastIndex = relativeIndex log' absoluteLastIndex
-   in Log (Seq.drop (fromIntegral relativeLastIndex) (lEntries log')) newSnapshot
+   in Log
+        (Seq.drop (fromIntegral relativeLastIndex) (lEntries log'))
+        newSnapshot
+        (lLastIndex log')
+        (lLastTerm log')
