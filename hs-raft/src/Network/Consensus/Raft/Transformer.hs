@@ -31,6 +31,7 @@ module Network.Consensus.Raft.Transformer
     applySnapshot,
     currentSnapshot,
     appendLogEntries,
+    restoreState,
 
     -- ** Roles
     becomeFollower,
@@ -441,6 +442,15 @@ appendLogEntries entries = do
   -- In a single-node cluster, we would already have
   -- quorum to update our commit index
   applyLogEntries
+
+restoreState :: (Monad m) => RaftT entry node state result m ()
+restoreState = do
+  spec <- view specification
+  s <- self
+
+  lift ((spec ^. readTerm) s) >>= assign term
+  lift ((spec ^. readVotedFor) s) >>= assign votedFor
+  lift ((spec ^. readSnapshot) s) >>= traverse_ applySnapshot
 
 becomeLeader ::
   ( Ord node,

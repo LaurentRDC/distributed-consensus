@@ -72,6 +72,7 @@ import Network.Consensus.Raft.Transformer
     receiveRPCResult,
     resetElectionTimer,
     resetHeartBeatTimer,
+    restoreState,
     role,
     self,
     sendAdminResponse,
@@ -118,6 +119,8 @@ server = do
   -- we perform some initialization here.
   ps <- peers
   nextIndex .= Map.fromSet (const 0) ps
+
+  restoreState
 
   -- NonMembers don't participate in elections, but also don't hold elections
   -- for themselves. This prevents a NonMember from electing itself as the leader

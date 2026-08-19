@@ -25,7 +25,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
-import Network.Consensus.Raft (Config (..), Microseconds, RPC, RPCResult, RaftSpec (..), runRaftT)
+import Network.Consensus.Raft (Config (..), Microseconds, RPC, RPCResult, RaftSpec (..), runRaftServer)
 import qualified Network.Consensus.Raft as Raft
 import Network.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Network.Consensus.Raft.Client
@@ -90,12 +90,11 @@ startCluster = do
     runServers :: Harness -> IO ()
     runServers harness =
       forConcurrently_ (IntMap.elems harness.clusterServers) $ \server ->
-        runRaftT
+        runRaftServer
           server.sConfig
           (Raft.InCluster $ Set.fromList (map fromIntegral $ IntMap.keys harness.clusterServers))
           mempty
           server.sSpec
-          Raft.server
 
 stopCluster :: Cluster -> IO ()
 stopCluster = runShutDown

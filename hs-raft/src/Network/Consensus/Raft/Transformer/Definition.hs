@@ -4,7 +4,7 @@ module Network.Consensus.Raft.Transformer.Definition
   ( runRaftT,
     RaftT,
     Config (..),
-    StartingState (..),
+    ClusterState (..),
     RaftEnv,
     specification,
     configuration,
@@ -44,7 +44,7 @@ type RaftT entry node state result m =
     (RaftState node entry state)
     m
 
-data StartingState node
+data ClusterState node
   = -- | Lone node, not in a cluster
     LoneNode
   | -- | Node in cluster. The cluster configuration can be empty,
@@ -57,7 +57,7 @@ runRaftT ::
     MonadMVar m
   ) =>
   Config node ->
-  StartingState node ->
+  ClusterState node ->
   state ->
   RaftSpec entry node state result m ->
   RaftT entry node state result m a ->
