@@ -53,7 +53,7 @@ import qualified Network.Consensus.Raft.Admin as Admin
 import Network.Consensus.Raft.Client (ClientRequest, ClientResponse, RaftClientSpec (..), RaftClientT, request, runRaftClientT)
 import Test.Network.Consensus.Raft.Options (PrintTrace (..), setNumRacyTests, withExplorationOptions, withPrintTraceOption)
 import Test.Network.Consensus.Raft.Properties (allProperties)
-import Test.Network.Consensus.Scenario (checkScenario)
+import Test.Network.Consensus.Raft.Scenario (checkScenario)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck
   ( Arbitrary (arbitrary),

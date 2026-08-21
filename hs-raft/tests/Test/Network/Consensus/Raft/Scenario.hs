@@ -1,17 +1,13 @@
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 
-module Test.Network.Consensus.Scenario
+module Test.Network.Consensus.Raft.Scenario
   ( Scenario,
     checkScenario,
     module Control.Monitor,
 
-    -- * Injecting faults
-    faultInjector,
-
     -- * Helpers
+    stateRestored,
     leaderElected,
     votedFor,
     commandReceived,
@@ -26,24 +22,33 @@ module Test.Network.Consensus.Scenario
     logEntryApplied,
     rpcReceived,
     rpcResultReceived,
+    crashed,
+    membershipSettled,
   )
 where
 
-import Control.Concurrent.Class.MonadMVar (MonadMVar, modifyMVarMasked_, newMVar, readMVar)
-import Control.Exception (Exception)
-import Control.Monad.Class.MonadAsync (MonadAsync, forConcurrently_, race_)
-import Control.Monad.Class.MonadFork (MonadFork, myThreadId, throwTo)
-import Control.Monad.Class.MonadThrow (MonadThrow)
-import Control.Monad.Class.MonadTimer (MonadDelay (..))
 import Control.Monad.IOSim (SimEvent, SimEventType (EventLog), SimResult, Trace, selectTraceEvents)
-import Control.Monitor
+import Control.Monitor (Monitor, Predicate, ppReasonsWithTrace, predicate, runMonitor)
 import Data.Dynamic (Typeable, fromDynamic)
+import Data.Set (Set)
 import qualified Data.Text as Text
-import Data.Word (Word64)
-import Network.Consensus.Raft (ClusterConfiguration, CommandResponse, Event (..), EventContext, LogIndex, RPC (..), RPCResult, RaftTrace (..), Request (..), RequestId, Term)
+import Network.Consensus.Raft
+  ( ClusterConfiguration (..),
+    CommandResponse,
+    Event (..),
+    EventContext,
+    Log,
+    LogEntry,
+    LogIndex,
+    RPC (..),
+    RPCResult,
+    RaftTrace (..),
+    Request (..),
+    RequestId,
+    Term,
+  )
 import Network.Consensus.Raft.Admin (AdminCommand (..))
-import System.Random.Stateful (mkStdGen64, uniformR, uniformShuffleList)
-import Test.Tasty.QuickCheck
+import Test.Tasty.QuickCheck (Property, counterexample)
 
 type Scenario entry result state node =
   Monitor (RaftTrace entry result state node) ()
@@ -70,48 +75,6 @@ checkScenario scenario trace' =
         -- because no events were emitted!
         (Right _) -> counterexample "No events emitted" (not (null evs))
 
-data TestFault = TestFault
-  deriving (Show)
-
-instance Exception TestFault
-
--- | Given a bunch of threads, inject crashes in said threads
--- TODO: exceptions thrown from this function don't appear to register, despite
--- inserting 'yield' basically everywhere...
-faultInjector ::
-  (MonadThrow m, MonadMVar m, MonadAsync m, MonadDelay m, MonadFork m) =>
-  -- | Run function, which will be executed in parallel
-  (a -> m ()) ->
-  [a] ->
-  -- | Probability of a crash in any thread, every 10ms
-  -- This number will be clamped to the [0, 1] range.
-  Double ->
-  Word64 ->
-  m ()
-faultInjector f initials faultProbability seed = do
-  threadIds <- newMVar []
-
-  let gen = mkStdGen64 seed
-  race_ (faultInjectorThread threadIds gen) $
-    forConcurrently_ initials $ \x -> do
-      tid <- myThreadId
-      modifyMVarMasked_ threadIds (pure . (tid :))
-      f x
-  where
-    faultProbabilityClamped = max (min 1 faultProbability) 0
-    faultInjectorThread threadIds gen = do
-      threadDelay 10_000
-      let (num, newGen) = uniformR @Double (0.0, 1.0) gen
-      if num > faultProbabilityClamped
-        then faultInjectorThread threadIds newGen
-        else do
-          threads <- readMVar threadIds
-          let (shuffled, newGen') = uniformShuffleList threads newGen
-          case shuffled of
-            [] -> pure ()
-            (tid : _) -> throwTo tid TestFault
-          faultInjectorThread threadIds newGen'
-
 raftTrace ::
   (Typeable entry, Typeable result, Typeable node, Typeable state) =>
   Trace (SimResult a) SimEvent -> [RaftTrace entry result node state]
@@ -121,6 +84,11 @@ raftTrace =
         EventLog dyn -> fromDynamic dyn
         _ -> Nothing -- internal io-sim event
     )
+
+stateRestored :: Predicate (RaftTrace entry result node state) (EventContext node, Maybe node, Log node (LogEntry node entry))
+stateRestored = predicate $ \case
+  StateRestored ctx mVote logEntries -> Just (ctx, mVote, logEntries)
+  _ -> Nothing
 
 leaderElected :: Predicate (RaftTrace entry result node state) (EventContext node)
 leaderElected = predicate $ \case
@@ -190,4 +158,16 @@ commitIndexIncreased = predicate $ \case
 logEntryApplied :: Predicate (RaftTrace entry result node state) (EventContext node, entry)
 logEntryApplied = predicate $ \case
   (LogEntryApplied ctx entry) -> Just (ctx, entry)
+  _ -> Nothing
+
+crashed :: Predicate (RaftTrace entry result node state) node
+crashed = predicate $ \case
+  Crashed node -> Just node
+  _ -> Nothing
+
+membershipSettled :: (Eq node) => (Set node -> Bool) -> node -> Predicate (RaftTrace entry result node state) ()
+membershipSettled wanted node = predicate $ \case
+  MembershipChangeApplied _ (Joint _ _) -> Just ()
+  MembershipChangeApplied _ (Simple cluster) | wanted cluster -> Just ()
+  MembershipChangeAlreadySettled _ node' | node' == node -> Just ()
   _ -> Nothing
