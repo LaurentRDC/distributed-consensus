@@ -58,40 +58,46 @@ allProperties =
 -- | Ensure that in each term where a leader is elected, no other leader
 -- is elected
 singleLeaderPerTermProperty :: Scenario entry result node state
-singleLeaderPerTermProperty = go <?> "Another leader elected for the same term"
+singleLeaderPerTermProperty = go mempty <?> "Another leader elected for the same term"
   where
-    anotherLeaderIn term = predicate $ \case
-      LeaderElected (EventContext t _) | t == term -> Just ()
-      _ -> Nothing
-
-    -- Whenever a leader is elected, there should not be another
-    -- leader during this term.
-    --
-    -- In order to allow the test to span multiple terms, we need to recursively
-    -- apply the expectation using 'both'
-    go = void $ whenever leaderElected $ \(EventContext term _) ->
-      both go (never (anotherLeaderIn term))
+    go seenTerms =
+      step
+        ()
+        ( \case
+            LeaderElected (EventContext term _) -> do
+              assert
+                "Expecting at most one leader per term"
+                (Set.notMember term seenTerms)
+              go (Set.insert term seenTerms)
+            _ -> go seenTerms
+        )
 
 -- | Ensure that a node casts at most one vote per term
 singleVoteCastPerTermProperty :: (Ord node) => Scenario entry result node state
 singleVoteCastPerTermProperty = go mempty <?> "More than one vote cast per term"
   where
     go votes =
-      void
-        ( whenever
-            votedFor
-            $ \(EventContext voterTerm voterNode, _, _) -> do
-              when (Set.member (voterTerm, voterNode) votes) $ fail "Node cast more than one vote in term"
-
+      step
+        ()
+        ( \case
+            VotedFor (EventContext voterTerm voterNode) _ _ -> do
+              assert
+                "Expecting a node to cast at most one vote per term"
+                (Set.notMember (voterTerm, voterNode) votes)
               go (Set.insert (voterTerm, voterNode) votes)
+            _ -> go votes
         )
 
 -- | Ensure that each node witnesses terms that increase monotonically
 monotonicallyIncreasingTermProperty :: (Ord node) => Scenario entry result node state
 monotonicallyIncreasingTermProperty = go mempty <?> "Term not increased monotonically"
   where
-    go latestKnownTerms = void $ do
-      whenever (predicate roleTerm) $ \(node, newTerm) -> do
+    go latestKnownTerms =
+      step
+        ()
+        ( \e -> case roleTerm e of
+            Nothing -> go latestKnownTerms
+            Just (node, newTerm) -> do
         case Map.lookup node latestKnownTerms of
           Nothing -> pure ()
           Just latestTerm ->
@@ -99,6 +105,7 @@ monotonicallyIncreasingTermProperty = go mempty <?> "Term not increased monotoni
               "Expecting terms to increase monotonically"
               (latestTerm <= newTerm)
         go (Map.insert node newTerm latestKnownTerms)
+        )
 
     roleTerm (LeaderElected (EventContext t n)) = Just (n, t)
     roleTerm (BecameCandidate (EventContext t n)) = Just (n, t)
