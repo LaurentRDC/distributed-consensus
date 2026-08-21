@@ -14,27 +14,35 @@ module Test.Network.Consensus.Raft.Properties
     indexRelationshipProperty,
     monotonicallyIncreasingLastAppliedIndexProperty,
     monotonicallyIncreasingCommitIndexProperty,
+    crashRecoveryProperty,
   )
 where
 
-import Control.Monad (unless, void, when)
+import Control.Monad (unless, void)
 import Control.Monitor
+  ( allOf,
+    assert,
+    eventually,
+    predicate,
+    step,
+    whenever,
+    (<?>),
+  )
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as Text
-import Network.Consensus.Raft (ClusterConfiguration (..), CommandResponse (..), EventContext (..), LogIndex, RaftTrace (..))
-import Test.Network.Consensus.Scenario
+import Network.Consensus.Raft (CommandResponse (..), EventContext (..), LogIndex, RaftTrace (..))
+import Test.Network.Consensus.Raft.Scenario
   ( Scenario,
-    clusterMembershipChangeApplied,
     clusterMembershipChangeCompleted,
     clusterMembershipChangeInitiated,
     commandReceived,
     commandResponded,
+    crashed,
     joinClusterCommandReceived,
-    joinedCluster,
-    leaderElected,
     leaveClusterCommandReceived,
-    votedFor,
+    membershipSettled,
+    stateRestored,
   )
 
 -- It's still not clear to me why, but without the explicit forall here,
@@ -52,7 +60,8 @@ allProperties =
         allAdminRequestToLeaveComplete,
         indexRelationshipProperty,
         monotonicallyIncreasingLastAppliedIndexProperty,
-        monotonicallyIncreasingCommitIndexProperty
+        monotonicallyIncreasingCommitIndexProperty,
+        crashRecoveryProperty
       ]
 
 -- | Ensure that in each term where a leader is elected, no other leader
@@ -98,13 +107,13 @@ monotonicallyIncreasingTermProperty = go mempty <?> "Term not increased monotoni
         ( \e -> case roleTerm e of
             Nothing -> go latestKnownTerms
             Just (node, newTerm) -> do
-        case Map.lookup node latestKnownTerms of
-          Nothing -> pure ()
-          Just latestTerm ->
-            assert
-              "Expecting terms to increase monotonically"
-              (latestTerm <= newTerm)
-        go (Map.insert node newTerm latestKnownTerms)
+              case Map.lookup node latestKnownTerms of
+                Nothing -> pure ()
+                Just latestTerm ->
+                  assert
+                    "Expecting terms to increase monotonically"
+                    (latestTerm <= newTerm)
+              go (Map.insert node newTerm latestKnownTerms)
         )
 
     roleTerm (LeaderElected (EventContext t n)) = Just (n, t)
@@ -129,6 +138,7 @@ monotonicallyIncreasingLastAppliedIndexProperty = go mempty <?> "Last applied in
                     (prevLastApplied <= lastApplied)
 
               go (Map.insert node lastApplied acc)
+            Crashed node -> go (Map.delete node acc)
             _ -> go acc
         )
 
@@ -149,6 +159,7 @@ monotonicallyIncreasingCommitIndexProperty = go mempty <?> "Commit index not inc
                     (prevCommitIndex <= commitIndex)
 
               go (Map.insert node commitIndex acc)
+            Crashed node -> go (Map.delete node acc)
             _ -> go acc
         )
 
@@ -175,15 +186,14 @@ allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration =
             predicate $ \_ -> unless (ctx == ctx') Nothing
         )
 
-allAdminRequestToJoinComplete :: (Eq node, Show node) => Scenario entry result node state
+allAdminRequestToJoinComplete :: (Ord node, Show node) => Scenario entry result node state
 allAdminRequestToJoinComplete =
   go <?> "A command to join a cluster did not result in new cluster membership"
   where
-    go = void $ whenever joinClusterCommandReceived $ \(EventContext term nodeJoining) ->
-      eventually
-        ( joinedCluster >>= \(EventContext term' nodeJoining') ->
-            predicate $ \_ -> unless (term == term' && nodeJoining == nodeJoining') Nothing
-        )
+    -- The authority on whether a node is in the cluster is the
+    -- leader that applies the new configuration, not the joining node
+    go = void $ whenever joinClusterCommandReceived $ \(EventContext _ nodeJoining) ->
+      eventually (membershipSettled (Set.member nodeJoining) nodeJoining)
         <?> "A command to "
         <> Text.show nodeJoining
         <> " to join a cluster did not result in new cluster membership"
@@ -201,11 +211,7 @@ allAdminRequestToLeaveComplete =
       -- Therefore, the true mark of whether a node has left a cluster is not from the point-of-view
       -- of that node, but from the point-of-view of the leader, that emits a
       -- 'MembershipChangeApplied'
-      eventually
-        ( clusterMembershipChangeApplied >>= \(_, clusterConf) -> predicate $ \_ -> case clusterConf of
-            Joint _ _ -> pure ()
-            Simple cluster -> unless (nodeLeaving `Set.notMember` cluster) Nothing
-        )
+      eventually (membershipSettled (Set.notMember nodeLeaving) nodeLeaving)
         <?> "A command to "
         <> Text.show nodeLeaving
         <> " to leave a cluster did not result in new cluster membership"
@@ -216,8 +222,8 @@ data NodeIndexes
       !LogIndex
       -- | Commit index
       !LogIndex
-      -- | Log length
-      !Int
+      -- | Last log index
+      !LogIndex
 
 -- | Ensures that the following relationship holds for each node individually:
 --
@@ -228,9 +234,9 @@ indexRelationshipProperty = go mempty <?> "index relationship did not hold"
     checkState node acc =
       case Map.lookup node acc of
         Nothing -> assert "Incomplete state" False
-        Just (MkNodeIndexes lastApplied committed logLength) -> do
+        Just (MkNodeIndexes lastApplied committed lastIndex) -> do
           assert "last_applied_index <= commit_index violated" (lastApplied <= committed)
-          assert "commit_index <= log_length violated" (committed <= fromIntegral logLength)
+          assert "commit_index <= last_index violated" (committed <= lastIndex)
     go acc =
       step
         ()
@@ -257,16 +263,26 @@ indexRelationshipProperty = go mempty <?> "index relationship did not hold"
                       acc
               checkState node newAcc
               go newAcc
-            LogEntryAppended (EventContext _ node) _ -> do
+            LastLogIndexChangedTo (EventContext _ node) lastLogIndex -> do
               let newAcc =
                     Map.alter
                       ( \case
-                          Nothing -> Just (MkNodeIndexes 0 0 1)
-                          Just (MkNodeIndexes x y z) -> Just (MkNodeIndexes x y (succ z))
+                          Nothing -> Just (MkNodeIndexes 0 0 lastLogIndex)
+                          Just (MkNodeIndexes x y _) -> Just (MkNodeIndexes x y lastLogIndex)
                       )
                       node
                       acc
               checkState node newAcc
               go newAcc
+            Crashed node -> go (Map.delete node acc)
             _ -> go acc
+        )
+
+crashRecoveryProperty :: (Eq node) => Scenario entry result node state
+crashRecoveryProperty = go <?> "Node did not restore state after crash"
+  where
+    go = void $ whenever crashed $ \node ->
+      eventually
+        ( stateRestored >>= \(EventContext _ node', _, _) -> predicate $ \_ ->
+            unless (node' == node) Nothing
         )

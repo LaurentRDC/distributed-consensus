@@ -3,16 +3,18 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 module Network.Consensus.Raft.Admin
   ( RaftAdminT,
     RaftAdminSpec (..),
-    runRaftAdminT,
+    withRaftAdminT,
 
     -- * Available commands
     joinCluster,
     leaveCluster,
+    getClusterConfiguration,
     shutDown,
 
     -- * Communications between admins and clusters
@@ -20,6 +22,7 @@ module Network.Consensus.Raft.Admin
     AdminResponse,
     AdminCommand (..),
     AdminCommandResult (..),
+    AdminError (..),
   )
 where
 
@@ -36,6 +39,7 @@ import Data.Text (Text)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
+import Network.Consensus.Raft.Domain (ClusterConfiguration)
 import Network.Consensus.Raft.Messaging (Request (..), Response (..))
 
 data AdminCommand node
@@ -43,6 +47,8 @@ data AdminCommand node
       -- | Target node
       node
   | LeaveCluster
+  | -- | Ask a node for the cluster configuration it has committed.
+    GetClusterConfiguration
   | ShutDown
   deriving (Eq, Show, Ord, Generic)
 
@@ -58,6 +64,7 @@ data AdminCommandResult node
   = JoinInitiated
   | LeaveInitiated
   | ShutdownInitiated
+  | ClusterConfigurationIs !(ClusterConfiguration node)
   | -- | The command could not be completed.
     AdminFailure !Text
   | -- | The contacted node isn't the leader. The 'Maybe' contains the
@@ -90,14 +97,17 @@ data RaftAdminSpec node m = MkRaftAdminSpec
       m (Either Text (AdminResponse node))
   }
 
-runRaftAdminT ::
+-- | Open an admin session, and run an action with a runner for that session.
+--
+-- It is safe to use the runner from several threads concurrently.
+withRaftAdminT ::
   (MonadAsync m) =>
-  RaftAdminT node m a ->
   -- | self identification
   node ->
   RaftAdminSpec node m ->
-  m a
-runRaftAdminT (MkRaftAdminT f) self spec = do
+  ((forall a. RaftAdminT node m a -> m a) -> m b) ->
+  m b
+withRaftAdminT self spec withSession = do
   nRId <- newTVarIO 0
   mbox <- newTVarIO mempty
 
@@ -114,7 +124,7 @@ runRaftAdminT (MkRaftAdminT f) self spec = do
             recvLoop
 
   withAsync recvLoop $ \_ ->
-    runReaderT f (MkRaftAdminEnv self spec nRId mbox)
+    withSession (\(MkRaftAdminT f) -> runReaderT f (MkRaftAdminEnv self spec nRId mbox))
 
 data RaftAdminEnv node m
   = MkRaftAdminEnv
@@ -194,6 +204,27 @@ leaveCluster contact = do
     >>= \case
       LeaveInitiated ->
         pure (Right ())
+      AdminFailure err ->
+        pure (Left (AdminFailed err))
+      NotLeader leader ->
+        pure (Left (AdminNotLeader leader))
+      _ ->
+        pure (Left UnexpectedAdminResponse)
+
+-- | Ask a node for the cluster configuration it has committed.
+--
+-- This is the only way for an admin to tell whether a 'joinCluster' or
+-- 'leaveCluster' has actually taken effect.
+getClusterConfiguration ::
+  (MonadSTM m) =>
+  -- | Node to ask.
+  node ->
+  RaftAdminT node m (Either (AdminError node) (ClusterConfiguration node))
+getClusterConfiguration contact = do
+  sendAdminCommand contact GetClusterConfiguration
+    >>= \case
+      ClusterConfigurationIs conf ->
+        pure (Right conf)
       AdminFailure err ->
         pure (Left (AdminFailed err))
       NotLeader leader ->

@@ -7,6 +7,7 @@ module Network.Consensus.Raft.Domain
     InternalRequestId,
     RequestId,
     mkRequestId,
+    requestTerm,
     clientRequestId,
     Role (..),
     ClusterConfiguration (..),
@@ -37,21 +38,22 @@ newtype InternalRequestId = InternalRequestId Word64
   deriving stock (Generic, Eq, Ord, Show)
   deriving newtype (Real, Binary, Enum, Num, Integral)
 
--- | A 'RequestId' dentifies a request from a client,
--- uniquely for each leader.
+-- | A 'RequestId' identifies a request from a client, uniquely across the
+-- whole history of a cluster.
 --
--- In order to support multiple concurrent clients,
--- we mix the client-provided ID with a monotonic
--- internal ID
+-- In order to support multiple concurrent clients, we mix the client-provided
+-- ID with a monotonic internal ID. However, the monotonic internal ID is lost
+-- on crash, so we include the term as well.
 data RequestId = RequestId
-  { internalRequestId :: !InternalRequestId,
+  { requestTerm :: !Term,
+    internalRequestId :: !InternalRequestId,
     clientRequestId :: !ClientRequestId
   }
   deriving stock (Generic, Eq, Ord, Show)
 
 instance Binary RequestId
 
-mkRequestId :: InternalRequestId -> ClientRequestId -> RequestId
+mkRequestId :: Term -> InternalRequestId -> ClientRequestId -> RequestId
 mkRequestId = RequestId
 
 data Role

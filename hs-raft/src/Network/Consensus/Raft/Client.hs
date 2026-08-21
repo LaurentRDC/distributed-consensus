@@ -3,12 +3,13 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 module Network.Consensus.Raft.Client
   ( RaftClientT,
     RaftClientSpec (..),
-    runRaftClientT,
+    withRaftClientT,
     request,
 
     -- * Communications between clients and clusters
@@ -65,17 +66,27 @@ data RaftClientSpec entry node result m = MkRaftClientSpec
     receiveResponse :: m (ClientResponse node result)
   }
 
-runRaftClientT ::
+-- | Open a client session, and run an action with a runner for that session.
+--
+-- It is safe to use the runner from several threads concurrently.
+withRaftClientT ::
   (MonadAsync m) =>
-  RaftClientT entry node result m a ->
   -- | self identification
   node ->
   RaftClientSpec entry node result m ->
-  m a
-runRaftClientT (MkRaftClientT f) self spec = do
+  ((forall a. RaftClientT entry node result m a -> m a) -> m b) ->
+  m b
+withRaftClientT self spec withSession = do
   nRId <- newTVarIO 0
   mbox <- newTVarIO mempty
-  let recvLoop = do
+  let env =
+        MkRaftClientEnv
+          { node = self,
+            nextRequestId = nRId,
+            specification = spec,
+            mailbox = mbox
+          }
+      recvLoop = do
         receiveResponse spec >>= \resp -> do
           let reqId = responseRequestId resp
           atomically $ do
@@ -86,15 +97,7 @@ runRaftClientT (MkRaftClientT f) self spec = do
           recvLoop
 
   withAsync recvLoop $ \_ ->
-    runReaderT
-      f
-      ( MkRaftClientEnv
-          { node = self,
-            nextRequestId = nRId,
-            specification = spec,
-            mailbox = mbox
-          }
-      )
+    withSession (\(MkRaftClientT f) -> runReaderT f env)
 
 data RaftClientEnv entry node result m
   = MkRaftClientEnv

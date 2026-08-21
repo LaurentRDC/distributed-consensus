@@ -17,8 +17,10 @@ where
 
 import Control.Concurrent.Class.MonadMVar (MVar, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.Class.MonadSTM (MonadSTM, TQueue, TVar, atomically, flushTQueue, newTQueueIO, newTVarIO, readTQueue, readTVar, readTVarIO, retry, writeTQueue, writeTVar)
-import Control.Monad (replicateM, when, (>=>))
-import Control.Monad.Class.MonadAsync (concurrently_, forConcurrently_, race_, waitCatch, withAsync)
+import Control.Exception (Exception)
+import Control.Monad (replicateM, when)
+import Control.Monad.Class.MonadAsync (async, asyncThreadId, concurrently_, forConcurrently_, race_, waitCatch, withAsync)
+import Control.Monad.Class.MonadFork (ThreadId, throwTo)
 import Control.Monad.Class.MonadTest (exploreRaces)
 import Control.Monad.Class.MonadTimer (threadDelay, timeout)
 import Control.Monad.IOSim (ExplorationOptions, IOSim, exploreSimTrace, traceM)
@@ -26,7 +28,7 @@ import Data.Functor ((<&>))
 import Data.IntMap (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.IntSet as IntSet
-import Data.List (genericLength)
+import Data.List (genericLength, zip4)
 import Data.List.NonEmpty (NonEmpty, nonEmpty)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -37,12 +39,16 @@ import qualified Data.Text.Lazy as Text
 import Data.Word (Word64)
 import qualified Debug.Trace as Debug
 import Network.Consensus.Raft
-  ( Config (..),
+  ( ClusterConfiguration (..),
+    ClusterState,
+    Config (..),
+    LogEntry,
     LogIndex,
     Microseconds,
     RPC,
     RPCResult,
     RaftSpec (..),
+    RaftTrace (..),
     Snapshot,
     Term,
     runRaftServer,
@@ -50,7 +56,8 @@ import Network.Consensus.Raft
 import qualified Network.Consensus.Raft as Raft
 import Network.Consensus.Raft.Admin
 import qualified Network.Consensus.Raft.Admin as Admin
-import Network.Consensus.Raft.Client (ClientRequest, ClientResponse, RaftClientSpec (..), RaftClientT, request, runRaftClientT)
+import Network.Consensus.Raft.Client (ClientRequest, ClientResponse, RaftClientSpec (..), RaftClientT, request, withRaftClientT)
+import System.Random (mkStdGen64, uniformR)
 import Test.Network.Consensus.Raft.Options (PrintTrace (..), setNumRacyTests, withExplorationOptions, withPrintTraceOption)
 import Test.Network.Consensus.Raft.Properties (allProperties)
 import Test.Network.Consensus.Raft.Scenario (checkScenario)
@@ -78,36 +85,46 @@ tests =
     "Raft"
     [ testGroup
         "Property tests"
-        [ testClusterWithoutRaces,
-          testClusterWithRaces
+        [ testGroup
+            "No fault injection"
+            [ testClusterWithoutRaces NoFaultInjection,
+              testClusterWithRaces NoFaultInjection
+            ],
+          testGroup
+            "With fault injection"
+            [ testClusterWithoutRaces FaultInjection,
+              testClusterWithRaces FaultInjection
+            ]
         ]
     ]
 
-testClusterWithoutRaces :: TestTree
-testClusterWithoutRaces =
+testClusterWithoutRaces :: FaultInjection -> TestTree
+testClusterWithoutRaces faultInjection =
   withPrintTraceOption $ \printOrNot ->
     testProperty "Cluster properties without schedule exploration" $
       propClusterWith
         printOrNot
         id -- exploration options don't apply to non-racy simulations
+        faultInjection
         (pure ())
 
-testClusterWithRaces :: TestTree
-testClusterWithRaces =
+testClusterWithRaces :: FaultInjection -> TestTree
+testClusterWithRaces faultInjection =
   withPrintTraceOption $ \printOrNote ->
     setNumRacyTests $
       withExplorationOptions $ \updateExplorationOptions ->
         testProperty "Cluster properties with schedule exploration" $
-          propClusterWith printOrNote updateExplorationOptions exploreRaces
+          propClusterWith printOrNote updateExplorationOptions faultInjection exploreRaces
 
 propClusterWith ::
   PrintTrace ->
   (ExplorationOptions -> ExplorationOptions) ->
+  FaultInjection ->
   (forall s. IOSim s ()) ->
   Property
-propClusterWith printTrace updateExplorationOptions raceOrNot =
+propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
   property $
-    forAll genScenarioInputs $
+    forAll (genScenarioInputs faultInjection) $
       \scenarioInputs ->
         counterexample
           (Text.unpack $ pShow scenarioInputs)
@@ -129,7 +146,7 @@ propClusterWith printTrace updateExplorationOptions raceOrNot =
 
       -- In order to detect infinite loops, especially in CI,
       -- we use a *very generous* scenario timeout.
-      let timeStep = max 10_000 scenarioInputs.electionTimeoutUpperBound
+      let timeStep = max clientRetryTick scenarioInputs.electionTimeoutUpperBound
           scenarioTimeUpperBound =
             10 * timeStep -- Baseline
             -- To ensure all lone nodes have time to join, and then leave
@@ -138,6 +155,10 @@ propClusterWith printTrace updateExplorationOptions raceOrNot =
               -- To ensure all client requests have time to be served
               + 3
                 * genericLength scenarioInputs.commands
+                * timeStep
+              -- To ensure membership changes have time to land
+              + 3
+                * 6 -- 6 attempts
                 * timeStep
 
       race_
@@ -153,89 +174,155 @@ propClusterWith printTrace updateExplorationOptions raceOrNot =
             -- conditions
             raceOrNot
 
-            -- Run servers until the clients are done interacting
-            withAsync (runServers harness) $ \_ -> do
-              runClient
-                (runClientAction harness)
-                -- In principle, there is no upper bound on how long a
-                -- client can wait to receive a message. I'm putting a generous
-                -- bound here because I have seen situations where the client never
-                -- receives a reply (due to a bug)
-                (10 * scenarioInputs.electionTimeoutUpperBound)
-                mempty -- initial state
-                scenarioInputs.commands
+            withRaftAdminT harness.hAdminNode harness.hAdminSpec $ \runAdminAction ->
+              -- Run servers until the clients are done interacting
+              withAsync (runServers harness runAdminAction) $ \_ -> do
+                -- Likewise, one client session for the whole command sequence,
+                -- so that request IDs are unique across commands.
+                withRaftClientT harness.hClientNode harness.hClientSpec $ \runClientAction ->
+                  runClient
+                    runClientAction
+                    -- In principle, there is no upper bound on how long a
+                    -- client can wait to receive a message. I'm putting a generous
+                    -- bound here because I have seen situations where the client never
+                    -- receives a reply (due to a bug)
+                    (10 * scenarioInputs.electionTimeoutUpperBound)
+                    (clientRetryBudget scenarioInputs)
+                    mempty -- initial state
+                    scenarioInputs.commands
 
-              -- We give an opportunity to all lone servers to leave the cluster
-              -- properly before we shut everyone down.
-              --
-              -- This makes it easier to specify properties
-              forConcurrently_ harness.loneServers $ \(server, isDone, _, _) -> do
-                takeMVar isDone
-                runAdminAction harness (Admin.shutDown server.sConfig.nodeId)
-              forConcurrently_ harness.clusterServers $ \server ->
-                runAdminAction harness (Admin.shutDown server.sConfig.nodeId)
+                -- We give an opportunity to all lone servers to leave the cluster
+                -- properly before we shut everyone down.
+                let shutDownNode node =
+                      let tryShutDown :: Int -> IOSim s ()
+                          tryShutDown 0 = pure ()
+                          tryShutDown attemptsLeft =
+                            timeout
+                              (fromIntegral scenarioInputs.electionTimeoutUpperBound)
+                              (runAdminAction (Admin.shutDown node))
+                              >>= maybe (tryShutDown (attemptsLeft - 1)) (const (pure ()))
+                       in tryShutDown 3
+
+                forConcurrently_ harness.loneServers $ \(server, isDone, _, _) -> do
+                  takeMVar isDone
+                  shutDownNode server.sConfig.nodeId
+                forConcurrently_ harness.clusterServers $ \server ->
+                  shutDownNode server.sConfig.nodeId
         )
-    runServers :: Harness s -> IOSim s ()
-    runServers harness =
+    runServers ::
+      Harness s ->
+      (forall a. RaftAdminT Node (IOSim s) a -> IOSim s a) ->
+      IOSim s ()
+    runServers harness runAdminAction =
       concurrently_
         -- Cluster nodes
         ( forConcurrently_ (IntMap.elems harness.clusterServers) $ \server ->
-            supervise $
-              runRaftServer
-                server.sConfig
-                (Raft.InCluster $ Set.fromList (map fromIntegral $ IntMap.keys harness.clusterServers))
-                mempty
-                server.sSpec
+            runServerWithFaults
+              server
+              (Raft.InCluster $ Set.fromList (map fromIntegral $ IntMap.keys harness.clusterServers))
         )
         -- Lone nodes
         ( forConcurrently_ (IntMap.elems harness.loneServers) $ \(server, isDone, waitToJoin, waitToLeave) ->
             concurrently_
-              ( threadDelay (fromIntegral waitToJoin)
-                  >> runAdminAction
-                    harness
-                    ( Admin.joinCluster
-                        server.sConfig.nodeId
-                        ( fromIntegral $
-                            fst $
-                              fromJust $
-                                IntSet.minView (IntMap.keysSet harness.clusterServers)
-                        )
-                    )
-                  >> threadDelay (fromIntegral waitToLeave)
-                  >> runAdminAction
-                    harness
-                    (Admin.leaveCluster server.sConfig.nodeId)
-                  -- We give some time for nodes to actually leave.
+              ( do
+                  let node = server.sConfig.nodeId
+                      -- A node that stayed in the cluster, so we have somebody
+                      -- to ask about the committed configuration. Asking the
+                      -- node that is leaving would never work: it never learns
+                      -- that it is out.
+                      contact =
+                        fromIntegral $
+                          fst $
+                            fromJust $
+                              IntSet.minView (IntMap.keysSet harness.clusterServers)
+                      betweenAttempts = snd server.sConfig.electionTimeoutRange
+                      requestTimeout = 3 * server.sConfig.heartBeatTimeout
 
-                  >> threadDelay 100_000
-                  >> putMVar isDone ()
+                  threadDelay (fromIntegral waitToJoin)
+                  untilJoined runAdminAction contact requestTimeout betweenAttempts node $
+                    Admin.joinCluster node contact
+
+                  threadDelay (fromIntegral waitToLeave)
+                  untilLeft runAdminAction contact requestTimeout betweenAttempts node $
+                    Admin.leaveCluster node
+
+                  putMVar isDone ()
               )
-              ( supervise $
-                  runRaftServer
-                    server.sConfig
-                    Raft.LoneNode
-                    mempty
-                    server.sSpec
-              )
+              (runServerWithFaults server Raft.LoneNode)
         )
 
     runClient ::
       (forall a. RaftClientT Command Node Result (IOSim s) a -> IOSim s a) ->
+      -- \| Single request timeout
+      Microseconds ->
+      -- \| Timeout for retries
       Microseconds ->
       State ->
       [Command] ->
       IOSim s ()
-    runClient _ _ _ [] = pure ()
-    runClient runRequest maxTime state (command : rest) = do
-      threadDelay 10_000
-      let (newState, expectedResults) = step state command
-      timeout (fromIntegral maxTime) (runRequest (request 0 command)) >>= \case
-        Nothing -> fail $ "Client request timed out after " <> show (toInteger maxTime) <> " microseconds"
-        -- Command needs to be re-tried
-        Just (Left _) -> runClient runRequest maxTime state (command : rest)
-        Just (Right (_leaderId, actualResults)) -> do
-          when (actualResults /= expectedResults) (fail "Unexpected state")
-          runClient runRequest maxTime newState rest
+    runClient runRequest maxTime retryBudget = go
+      where
+        go _ [] = pure ()
+        go state (command : rest) = attempt retryBudget
+          where
+            (newState, expectedResults) = step state command
+
+            attempt remaining = do
+              threadDelay (fromIntegral clientRetryTick)
+              timeout (fromIntegral maxTime) (runRequest (request 0 command)) >>= \case
+                Nothing ->
+                  giveUp $
+                    "no response at all within "
+                      <> show (toInteger maxTime)
+                      <> " microseconds"
+                -- Command needs to be re-tried
+                Just (Left err)
+                  | remaining <= clientRetryTick ->
+                      giveUp $
+                        "retried for "
+                          <> show (toInteger retryBudget)
+                          <> " microseconds, last response was "
+                          <> show err
+                  | otherwise -> attempt (remaining - clientRetryTick)
+                Just (Right (_leaderId, actualResults)) -> do
+                  when
+                    (actualResults /= expectedResults)
+                    ( fail $
+                        "Unexpected state: following command "
+                          <> show command
+                          <> ", expecting "
+                          <> show expectedResults
+                          <> " but got "
+                          <> show actualResults
+                    )
+                  go newState rest
+              where
+                giveUp why =
+                  case faultInjection of
+                    -- In a real Raft cluster (i.e. subject to faults), there's no guarantee of liveness.
+                    -- That's the price to pay for strong consistency.
+                    --
+                    -- This means we can be stuck in a situation where a cluster is so faulty, that it
+                    -- literally cannot serve any requests -- think of an election + crash loop. Thus,
+                    -- giving up in this context means letting go.
+                    --
+                    -- A Raft cluster that is NOT subject to faults has no excuse for not eventually
+                    -- service client requests, hence the use of 'fail'
+                    FaultInjection -> pure ()
+                    NoFaultInjection ->
+                      fail $
+                        "Client could not get "
+                          <> show command
+                          <> " served, and no node in this scenario can crash: "
+                          <> why
+
+-- | Whether we expect the cluster to always respond, or not.
+--
+-- In general, with faults, Raft clusters are not expected to be live.
+-- However, if the fault injector is turned off, we DO expect an answer!
+data FaultInjection
+  = NoFaultInjection
+  | FaultInjection
 
 data ScenarioInputs
   = ScenarioInputs
@@ -243,6 +330,7 @@ data ScenarioInputs
     electionTimeoutLowerBound :: Microseconds,
     electionTimeoutUpperBound :: Microseconds,
     seeds :: [Word64],
+    faultProbabilities :: [Double],
     numInitialClusterNodes :: Int,
     numInitialLoneNodes :: Int,
     loneNodesWait :: [(Microseconds, Microseconds)],
@@ -250,22 +338,25 @@ data ScenarioInputs
   }
   deriving (Eq, Show)
 
-genScenarioInputs :: Gen ScenarioInputs
-genScenarioInputs = do
+genScenarioInputs :: FaultInjection -> Gen ScenarioInputs
+genScenarioInputs faultInjection = do
   clusterSize <- elements [1 .. 5]
   numLoneNodes <- elements [0 .. 2]
   ss <- vectorOf (clusterSize + numLoneNodes) (chooseBoundedIntegral (0, 1_000_000))
-  hb <- chooseBoundedIntegral (1_000, 200_000)
+  hb <- chooseBoundedIntegral (clientRetryTick, 200_000)
   -- Making the lower election timeout possibly shorter than the heartbeat timeout
   -- allows to have terms with no leaders elected
   etolb <- chooseBoundedIntegral (round $ (0.9 :: Double) * fromIntegral hb, hb * 10)
   etoub <- chooseBoundedIntegral (etolb, 2 * etolb)
+  faultProb <- case faultInjection of
+    FaultInjection -> vectorOf (clusterSize + numLoneNodes) (elements [0.0, 0.001, 0.01])
+    NoFaultInjection -> vectorOf (clusterSize + numLoneNodes) (pure 0)
   loneWaits <-
     vectorOf
       numLoneNodes
       ( (,)
-          <$> chooseBoundedIntegral (etoub, 10 * etoub)
-          <*> chooseBoundedIntegral (etoub, 10 * etoub)
+          <$> chooseBoundedIntegral (etoub, 3 * etoub)
+          <*> chooseBoundedIntegral (etoub, 3 * etoub)
       )
 
   cmds <- flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 30)
@@ -275,25 +366,134 @@ genScenarioInputs = do
         electionTimeoutLowerBound = etolb,
         electionTimeoutUpperBound = etoub,
         seeds = ss,
+        faultProbabilities = faultProb,
         numInitialClusterNodes = clusterSize,
         numInitialLoneNodes = numLoneNodes,
         loneNodesWait = loneWaits,
         commands = cmds
       }
 
--- | Take the given process, and run it in a separate thread.
---
--- If the process exits due to an exception, restart it; otherwise,
--- let it end.
-supervise :: IOSim s () -> IOSim s ()
-supervise f =
-  withAsync f (waitCatch >=> either (const (supervise f)) pure)
+data TestFault = TestFault deriving (Show)
+
+instance Exception TestFault
 
 data Server s
   = MkServer
   { sConfig :: Config Node,
-    sSpec :: RaftSpec Command Node State Result (IOSim s)
+    sSpec :: RaftSpec Command Node State Result (IOSim s),
+    sFaultInjector :: TVar (IOSim s) (Maybe (ThreadId (IOSim s))) -> IOSim s ()
   }
+
+runServerWithFaults :: Server s -> ClusterState Node -> IOSim s ()
+runServerWithFaults server clusterState = do
+  tidVar <- newTVarIO Nothing
+  concurrently_
+    (server.sFaultInjector tidVar)
+    ( supervisor tidVar $
+        runRaftServer
+          server.sConfig
+          clusterState
+          mempty
+          server.sSpec
+    )
+  where
+    supervisor tidVar workload = do
+      a <- async workload
+      atomically $ writeTVar tidVar (Just (asyncThreadId a))
+      r <- waitCatch a
+      atomically $ writeTVar tidVar Nothing
+      case r of
+        Left _ -> do
+          server.sSpec._tracer (Crashed server.sConfig.nodeId)
+          supervisor tidVar workload
+        Right () -> pure ()
+
+-- | The pause before each client attempt, and the granularity in which the
+-- retry budget below is spent.
+clientRetryTick :: Microseconds
+clientRetryTick = 10_000
+
+-- | How long the client keeps retrying one command before the scenario fails.
+clientRetryBudget :: ScenarioInputs -> Microseconds
+clientRetryBudget inputs = max 1_000_000 (3 * inputs.electionTimeoutUpperBound)
+
+data MembershipDirection
+  = Joining
+  | Leaving
+  deriving (Eq)
+
+untilJoined,
+  untilLeft ::
+    -- | Run an admin action
+    (forall a. RaftAdminT Node (IOSim s) a -> IOSim s a) ->
+    -- | Leader if you know it, or initial contact
+    Node ->
+    -- | How long to wait for one admin request to be answered.
+    Microseconds ->
+    -- | How long to pause between attempts.
+    Microseconds ->
+    -- | The node whose membership should change
+    Node ->
+    -- | The command that requests the change
+    RaftAdminT Node (IOSim s) r ->
+    IOSim s ()
+untilJoined = untilMembership Joining
+untilLeft = untilMembership Leaving
+
+untilMembership ::
+  forall s r.
+  MembershipDirection ->
+  -- | Run an admin action
+  (forall a. RaftAdminT Node (IOSim s) a -> IOSim s a) ->
+  -- | Leader if you know it, or initial contact
+  Node ->
+  -- | How long to wait for one admin request to be answered.
+  Microseconds ->
+  -- | How long to pause between attempts.
+  Microseconds ->
+  -- | The node whose membership should change
+  Node ->
+  -- | The command that requests the change
+  RaftAdminT Node (IOSim s) r ->
+  IOSim s ()
+untilMembership direction runAdminAction initialContact requestTimeout betweenAttempts node command =
+  go 4 initialContact
+  where
+    -- An admin action blocks until it gets a response, and the node being
+    -- asked may well be down, so every attempt needs a bound.
+    attempt :: forall a. RaftAdminT Node (IOSim s) a -> IOSim s (Maybe a)
+    attempt = timeout (fromIntegral requestTimeout) . runAdminAction
+
+    isDone = case direction of
+      Joining -> Set.member node
+      Leaving -> Set.notMember node
+
+    go :: Int -> Node -> IOSim s ()
+    go attemptsLeft contact
+      | attemptsLeft <= 0 = pure ()
+      | otherwise =
+          attempt (Admin.getClusterConfiguration contact) >>= \case
+            -- Settled: the configuration says what we wanted it to say.
+            Just (Right (Simple cluster))
+              | isDone cluster -> pure ()
+            -- A settled configuration that is not the one we want. This is the
+            -- only state in which asking for the change is the right move.
+            Just (Right (Simple _)) -> attempt command >> waitAndRetry contact
+            -- Only the leader answers a configuration read, so follow the
+            -- redirect. This still costs an attempt, so a pair of nodes that
+            -- disagree about who leads cannot keep us here forever.
+            Just (Left (AdminNotLeader (Just leader)))
+              | leader /= contact -> go (attemptsLeft - 1) leader
+            -- Either a change is already in flight (a 'Joint' configuration) or
+            -- nobody could tell us. Do not ask again on an unknown state: that
+            -- is how a request gets issued after the change has already landed,
+            -- and such a request has nothing left to happen for it. Wait and
+            -- re-read instead.
+            _ -> waitAndRetry contact
+      where
+        waitAndRetry c = do
+          threadDelay (fromIntegral betweenAttempts)
+          go (attemptsLeft - 1) c
 
 type Mailbox s m = IntMap (TQueue (IOSim s) m)
 
@@ -307,17 +507,17 @@ data NetworkFabric s
     adminResponsesMailbox :: Mailbox s (AdminResponse Node)
   }
 
-data Resources s
+data Environment s
   = MkResources
   { networkFabric :: NetworkFabric s,
-    logPersistence :: IntMap (TVar (IOSim s) (Map LogIndex (Term, Command))),
+    logPersistence :: IntMap (TVar (IOSim s) (Map LogIndex (Term, LogEntry Node Command))),
     votePersistence :: IntMap (TVar (IOSim s) (Maybe Node)),
     termPersistence :: IntMap (TVar (IOSim s) Term),
     snapshotPersistence :: IntMap (TVar (IOSim s) (Maybe (Snapshot Node State)))
   }
 
-newResources :: Set Node -> IOSim s (Resources s)
-newResources nodes =
+newEnvironment :: Set Node -> IOSim s (Environment s)
+newEnvironment nodes =
   MkResources
     <$> ( MkNetworkFabric
             <$> newMailbox
@@ -339,8 +539,8 @@ newResources nodes =
       IntMap.fromList
         <$> traverse (\n -> (fromIntegral n,) <$> newTVarIO def) (Set.toList nodes)
 
-mkServer :: (forall a. (Show a) => a -> a) -> Resources s -> Microseconds -> Microseconds -> Microseconds -> Word64 -> Node -> Server s
-mkServer debug resources hbto etolb etoub seed node =
+mkServer :: (forall a. (Show a) => a -> a) -> Environment s -> Microseconds -> Microseconds -> Microseconds -> Double -> Word64 -> Node -> Server s
+mkServer debug resources hbto etolb etoub faultProb seed node =
   MkServer
     { sConfig =
         MkConfig
@@ -372,16 +572,35 @@ mkServer debug resources hbto etolb etoub seed node =
             -- We debug-print events here, rather than in `checkScenario`,
             -- because `checkScenario` can fail and produce no trace.
             _tracer = traceM . debug
-          }
+          },
+      sFaultInjector = faultInjector faultProb seed
     }
+
+faultInjector ::
+  -- | Fault probability
+  Double ->
+  -- | Random seed
+  Word64 ->
+  TVar (IOSim s) (Maybe (ThreadId (IOSim s))) ->
+  IOSim s ()
+faultInjector faultProb seed tidVar = go (mkStdGen64 seed)
+  where
+    go gen = do
+      threadDelay 10_000
+      let (failProb, nextGen) = uniformR @Double (0, 1) gen
+      tid <- atomically $ readTVar tidVar >>= maybe retry pure
+      when (failProb <= faultProb) (throwTo tid TestFault)
+      go nextGen
 
 data Harness s
   = MkHarness
   { clusterServers :: IntMap (Server s),
     loneServers :: IntMap (Server s, MVar (IOSim s) (), Microseconds, Microseconds),
     -- TODO: have multiple concurrent clients
-    runClientAction :: forall a. RaftClientT Command Node Result (IOSim s) a -> IOSim s a,
-    runAdminAction :: forall a. RaftAdminT Node (IOSim s) a -> IOSim s a
+    hClientNode :: Node,
+    hClientSpec :: RaftClientSpec Command Node Result (IOSim s),
+    hAdminNode :: Node,
+    hAdminSpec :: RaftAdminSpec Node (IOSim s)
   }
 
 testHarness ::
@@ -391,9 +610,9 @@ testHarness ::
   IOSim s (Harness s)
 testHarness
   debug
-  (ScenarioInputs hb etlb etup s numClusterNodes numLoneNodes loneWaits _commands) = do
+  (ScenarioInputs hb etlb etup s faultProbs numClusterNodes numLoneNodes loneWaits _commands) = do
     resources <-
-      newResources $
+      newEnvironment $
         mconcat
           [ Set.fromList (fromIntegral <$> serverNodes),
             Set.fromList (fromIntegral <$> loneNodes),
@@ -401,23 +620,22 @@ testHarness
             Set.singleton adminNode
           ]
 
-    let mkServer' :: Word64 -> Node -> Server s
+    let mkServer' :: Double -> Word64 -> Node -> Server s
         mkServer' = mkServer debug resources hb etlb etup
-
     isDones <- replicateM numLoneNodes newEmptyMVar
 
     pure $
       MkHarness
         { clusterServers =
             IntMap.fromList $
-              map (\(serverSeed, n) -> (n, mkServer' serverSeed (fromIntegral n))) serverNodesWithSeeds,
+              map (\(faultProb, serverSeed, n) -> (n, mkServer' faultProb serverSeed (fromIntegral n))) serverNodesWithMeta,
           loneServers =
             IntMap.fromList $
               zipWith
                 ( curry
-                    ( \((serverSeed, (waitBeforeJoin, waitBeforeLeave), n), isDone) ->
+                    ( \((faultProb, serverSeed, (waitBeforeJoin, waitBeforeLeave), n), isDone) ->
                         ( n,
-                          ( mkServer' serverSeed (fromIntegral n),
+                          ( mkServer' faultProb serverSeed (fromIntegral n),
                             isDone,
                             waitBeforeJoin,
                             waitBeforeLeave
@@ -425,20 +643,22 @@ testHarness
                         )
                     )
                 )
-                loneNodesWithSeedsAndWaits
+                loneNodesWithMeta
                 isDones,
-          runClientAction = \action -> runRaftClientT action clientNode (clientSpec (networkFabric resources)),
-          runAdminAction = \action -> runRaftAdminT action adminNode (adminSpec (networkFabric resources))
+          hClientNode = clientNode,
+          hClientSpec = clientSpec (networkFabric resources),
+          hAdminNode = adminNode,
+          hAdminSpec = adminSpec (networkFabric resources)
         }
     where
       adminNode = -1
       clientNode = Node $ numClusterNodes + numLoneNodes + 1
 
       serverNodes = [0 .. numClusterNodes - 1]
-      serverNodesWithSeeds = zip (take numClusterNodes s) serverNodes
+      serverNodesWithMeta = zip3 (take numClusterNodes faultProbs) (take numClusterNodes s) serverNodes
 
-      loneNodes = [numClusterNodes .. numLoneNodes - 1]
-      loneNodesWithSeedsAndWaits = zip3 (drop numClusterNodes s) loneWaits loneNodes
+      loneNodes = [numClusterNodes .. numClusterNodes + numLoneNodes - 1]
+      loneNodesWithMeta = zip4 (drop numClusterNodes faultProbs) (drop numClusterNodes s) loneWaits loneNodes
 
       clientSpec network =
         MkRaftClientSpec
@@ -455,11 +675,11 @@ testHarness
 
 writeLogEntry ::
   (MonadSTM m) =>
-  IntMap (TVar m (Map LogIndex (Term, Command))) ->
+  IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) ->
   Node ->
   LogIndex ->
   Term ->
-  Command ->
+  LogEntry Node Command ->
   m ()
 writeLogEntry storage self logIndex term entry = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
@@ -467,10 +687,10 @@ writeLogEntry storage self logIndex term entry = case IntMap.lookup (fromIntegra
     log' <- readTVar var
     writeTVar var (Map.insert logIndex (term, entry) log')
 
-readLogEntry :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, Command))) -> Node -> LogIndex -> m (Maybe Command)
+readLogEntry :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) -> Node -> LogIndex -> m (Maybe (Term, LogEntry Node Command))
 readLogEntry storage self logIndex = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
-  Just var -> readTVarIO var <&> fmap snd . Map.lookup logIndex
+  Just var -> readTVarIO var <&> Map.lookup logIndex
 
 write :: (MonadSTM m) => IntMap (TVar m a) -> Node -> a -> m ()
 write storage self value = case IntMap.lookup (fromIntegral self) storage of

@@ -11,9 +11,10 @@ module Main (main) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, forConcurrently_)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.STM (TQueue, atomically, flushTQueue, newTQueueIO, readTQueue, retry, writeTQueue)
 import Control.DeepSeq (NFData)
-import Control.Monad (replicateM, (>=>))
+import Control.Monad (forever, replicateM, (>=>))
 import Data.Functor ((<&>))
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
@@ -33,7 +34,7 @@ import Network.Consensus.Raft.Client
     ClientResponse,
     RaftClientSpec (..),
     request,
-    runRaftClientT,
+    withRaftClientT,
   )
 import Test.Tasty (withResource)
 import Test.Tasty.Bench (bench, bgroup, defaultMain, nfIO)
@@ -74,17 +75,26 @@ data Cluster = Cluster
 startCluster :: IO Cluster
 startCluster = do
   harness <- benchHarness clusterScenario
-  tid <- async (runServers harness)
-  leader <- waitUntilLeaderElected harness
+  serversTid <- async (runServers harness)
+
+  runnerVar <- newEmptyMVar
+  sessionTid <-
+    async $
+      withClient harness $ \runClientRequest -> do
+        putMVar runnerVar runClientRequest
+        forever (threadDelay 1_000_000)
+  runClientRequest <- takeMVar runnerVar
+
+  leader <- waitUntilLeaderElected runClientRequest
   pure $
     Cluster
-      { runRequest = runClientRequest harness leader >=> either (fail . show) (pure . snd),
-        runShutDown = cancel tid
+      { runRequest = runClientRequest leader >=> either (fail . show) (pure . snd),
+        runShutDown = cancel sessionTid >> cancel serversTid
       }
   where
-    waitUntilLeaderElected harness =
-      runClientRequest harness 0 (Get 'a') >>= \case
-        Left _ -> threadDelay 10_000 >> waitUntilLeaderElected harness
+    waitUntilLeaderElected runClientRequest =
+      runClientRequest 0 (Get 'a') >>= \case
+        Left _ -> threadDelay 10_000 >> waitUntilLeaderElected runClientRequest
         Right (leader, _) -> pure leader
 
     runServers :: Harness -> IO ()
@@ -190,7 +200,12 @@ mkServer network hbto etolb etoub seed node =
 data Harness
   = MkHarness
   { clusterServers :: IntMap Server,
-    runClientRequest :: Node -> Command -> IO (Either Text (Node, Result))
+    -- | Open a client session and run an action with it. One session serves
+    -- the whole benchmark: see 'withRaftClientT'.
+    withClient ::
+      forall b.
+      ((Node -> Command -> IO (Either Text (Node, Result))) -> IO b) ->
+      IO b
   }
 
 benchHarness ::
@@ -214,11 +229,9 @@ benchHarness
         { clusterServers =
             IntMap.fromList $
               map (\(serverSeed, n) -> (n, mkServer' serverSeed (fromIntegral n))) serverNodesWithSeeds,
-          runClientRequest = \leader comm ->
-            runRaftClientT
-              (request leader comm)
-              clientNode
-              (clientSpec networkFabric)
+          withClient = \useClient ->
+            withRaftClientT clientNode (clientSpec networkFabric) $ \runSession ->
+              useClient (\leader comm -> runSession (request leader comm))
         }
     where
       adminNode = -1

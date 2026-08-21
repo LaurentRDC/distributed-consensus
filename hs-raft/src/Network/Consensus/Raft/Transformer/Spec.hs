@@ -232,27 +232,12 @@ instance (Show node) => Show (EventContext node) where
   show (EventContext term node) = "[Term=" <> show term <> " | node=" <> show node <> "]"
 
 data RaftTrace entry result node state
-  = LeaderElected (EventContext node)
-  | VotedFor
-      (EventContext node)
-      -- | Their term
-      Term
-      -- | Their node
-      node
-  | VoteRequestedBy
-      (EventContext node)
-      -- | Their term
-      Term
-      -- | Their node
-      node
-  | VoteGrantedFrom
-      (EventContext node)
-      -- | Their node
-      node
-  | VoteDeniedFrom
-      (EventContext node)
-      -- | Their node
-      node
+  = StateRestored (EventContext node) (Maybe node) (Log node (LogEntry node entry))
+  | LeaderElected (EventContext node)
+  | VotedFor (EventContext node) Term node
+  | VoteRequestedBy (EventContext node) Term node
+  | VoteGrantedFrom (EventContext node) node
+  | VoteDeniedFrom (EventContext node) node
   | BecameCandidate (EventContext node)
   | BecameFollower (EventContext node)
   | BecameNonMember (EventContext node)
@@ -272,17 +257,26 @@ data RaftTrace entry result node state
   | JoinedCluster (EventContext node)
   | LeftCluster (EventContext node)
   | CommitIndexIncreasedTo (EventContext node) LogIndex
-  | LogEntryAppended (EventContext node) (LogEntry node entry)
+  | LogEntryAppended (EventContext node) LogIndex (LogEntry node entry)
+  | LastLogIndexChangedTo (EventContext node) LogIndex
   | LogEntryApplied (EventContext node) entry
   | MembershipChangeApplied (EventContext node) (ClusterConfiguration node)
+  | -- | A leader was asked for a membership change that its committed
+    -- configuration already satisfies, so it did nothing.
+    MembershipChangeAlreadySettled (EventContext node) node
   | LastAppliedIndexIncreasedTo (EventContext node) LogIndex
   | SnapshotApplied (EventContext node) SnapshotMetadata
   | GracefulShutdown (EventContext node)
+  | -- | The following event is emitted by the fault injector
+    -- in deterministic simulation tests. Users should not rely
+    -- on tracing this event in production.
+    Crashed node
   deriving (Eq, Show)
 
 data RaftSpec entry node state result m = MkRaftSpec
-  { _readLogEntry :: node -> LogIndex -> m (Maybe entry),
-    _writeLogEntry :: node -> LogIndex -> Term -> entry -> m (),
+  { -- TODO: allow to read and write multiple log entries at once, for performance optimizations
+    _readLogEntry :: node -> LogIndex -> m (Maybe (Term, LogEntry node entry)),
+    _writeLogEntry :: node -> LogIndex -> Term -> LogEntry node entry -> m (),
     _readTerm :: node -> m Term,
     _writeTerm :: node -> Term -> m (),
     _readVotedFor :: node -> m (Maybe node),
@@ -317,7 +311,7 @@ data RaftState node entry state = MkRaftState
     _internalState :: !state,
     _votedFor :: !(Maybe node),
     _currentLeader :: !(Maybe node),
-    _commandLog :: !(Log node state (LogEntry node entry)),
+    _commandLog :: !(Log node (LogEntry node entry)),
     _commitIndex :: !LogIndex,
     _lastApplied :: !LogIndex,
     _nextIndex :: !(Map node LogIndex),

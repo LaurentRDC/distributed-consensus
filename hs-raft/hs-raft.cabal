@@ -45,7 +45,7 @@ library
     -- using io-classes
     build-depends:    base >= 4.18 && <4.23
                     , binary ^>=0.8
-                    , containers
+                    , containers >=0.7 && <0.9
                     , io-classes ^>=1.10
                     , microlens-platform ^>=0.4
                     , random ^>=1.3

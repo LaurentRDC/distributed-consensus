@@ -23,12 +23,15 @@ module Network.Consensus.Raft.Transformer
     sendHeartbeat,
     sendAppendEntriesTo,
     applyLogEntries,
+    applyCommittedEntries,
     nextElectionTimeout,
     updateTerm,
     trace,
     acceptClientRequests,
     persistSnapshot,
     applySnapshot,
+    adoptConfigurationFromLog,
+    isClusterMember,
     currentSnapshot,
     appendLogEntries,
     restoreState,
@@ -65,7 +68,7 @@ import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromJust, isJust)
-import Data.Sequence (ViewR (..))
+import Data.Sequence (ViewR (..), (|>))
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -167,9 +170,9 @@ sendHeartbeat =
   whenRole Leader $ do
     config <- view configuration
     thisTerm <- use term
-    lastLogIndex <- use lastApplied
+    lastLogIx <- use commandLog <&> Log.lastLogIndex
     theCommitIndex <- use commitIndex
-    let rpc = HeartBeat thisTerm config.nodeId lastLogIndex theCommitIndex
+    let rpc = HeartBeat thisTerm config.nodeId lastLogIx theCommitIndex
     peers >>= (`sendRPCConcurrently` rpc)
     view heartBeatTimer >>= lift . resetTimer config.heartBeatTimeout
 
@@ -216,7 +219,15 @@ sendAppendEntriesTo destination = do
         )
           >>= sendRPC destination . IS
 
-applyEntry :: (Ord node, MonadMVar m, MonadAsync m) => LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
+applyEntry ::
+  ( Ord node,
+    MonadMVar m,
+    MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadDelay m
+  ) =>
+  LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
 applyEntry (LogEntryCommand (Command reqId entry)) = do
   apply <- view (specification . applyLogEntry)
   (newState, result) <- use internalState <&> flip apply entry
@@ -225,15 +236,19 @@ applyEntry (LogEntryCommand (Command reqId entry)) = do
   internalState .= newState
   pure $ Just (MkCommandResponse result reqId)
 applyEntry (LogEntryMembershipChange clusterConf) = do
-  assign clusterConfiguration clusterConf
-  trace (`MembershipChangeApplied` clusterConf)
+  -- Cluster membership happens at append-time, not at apply-time
+  -- See 'adoptConfigurationFromLog'
 
   -- If we just committed to a joint membership configuration,
   -- then it's time to propose the move to the union
   case clusterConf of
-    Simple _ -> trace MembershipChangeCompleted $> Nothing
+    Simple cluster -> do
+      s <- self
+      whenRole Leader $ unless (s `Set.member` cluster) (becomeFollower Nothing)
+      trace MembershipChangeCompleted $> Nothing
     Joint _before after -> do
-      appendLogEntries (NonEmpty.singleton (LogEntryMembershipChange (Simple after)))
+      whenRole Leader $
+        appendLogEntries (NonEmpty.singleton (LogEntryMembershipChange (Simple after)))
       pure Nothing
 
 -- | Updates the commit index. Returns 'True' if some log entries can be applied,
@@ -295,57 +310,65 @@ updateCommitIndex = do
 
 -- | Update the commit index, and apply log entries if there are
 -- any log entries that /can/ be applied.
-applyLogEntries :: (Ord node, MonadMVar m, MonadAsync m) => RaftT entry node state result m ()
+applyLogEntries :: (Ord node, MonadMVar m, MonadAsync m, MonadMask m, MonadFork m, MonadDelay m) => RaftT entry node state result m ()
 applyLogEntries = do
   isTimeToCommit <- updateCommitIndex
-  when isTimeToCommit $ do
-    lastAppliedIndex <- use lastApplied
-    currentCommitIndex <- use commitIndex
-    unless (lastAppliedIndex == currentCommitIndex) $ do
-      entries <- use commandLog
-      let unAppliedEntries =
-            entries
-              & (`Log.keepEntriesUpTo` currentCommitIndex)
-              & logEntries
-              & Seq.drop (fromIntegral (Log.relativeIndex entries lastAppliedIndex))
-              & fmap snd
+  when isTimeToCommit applyCommittedEntries
 
-      results <-
-        mapM applyEntry unAppliedEntries
-          -- Membership change commands don't return a result
-          <&> fmap fromJust . Seq.filter isJust
+applyCommittedEntries :: (Ord node, MonadMVar m, MonadAsync m, MonadMask m, MonadFork m, MonadDelay m) => RaftT entry node state result m ()
+applyCommittedEntries = do
+  lastAppliedIndex <- use lastApplied
+  currentCommitIndex <- use commitIndex
+  when (lastAppliedIndex < currentCommitIndex) $ do
+    entries <- use commandLog
+    let unAppliedEntries =
+          entries
+            & (`Log.keepEntriesUpTo` currentCommitIndex)
+            & logEntries
+            & Seq.drop (fromIntegral (Log.relativeIndex entries lastAppliedIndex))
+            & fmap snd
 
-      whenRole Leader $ do
-        leaderId <- self
+    -- Claim the range before applying any of it. 'applyEntry' can re-enter this
+    -- function -- a committed joint configuration makes the leader append the
+    -- continuation, and appending applies -- and if 'lastApplied' were still
+    -- pointing at the start of the range, that nested call would apply the same
+    -- entries over again, append again, and never stop.
+    lastApplied .= currentCommitIndex
+    trace (`LastAppliedIndexIncreasedTo` currentCommitIndex)
 
-        let resultsByReqId =
-              results
-                & Foldable.toList
-                & map (\(MkCommandResponse result reqId) -> (reqId, NonEmpty.singleton result))
-                & Map.fromListWith (<>)
-                & Map.map NonEmpty.reverse -- Necessary because 'fromListWith' reverses order of applied commands
-        for_ (Map.toList resultsByReqId) $ \(reqId, responses) ->
-          use currentClientRequests
-            <&> Map.lookup reqId
-            >>= \case
-              Nothing -> pure () -- TODO: isn't this unexpected?
-              Just requester -> do
-                for_ responses $ \response -> do
-                  -- TODO: reply (and possibly retry) in a separate thread
-                  sendClientResponse requester (MkResponse (clientRequestId reqId) (Just leaderId) (Success response))
-                  trace (`CommandResultResponded` MkCommandResponse response reqId)
-                currentClientRequests %= Map.delete reqId
+    results <-
+      mapM applyEntry unAppliedEntries
+        -- Membership change commands don't return a result
+        <&> fmap fromJust . Seq.filter isJust
 
-      lastApplied .= currentCommitIndex
-      trace (`LastAppliedIndexIncreasedTo` currentCommitIndex)
+    whenRole Leader $ do
+      leaderId <- self
 
-      view configuration <&> maxLogLength >>= \case
-        Nothing -> pure ()
-        Just maxLog -> do
-          entries' <- use commandLog
-          when
-            (Seq.length (logEntries entries') > maxLog)
-            (currentSnapshot >>= persistSnapshot)
+      let resultsByReqId =
+            results
+              & Foldable.toList
+              & map (\(MkCommandResponse result reqId) -> (reqId, NonEmpty.singleton result))
+              & Map.fromListWith (<>)
+              & Map.map NonEmpty.reverse -- Necessary because 'fromListWith' reverses order of applied commands
+      for_ (Map.toList resultsByReqId) $ \(reqId, responses) ->
+        use currentClientRequests
+          <&> Map.lookup reqId
+          >>= \case
+            Nothing -> pure () -- TODO: isn't this unexpected?
+            Just requester -> do
+              for_ responses $ \response -> do
+                -- TODO: reply (and possibly retry) in a separate thread
+                sendClientResponse requester (MkResponse (clientRequestId reqId) (Just leaderId) (Success response))
+                trace (`CommandResultResponded` MkCommandResponse response reqId)
+              currentClientRequests %= Map.delete reqId
+
+    view configuration <&> maxLogLength >>= \case
+      Nothing -> pure ()
+      Just maxLog -> do
+        entries' <- use commandLog
+        when
+          (Seq.length (logEntries entries') > maxLog)
+          (currentSnapshot >>= persistSnapshot)
 
 nextElectionTimeout :: (Monad m) => RaftT entry node state result m Microseconds
 nextElectionTimeout = do
@@ -384,20 +407,40 @@ acceptClientRequests ::
   NonEmpty (ClientRequest node entry) ->
   RaftT entry node state result m (NonEmpty RequestId)
 acceptClientRequests requests = do
+  -- The term is part of the request ID. Our internal counter is volatile and
+  -- restarts from zero whenever we boot, so without the term an entry stamped
+  -- by an earlier leader could collide with one of ours, and we would answer
+  -- the client with the result of that older command. See 'RequestId'.
+  ourTerm <- use term
   for requests $ \(MkRequest clientReqId clientId _) -> do
-    internalRequestId <- nextRequestId <%= succ
-    let reqId = mkRequestId internalRequestId clientReqId
+    internalReqId <- nextRequestId <%= succ
+    let reqId = mkRequestId ourTerm internalReqId clientReqId
     currentClientRequests %= Map.insert reqId clientId
     pure reqId
 
 currentSnapshot :: (Monad m) => RaftT entry node state result m (Snapshot node state)
-currentSnapshot =
-  Snapshot
-    <$> ( SnapshotMetadata
-            <$> use lastApplied
-            <*> use term
-        )
-    <*> use internalState
+currentSnapshot = do
+  lastAppliedIndex <- use lastApplied
+  entries <- use commandLog
+  ourTerm <- use term
+
+  -- The snapshot stands in for the log up to and including 'lastAppliedIndex',
+  -- so its term has to be the term of the entry /at/ that index, not the term we
+  -- happen to be in now. Those differ whenever we snapshot in a later term than
+  -- the entries we are compacting, and getting it wrong wedges a follower for
+  -- good: it installs the snapshot, the leader then sends 'AppendEntries' with
+  -- the real term for that index, the consistency check against the snapshot
+  -- metadata fails, the leader backs up into the snapshot and installs it
+  -- again, forever.
+  let lastAppliedTerm = case entries Log.!? lastAppliedIndex of
+        Found (entryTerm, _) -> entryTerm
+        -- Already compacted into our own snapshot, whose metadata knows the term.
+        LogIndexInSnapshot (SnapshotMetadata _ snapshotTerm) -> snapshotTerm
+        -- Cannot happen: 'lastApplied' never runs past the log.
+        NotFound -> ourTerm
+
+  Snapshot (SnapshotMetadata lastAppliedIndex lastAppliedTerm)
+    <$> use internalState
     <*> use clusterConfiguration
 
 -- | Serialize the snapshot in a separate thread.
@@ -416,6 +459,30 @@ persistSnapshot snapshot = do
         queue
         (EventSnapshotPersisted snapshot)
 
+-- | Take the cluster configuration from the log, and bring our role into line
+-- with it.
+adoptConfigurationFromLog :: (Monad m) => RaftT entry node state result m ()
+adoptConfigurationFromLog = do
+  entries <- use commandLog <&> logEntries
+
+  let latestLoggedConfiguration =
+        Foldable.foldl'
+          ( \acc -> \case
+              (_, LogEntryMembershipChange conf) -> Just conf
+              _ -> acc
+          )
+          Nothing
+          entries
+  -- With no membership entry in the log, whatever the snapshot gave us stands.
+  traverse_ (assign clusterConfiguration) latestLoggedConfiguration
+  traverse_ (\conf -> trace (`MembershipChangeApplied` conf)) latestLoggedConfiguration
+
+-- | Whether we are in the configuration we are currently using.
+isClusterMember :: (Ord node, Monad m) => RaftT entry node state result m Bool
+isClusterMember = do
+  s <- self
+  use clusterConfiguration <&> Set.member s . allNodes
+
 -- | Apply a snapshot to the internal state.
 --
 -- This can be used by any node on itself, or
@@ -425,15 +492,43 @@ applySnapshot snapshot = do
   commandLog %= Log.applySnapshot snapshot.sMetadata
   internalState .= sData snapshot
   clusterConfiguration .= sCluster snapshot
+
+  -- In case we're applying a snapshot on state restore,
+  -- the commit index and last applied index might be
+  -- wrong
+  commitIndex %= max snapshot.sMetadata.smLastIncludedIndex
+  lastApplied %= max snapshot.sMetadata.smLastIncludedIndex
+
   trace (`SnapshotApplied` sMetadata snapshot)
 
--- | Apply one or more entries to the log
-appendLogEntries :: (Ord node, MonadMVar m, MonadAsync m) => NonEmpty (LogEntry node entry) -> RaftT entry node state result m ()
+-- | Apply one or more entries to the log, from the leader's point of view
+appendLogEntries ::
+  ( Ord node,
+    MonadMVar m,
+    MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadDelay m
+  ) =>
+  NonEmpty (LogEntry node entry) ->
+  RaftT entry node state result m ()
 appendLogEntries entries = do
   ourTerm <- use term
+  s <- self
+  spec <- view specification
+  startingLogIndex <- use commandLog <&> Log.lastLogIndex
   commandLog %= (`Log.extend` ((ourTerm,) <$> Seq.fromList (NonEmpty.toList entries)))
-  for_ entries $ \entry ->
-    trace (`LogEntryAppended` entry)
+
+  for_ (zip [succ startingLogIndex ..] (NonEmpty.toList entries)) $ \(ix, entry) -> do
+    lift $ (spec ^. writeLogEntry) s ix ourTerm entry
+    trace (\ctx -> LogEntryAppended ctx ix entry)
+
+  adoptConfigurationFromLog
+
+  -- It's important to emit this event because a new leader may have its
+  -- log index jump. Without having visibility into this jump,
+  -- it's hard to check that the commit index is always <= the last log index
+  use commandLog <&> Log.lastLogIndex >>= trace . flip LastLogIndexChangedTo
 
   -- TODO: sendAppendEntriesTo in parallel
   whenRole Leader $
@@ -448,9 +543,41 @@ restoreState = do
   spec <- view specification
   s <- self
 
-  lift ((spec ^. readTerm) s) >>= assign term
-  lift ((spec ^. readVotedFor) s) >>= assign votedFor
-  lift ((spec ^. readSnapshot) s) >>= traverse_ applySnapshot
+  (persistedTerm, persistedVote, mPersistedSnapshot) <-
+    lift $
+      (,,)
+        <$> (spec ^. readTerm) s
+        <*> (spec ^. readVotedFor) s
+        <*> (spec ^. readSnapshot) s
+
+  term .= persistedTerm
+  votedFor .= persistedVote
+
+  let snapshotIndex = maybe 0 (smLastIncludedIndex . sMetadata) mPersistedSnapshot
+
+  entries <-
+    lift $
+      let loop ix acc =
+            (spec ^. readLogEntry) s ix >>= \case
+              Nothing -> pure acc
+              Just entry -> loop (succ ix) (acc |> entry)
+       in loop (succ snapshotIndex) Seq.empty
+
+  let restoredLog = Log.buildLog entries (sMetadata <$> mPersistedSnapshot)
+  commandLog .= restoredLog
+  traverse_ applySnapshot mPersistedSnapshot
+
+  -- The snapshot only carries the configuration in the
+  -- snapshot, but entries might have changed it
+  adoptConfigurationFromLog
+
+  trace
+    ( \ctx ->
+        StateRestored
+          ctx
+          persistedVote
+          restoredLog
+    )
 
 becomeLeader ::
   ( Ord node,
@@ -471,22 +598,30 @@ becomeLeader = do
 
   trace LeaderElected
 
+  -- cluster configuration could be ongoing, started under a different leader
+  use clusterConfiguration >>= \case
+    Simple _ -> pure ()
+    Joint _before after ->
+      appendLogEntries (NonEmpty.singleton (LogEntryMembershipChange (Simple after)))
+
   -- TODO: send append all entries messages to all followers
   sendHeartbeat -- Note that 'sendHeartbeat' will also reset the heartbeat timer
 
 becomeFollower ::
   (MonadMVar m, MonadDelay m, MonadFork m, MonadMask m, MonadAsync m) =>
-  -- | Leader node ID
-  node ->
+  -- | Leader if known
+  Maybe node ->
   RaftT entry node state result m ()
-becomeFollower leaderNodeId = do
+becomeFollower mLeaderNodeId = do
   resetHeartBeatTimer
   resetElectionTimer
   r <- use role
   unless (r == Follower) $ do
     trace BecameFollower
     role .= Follower
-  currentLeader .= Just leaderNodeId
+  -- TODO: clear 'currentClientRequests' here; otherwise, pending requests
+  --       may leak memory forever
+  traverse_ (\leaderNodeId -> currentLeader .= Just leaderNodeId) mLeaderNodeId
 
 becomeCandidate ::
   ( Ord node,
@@ -522,10 +657,8 @@ becomeCandidate = do
   r <- use role
   when (r == Candidate) $ do
     currentTerm <- use term
-    lastAppliedLogIndex <- use lastApplied
-    lastLogTerm <-
-      use commandLog <&> snd . Log.lastLogInfo
-    let rpc = RequestVote currentTerm s lastAppliedLogIndex lastLogTerm
+    (lastLogIx, lastLogTerm) <- use commandLog <&> Log.lastLogInfo
+    let rpc = RequestVote currentTerm s lastLogIx lastLogTerm
     peers >>= (`sendRPCConcurrently` rpc)
 
 checkElection ::

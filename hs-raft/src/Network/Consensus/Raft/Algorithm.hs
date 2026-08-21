@@ -14,9 +14,9 @@ import Control.Monad (forever, unless, when)
 import Control.Monad.Class.MonadAsync (MonadAsync, async, cancel, link)
 import Control.Monad.Class.MonadFork (MonadFork, labelThisThread)
 import Control.Monad.Class.MonadThrow (MonadMask)
-import Control.Monad.Class.MonadTimer (MonadDelay, threadDelay)
+import Control.Monad.Class.MonadTimer (MonadDelay)
 import Control.Monad.Trans.Class (lift)
-import Data.Foldable (for_)
+import Data.Foldable (for_, toList)
 import Data.Functor ((<&>))
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
@@ -27,7 +27,14 @@ import Network.Consensus.Raft.Admin (AdminCommand (..), AdminRequest)
 import qualified Network.Consensus.Raft.Admin as Admin
 import Network.Consensus.Raft.Client (ClientRequest, ClientResult (..))
 import Network.Consensus.Raft.Domain
-import Network.Consensus.Raft.Log (Lookup (..), lastLogIndex, (!?))
+  ( ClusterConfiguration (..),
+    LogIndex,
+    Role (..),
+    Snapshot (..),
+    SnapshotMetadata (..),
+    Term,
+  )
+import Network.Consensus.Raft.Log (Lookup (..), (!?))
 import qualified Network.Consensus.Raft.Log as Log
 import Network.Consensus.Raft.Messaging (Request (..), Response (..))
 import Network.Consensus.Raft.Transformer
@@ -46,14 +53,15 @@ import Network.Consensus.Raft.Transformer
     RaftT,
     RaftTrace (..),
     acceptClientRequests,
+    adoptConfigurationFromLog,
     appendLogEntries,
+    applyCommittedEntries,
     applyLogEntries,
     applySnapshot,
     becomeCandidate,
     becomeFollower,
     checkElection,
     clusterConfiguration,
-    clusterNodes,
     commandLog,
     commitIndex,
     configuration,
@@ -62,6 +70,7 @@ import Network.Consensus.Raft.Transformer
     dequeueEvent,
     eventQueue,
     exitLock,
+    isClusterMember,
     matchIndex,
     nextIndex,
     peers,
@@ -87,7 +96,7 @@ import Network.Consensus.Raft.Transformer
     tracer,
     updateTerm,
     votedFor,
-    whenRole,
+    writeLogEntry,
     yesVotes,
   )
 import Network.Consensus.Raft.Transformer.Spec (ClusterMembershipError (..))
@@ -180,7 +189,8 @@ handleEvent ::
   Event node entry result state -> RaftT entry node state result m ()
 handleEvent EventElectionTimeout = do
   r <- use role
-  when (r /= Leader) $ do
+  member <- isClusterMember
+  when (member && r /= Leader) $ do
     when (r == Candidate) $ do
       trace SplitElection
     unless (r == Candidate) $ do
@@ -197,16 +207,20 @@ handleEvent (EventRPC (IS installSnapshot)) = handleInstallSnapshot installSnaps
 handleEvent (EventRPC (CM clusterMembershipRequest)) = handleClusterMembershipRequest clusterMembershipRequest
 handleEvent (EventRPCResult (RequestVoteResult voter voterTerm votedForUs)) =
   handleRequestVoteResult voter voterTerm votedForUs
-handleEvent (EventRPCResult (AER appendEntriesResult)) =
-  handleAppendEntriesResult appendEntriesResult
-handleEvent (EventRPCResult (ISR installSnapshotResult)) =
-  handleInstallSnapshotResult installSnapshotResult
+handleEvent (EventRPCResult (AER appendEntriesResult)) = handleAppendEntriesResult appendEntriesResult
+handleEvent (EventRPCResult (ISR installSnapshotResult)) = handleInstallSnapshotResult installSnapshotResult
 handleEvent (EventRPCResult (CMR clusterMembershipResult)) = handleClusterMembershipResult clusterMembershipResult
 handleEvent (EventAdminRequest adminCommand) = handleAdminRequest adminCommand
 handleEvent (EventSnapshotPersisted snapshot) = applySnapshot snapshot
 
 handleClientRequest ::
-  (Ord node, MonadMVar m, MonadAsync m) =>
+  ( Ord node,
+    MonadMVar m,
+    MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadDelay m
+  ) =>
   NonEmpty (ClientRequest node entry) -> RaftT entry node state result m ()
 handleClientRequest requests = do
   mLeaderId <- use currentLeader
@@ -242,43 +256,95 @@ handleAppendEntries ::
   RaftT entry node state result m ()
 handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLogTerm newEntries leaderCommitIndex) = do
   termComparison <- handleTermNumber leaderTerm
+  when (termComparison /= LT) (becomeFollower (Just leaderNode))
 
-  whenRole Follower $ do
+  ourRole <- use role
+  -- It's quite important for non-followers to append entries
+  -- since any node can be thrust into the leader role
+  -- due to a leader crash
+  unless (ourRole == Leader) $ do
     -- TODO: I believe the next line is redundant because we have a separate
     -- heartbeat mechanism.
-    when (termComparison == EQ) resetElectionTimer
-    currentLeader .= Just leaderNode
+    when (termComparison == EQ || termComparison == GT) resetElectionTimer
 
     -- Consistency check
     entries <- use commandLog
-    let (SnapshotMetadata lastIx _) = Log.lSnapshotMetadata entries
+    let (SnapshotMetadata lastIncludedIndex lastIncludedTerm) = Log.lSnapshotMetadata entries
         logIsConsistent =
-          case entries !? prevLogIndex of
-            NotFound -> prevLogIndex == 0
-            LogIndexInSnapshot _ ->
-              -- By snapshot construction, indices
-              prevLogIndex <= lastIx
-            Found (t, _) -> t == previousLogTerm
-
-    let oldLastEntry = lastLogIndex entries - 1
-        newLastEntry = prevLogIndex + fromIntegral (length newEntries)
+          (prevLogIndex >= lastIncludedIndex)
+            && case entries !? prevLogIndex of
+              NotFound -> prevLogIndex == 0 && previousLogTerm == lastIncludedTerm
+              LogIndexInSnapshot _ ->
+                -- By snapshot construction, indices
+                prevLogIndex == lastIncludedIndex && previousLogTerm == lastIncludedTerm
+              Found (entryTerm, _) -> entryTerm == previousLogTerm
 
     ourTerm <- use term
     s <- self
     if leaderTerm < ourTerm || not logIsConsistent
-      then sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm s False oldLastEntry))
+      then do
+        let ourLastIndex = Log.lastLogIndex entries
+        sendRPCResult
+          leaderNode
+          ( AER
+              ( AppendEntriesResult
+                  { aerCurrentTerm = ourTerm,
+                    aerNode = s,
+                    aerMatch = False,
+                    aerNewEntryLogIndex = ourLastIndex
+                  }
+              )
+          )
       else do
-        commandLog
-          %= (`Log.extend` newEntries)
-          . (`Log.keepEntriesUpTo` succ prevLogIndex)
-        sendRPCResult leaderNode (AER (AppendEntriesResult ourTerm s True newLastEntry))
+        -- TODO: unify the logic below with
+        --       appendLogEntries
+        spec <- view specification
+        let firstNewIndex = succ prevLogIndex
+
+        -- The leader decides the log prefix. Doing this wrong has caused subtle
+        -- bugs that I'd rather never see. Hence, we're modifying the log twice
+        -- in this handler to keep things readable.
+        -- TODO: optimize perhaps?
+        commandLog %= (`Log.keepEntriesUpTo` prevLogIndex)
+
+        for_ (zip [firstNewIndex ..] (toList newEntries)) $ \(ix, (entryTerm, entry)) -> do
+          lift $ (spec ^. writeLogEntry) s ix entryTerm entry
+          trace (\ctx -> LogEntryAppended ctx ix entry)
+
+        commandLog %= (`Log.extend` newEntries)
+        adoptConfigurationFromLog
+
+        newLastEntry <- use commandLog <&> Log.lastLogIndex
+        trace (`LastLogIndexChangedTo` newLastEntry)
+
+        sendRPCResult
+          leaderNode
+          ( AER
+              ( AppendEntriesResult
+                  { aerCurrentTerm = ourTerm,
+                    aerNode = s,
+                    aerMatch = True,
+                    aerNewEntryLogIndex = newLastEntry
+                  }
+              )
+          )
         ourCommitIndex <- use commitIndex
         when (leaderCommitIndex > ourCommitIndex) $ do
-          commitIndex .= min leaderCommitIndex newLastEntry
-          applyLogEntries
+          let newCommitIndex = min leaderCommitIndex newLastEntry
+          commitIndex .= newCommitIndex
+          trace (`CommitIndexIncreasedTo` newCommitIndex)
+          -- A follower takes the commit index from the leader; it must not
+          -- try to re-derive it from match indices, which it doesn't track.
+          applyCommittedEntries
 
 handleAppendEntriesResult ::
-  (Ord node, MonadMVar m, MonadAsync m) =>
+  ( Ord node,
+    MonadMVar m,
+    MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadDelay m
+  ) =>
   AppendEntriesResult node result ->
   RaftT entry node state result m ()
 handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode responderSuccess responderLogIndex) = do
@@ -307,12 +373,12 @@ handleTermNumber ::
 handleTermNumber newTerm = do
   (currTerm, _newTerm) <- updateTerm (const newTerm)
 
-  when (newTerm /= currTerm) (votedFor .= Nothing)
+  when (newTerm > currTerm) (votedFor .= Nothing)
 
   pure $ compare newTerm currTerm
 
 handleRequestVote ::
-  ( Eq node,
+  ( Ord node,
     MonadMVar m,
     MonadAsync m,
     MonadMask m,
@@ -365,8 +431,8 @@ handleHeartBeat ::
   Term -> node -> RaftT entry node state result m ()
 handleHeartBeat aeTerm senderNodeId =
   handleTermNumber aeTerm >>= \case
-    GT -> becomeFollower senderNodeId >> resetElectionTimer
-    EQ -> becomeFollower senderNodeId >> resetElectionTimer
+    GT -> becomeFollower (Just senderNodeId) >> resetElectionTimer
+    EQ -> becomeFollower (Just senderNodeId) >> resetElectionTimer
     LT -> pure ()
 
 handleRequestVoteResult ::
@@ -393,14 +459,15 @@ handleRequestVoteResult voter voterTerm votedForUs = do
             trace (`VoteDeniedFrom` voter)
 
 handleInstallSnapshot ::
-  (MonadMVar m, MonadAsync m) =>
+  (MonadMVar m, MonadAsync m, MonadMask m, MonadFork m, MonadDelay m) =>
   InstallSnapshot node state -> RaftT entry node state result m ()
 handleInstallSnapshot (InstallSnapshot leaderTerm leaderNode snapshot) =
   handleTermNumber leaderTerm >>= \case
     LT ->
       -- old term
       pure () -- TODO: what do I do here?
-    _ -> whenRole Follower $ do
+    _ -> do
+      becomeFollower (Just leaderNode)
       persistSnapshot snapshot
       InstallSnapshotResult
         <$> use term
@@ -425,7 +492,15 @@ handleInstallSnapshotResult (InstallSnapshotResult responderTerm responderNode (
     -- send the rest of the logs
     sendAppendEntriesTo responderNode
 
-handleClusterMembershipRequest :: (Ord node, MonadMVar m, MonadAsync m) => ClusterMembershipRequest node -> RaftT entry node state result m ()
+handleClusterMembershipRequest ::
+  ( Ord node,
+    MonadMVar m,
+    MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadDelay m
+  ) =>
+  ClusterMembershipRequest node -> RaftT entry node state result m ()
 handleClusterMembershipRequest request = do
   let (requester, resultCtor) = case request of
         ClusterMembershipJoinRequest r -> (r, ClusterMembershipJoinResult)
@@ -440,39 +515,52 @@ handleClusterMembershipRequest request = do
           sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
         Just leader -> sendRPC leader (CM request) -- forward to leader
     Leader -> do
+      s <- self
+      let -- Whether the committed configuration already says what the requester
+          -- is asking for.
+          alreadySettled cluster = case request of
+            ClusterMembershipJoinRequest r -> r `Set.member` cluster
+            ClusterMembershipLeaveRequest r -> r `Set.notMember` cluster
       use clusterConfiguration >>= \case
         -- By design, we cannot handle more than one membership request
         -- at a time. The requester must retry later.
-        Joint {} -> self >>= \s -> sendRPCResult requester (CMR (resultCtor (Left (OngoingClusterMembershipChange s))))
-        Simple {} -> pure ()
+        --
+        -- Note the early return: previously this answered with an error and
+        -- then went on to initiate a second, concurrent change anyway.
+        Joint {} -> sendRPCResult requester (CMR (resultCtor (Left (OngoingClusterMembershipChange s))))
+        Simple cluster
+          -- We distinguish between a request that succeeds the first
+          -- and subsequent times to better track executions
+          | alreadySettled cluster -> do
+              trace (`MembershipChangeAlreadySettled` requester)
+              sendRPCResult requester (CMR (resultCtor (Right s)))
+          | otherwise -> do
+              trace MembershipChangeInitiated
+              sendRPCResult requester (CMR (resultCtor (Right s)))
 
-      cluster <- clusterNodes
-      trace MembershipChangeInitiated
-      self >>= \s -> sendRPCResult requester (CMR (resultCtor (Right s)))
-
-      -- By definition, a node that just joined
-      -- needs to catch up with a snapshot.
-      case request of
-        ClusterMembershipJoinRequest _ -> do
-          ( InstallSnapshot
-              <$> use term
-              <*> self
-              <*> currentSnapshot
-            )
-            >>= sendRPC requester . IS
-          appendLogEntries
-            ( NonEmpty.singleton
-                ( LogEntryMembershipChange
-                    (Joint cluster (Set.insert requester cluster))
-                )
-            )
-        ClusterMembershipLeaveRequest _ ->
-          appendLogEntries
-            ( NonEmpty.singleton
-                ( LogEntryMembershipChange
-                    (Joint cluster (Set.delete requester cluster))
-                )
-            )
+              case request of
+                ClusterMembershipJoinRequest _ -> do
+                  -- By definition, a node that just joined
+                  -- needs to catch up with a snapshot.
+                  ( InstallSnapshot
+                      <$> use term
+                      <*> self
+                      <*> currentSnapshot
+                    )
+                    >>= sendRPC requester . IS
+                  appendLogEntries
+                    ( NonEmpty.singleton
+                        ( LogEntryMembershipChange
+                            (Joint cluster (Set.insert requester cluster))
+                        )
+                    )
+                ClusterMembershipLeaveRequest _ ->
+                  appendLogEntries
+                    ( NonEmpty.singleton
+                        ( LogEntryMembershipChange
+                            (Joint cluster (Set.delete requester cluster))
+                        )
+                    )
 
 handleClusterMembershipResult ::
   ( MonadDelay m,
@@ -484,20 +572,11 @@ handleClusterMembershipResult ::
   ClusterMembershipResult node -> RaftT entry node state result m ()
 handleClusterMembershipResult = \case
   ClusterMembershipJoinResult (Right leaderId) -> do
-    becomeFollower leaderId
+    becomeFollower (Just leaderId)
     trace JoinedCluster -- TODO: is this the right moment to trace this? Probably should wait until log is replicated
-  ClusterMembershipJoinResult (Left err) -> do
-    -- The natural delay to wait is one heart beat timeout. What else would we use?
-    view configuration <&> heartBeatTimeout >>= lift . threadDelay . fromIntegral
-    self >>= \s -> sendRPC (clusterMembershipErrorPeer err) (CM (ClusterMembershipJoinRequest s))
+  ClusterMembershipJoinResult (Left _) -> pure ()
   ClusterMembershipLeaveResult (Right _) -> pure () -- Nothing to do until log entry is applied
-  ClusterMembershipLeaveResult (Left err) -> do
-    -- The natural delay to wait is one heart beat timeout. What else would we use?
-    view configuration <&> heartBeatTimeout >>= lift . threadDelay . fromIntegral
-    self >>= \s -> sendRPC (clusterMembershipErrorPeer err) (CM (ClusterMembershipLeaveRequest s))
-  where
-    clusterMembershipErrorPeer (NoKnownLeader n) = n
-    clusterMembershipErrorPeer (OngoingClusterMembershipChange n) = n
+  ClusterMembershipLeaveResult (Left _) -> pure ()
 
 handleAdminRequest :: (MonadMVar m) => AdminRequest node -> RaftT entry node state result m ()
 handleAdminRequest req@(MkRequest reqId adminId command) = do
@@ -507,13 +586,14 @@ handleAdminRequest req@(MkRequest reqId adminId command) = do
     ShutDown -> do
       view exitLock >>= lift . (`putMVar` ())
       sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.ShutdownInitiated)
+    GetClusterConfiguration ->
+      use role >>= \case
+        Leader -> use clusterConfiguration >>= \conf -> sendAdminResponse adminId (MkResponse reqId mLeaderId (Admin.ClusterConfigurationIs conf))
+        _ -> sendAdminResponse adminId (MkResponse reqId mLeaderId (Admin.NotLeader mLeaderId))
     (JoinCluster target) -> do
       self >>= sendRPC target . CM . ClusterMembershipJoinRequest
       sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.JoinInitiated)
-    LeaveCluster ->
-      use currentLeader
-        >>= \case
-          Nothing -> sendAdminResponse adminId (MkResponse reqId mLeaderId (Admin.NotLeader Nothing))
-          Just leaderId -> do
-            self >>= sendRPC leaderId . CM . ClusterMembershipLeaveRequest
-            sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.LeaveInitiated)
+    LeaveCluster -> do
+      s <- self
+      sendRPC s (CM (ClusterMembershipLeaveRequest s))
+      sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.LeaveInitiated)

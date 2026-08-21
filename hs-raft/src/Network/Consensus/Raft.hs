@@ -4,6 +4,7 @@ module Network.Consensus.Raft
     module Network.Consensus.Raft.Messaging,
     module Network.Consensus.Raft.Transformer,
     Microseconds (Microseconds),
+    Log,
 
     -- * Run server
     runRaftServer,
@@ -17,6 +18,7 @@ import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay)
 import Network.Consensus.Raft.Algorithm (server)
 import Network.Consensus.Raft.Domain
+import Network.Consensus.Raft.Log (Log)
 import Network.Consensus.Raft.Messaging
 import Network.Consensus.Raft.Timer (Microseconds (..))
 import Network.Consensus.Raft.Transformer
