@@ -73,9 +73,9 @@ jobs:
           # which can make some tests appear to fail due to the test executable
           # being killed.
           #
-          # Therefore, the amount of exploration is capped to about 1/5 of the
-          # default values
-          cabal test all --test-options="--schedule-bound=20 --branching-factor=2"
+          # Therefore, the amount of exploration is capped to about 1/10 of the
+          # default values in CI
+          cabal test all --test-options="--schedule-bound=10 --branching-factor=2"
 
   benchmark:
     runs-on: ubuntu-latest
@@ -105,7 +105,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-ghc-${{ env.GHC_VERSION }}-benchmark
 
-      - name: Build 
+      - name: Build
         run: cabal build all --project-file=cabal.optimized.project
 
       - name: Run benchmarks

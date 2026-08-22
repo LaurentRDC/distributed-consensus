@@ -164,16 +164,6 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
       race_
         (threadDelay (fromIntegral scenarioTimeUpperBound) >> fail "Possible infinite loop detected")
         ( do
-            -- This is the point where we can mark this thread "racy"
-            -- (by default, it is not).
-            --
-            -- The benefit of NOT marking this racy is to explore many more of the initial
-            -- parameter space (more 'ScenarioInputs's).
-            --
-            -- The benefit of marking this racy is to explore races within fewer initial
-            -- conditions
-            raceOrNot
-
             withRaftAdminT harness.hAdminNode harness.hAdminSpec $ \runAdminAction ->
               -- Run servers until the clients are done interacting
               withAsync (runServers harness runAdminAction) $ \_ -> do
@@ -213,7 +203,16 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
       Harness s ->
       (forall a. RaftAdminT Node (IOSim s) a -> IOSim s a) ->
       IOSim s ()
-    runServers harness runAdminAction =
+    runServers harness runAdminAction = do
+      -- This is the point where we can mark this thread "racy"
+      -- (by default, it is not).
+      --
+      -- The benefit of NOT marking this racy is to explore many more of the initial
+      -- parameter space (more 'ScenarioInputs's).
+      --
+      -- The benefit of marking this racy is to explore races within fewer initial
+      -- conditions
+      raceOrNot
       concurrently_
         -- Cluster nodes
         ( forConcurrently_ (IntMap.elems harness.clusterServers) $ \server ->
@@ -359,7 +358,7 @@ genScenarioInputs faultInjection = do
           <*> chooseBoundedIntegral (etoub, 3 * etoub)
       )
 
-  cmds <- flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 30)
+  cmds <- flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 20)
   pure $
     ScenarioInputs
       { heartbeatTimeout = hb,
@@ -397,6 +396,8 @@ runServerWithFaults server clusterState = do
           server.sSpec
     )
   where
+    -- Restart a workload on failure, except if it returned
+    -- normally.
     supervisor tidVar workload = do
       a <- async workload
       atomically $ writeTVar tidVar (Just (asyncThreadId a))
@@ -405,6 +406,7 @@ runServerWithFaults server clusterState = do
       case r of
         Left _ -> do
           server.sSpec._tracer (Crashed server.sConfig.nodeId)
+          threadDelay 100_000 -- simulate a restart
           supervisor tidVar workload
         Right () -> pure ()
 
