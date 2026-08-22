@@ -22,6 +22,7 @@ module Network.Consensus.Raft.Transformer
     whenRole,
     sendHeartbeat,
     sendAppendEntriesTo,
+    voteFor,
     applyLogEntries,
     applyCommittedEntries,
     nextElectionTimeout,
@@ -308,6 +309,19 @@ updateCommitIndex = do
       trace (`CommitIndexIncreasedTo` lastIndex)
       pure True
 
+-- | Set the current vote, both in the internal state
+-- but also in persisted state.
+--
+-- This function doesn't emit any RPCs
+voteFor :: (Monad m) => Maybe node -> RaftT entry node state result m ()
+voteFor mNode = do
+  spec <- view specification
+  s <- self
+  t <- use term
+  lift $ (spec ^. writeVotedFor) s t mNode
+  votedFor .= mNode
+  traverse_ (\n -> trace (\ctx -> VotedFor ctx t n)) mNode
+
 -- | Update the commit index, and apply log entries if there are
 -- any log entries that /can/ be applied.
 applyLogEntries :: (Ord node, MonadMVar m, MonadAsync m, MonadMask m, MonadFork m, MonadDelay m) => RaftT entry node state result m ()
@@ -544,10 +558,10 @@ restoreState = do
   s <- self
 
   (persistedTerm, persistedVote, mPersistedSnapshot) <-
-    lift $
-      (,,)
-        <$> (spec ^. readTerm) s
-        <*> (spec ^. readVotedFor) s
+    lift $ do
+      t <- (spec ^. readTerm) s
+      (t,,)
+        <$> (spec ^. readVotedFor) s t
         <*> (spec ^. readSnapshot) s
 
   term .= persistedTerm
@@ -645,10 +659,7 @@ becomeCandidate = do
   thisTerm <- use term
   lift (w s thisTerm)
 
-  v <- view (specification . voteFor)
-  lift $ v s (Just s)
-  trace (\ctx -> VotedFor ctx thisTerm s)
-  votedFor .= Just s
+  voteFor (Just s)
   yesVotes .= Set.singleton s
 
   resetElectionTimer

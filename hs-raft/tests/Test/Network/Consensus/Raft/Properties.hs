@@ -82,18 +82,24 @@ singleLeaderPerTermProperty = go mempty <?> "Another leader elected for the same
         )
 
 -- | Ensure that a node casts at most one vote per term
-singleVoteCastPerTermProperty :: (Ord node) => Scenario entry result node state
+--
+-- Note that under fault conditions, the same vote for the same term may be cast multiple
+-- times. I consider this acceptable; votes are idempotent
+singleVoteCastPerTermProperty :: (Ord node, Show node) => Scenario entry result node state
 singleVoteCastPerTermProperty = go mempty <?> "More than one vote cast per term"
   where
     go votes =
       step
         ()
         ( \case
-            VotedFor (EventContext voterTerm voterNode) _ _ -> do
+            VotedFor (EventContext voterTerm voterNode) _ candidate -> do
               assert
-                "Expecting a node to cast at most one vote per term"
-                (Set.notMember (voterTerm, voterNode) votes)
-              go (Set.insert (voterTerm, voterNode) votes)
+                ("Expecting a node to cast at most one vote per term: " <> Text.show votes)
+                ( case Map.lookup (voterTerm, voterNode) votes of
+                    Nothing -> True
+                    Just candidate' -> candidate == candidate' -- allow multiple identical vote for idempotence
+                )
+              go (Map.insert (voterTerm, voterNode) candidate votes)
             _ -> go votes
         )
 

@@ -513,7 +513,7 @@ data Environment s
   = MkResources
   { networkFabric :: NetworkFabric s,
     logPersistence :: IntMap (TVar (IOSim s) (Map LogIndex (Term, LogEntry Node Command))),
-    votePersistence :: IntMap (TVar (IOSim s) (Maybe Node)),
+    votePersistence :: IntMap (TVar (IOSim s) (Map Term Node)),
     termPersistence :: IntMap (TVar (IOSim s) Term),
     snapshotPersistence :: IntMap (TVar (IOSim s) (Maybe (Snapshot Node State)))
   }
@@ -530,7 +530,7 @@ newEnvironment nodes =
             <*> newMailbox
         )
     <*> newPersistence mempty
-    <*> newPersistence Nothing
+    <*> newPersistence mempty
     <*> newPersistence 0
     <*> newPersistence Nothing
   where
@@ -558,8 +558,8 @@ mkServer debug resources hbto etolb etoub faultProb seed node =
             _writeLogEntry = writeLogEntry resources.logPersistence,
             _readTerm = read resources.termPersistence,
             _writeTerm = write resources.termPersistence,
-            _readVotedFor = read resources.votePersistence,
-            _voteFor = write resources.votePersistence,
+            _readVotedFor = readVotedFor resources.votePersistence,
+            _writeVotedFor = writeVotedFor resources.votePersistence,
             _readSnapshot = read resources.snapshotPersistence,
             _writeSnapshot = \self snapshot -> write resources.snapshotPersistence self (Just snapshot),
             _applyLogEntry = step,
@@ -693,6 +693,18 @@ readLogEntry :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Nod
 readLogEntry storage self logIndex = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
   Just var -> readTVarIO var <&> Map.lookup logIndex
+
+writeVotedFor :: (MonadSTM m) => IntMap (TVar m (Map Term Node)) -> Node -> Term -> Maybe Node -> m ()
+writeVotedFor storage self term value = case IntMap.lookup (fromIntegral self) storage of
+  Nothing -> error $ "Persistence badly configured: missing node " <> show self
+  Just var -> atomically $ do
+    m <- readTVar var
+    writeTVar var (Map.alter (const value) term m)
+
+readVotedFor :: (MonadSTM m) => IntMap (TVar m (Map Term Node)) -> Node -> Term -> m (Maybe Node)
+readVotedFor storage self term = case IntMap.lookup (fromIntegral self) storage of
+  Nothing -> error $ "Persistence badly configured: missing node " <> show self
+  Just var -> Map.lookup term <$> readTVarIO var
 
 write :: (MonadSTM m) => IntMap (TVar m a) -> Node -> a -> m ()
 write storage self value = case IntMap.lookup (fromIntegral self) storage of

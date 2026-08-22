@@ -95,6 +95,7 @@ import Network.Consensus.Raft.Transformer
     trace,
     tracer,
     updateTerm,
+    voteFor,
     votedFor,
     writeLogEntry,
     yesVotes,
@@ -373,7 +374,7 @@ handleTermNumber ::
 handleTermNumber newTerm = do
   (currTerm, _newTerm) <- updateTerm (const newTerm)
 
-  when (newTerm > currTerm) (votedFor .= Nothing)
+  when (newTerm > currTerm) (voteFor Nothing)
 
   pure $ compare newTerm currTerm
 
@@ -402,7 +403,7 @@ handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLas
     Nothing ->
       if (candidateLastLogIndex, candidateLastLogIndexTerm) >= Log.lastLogInfo entries
         then do
-          votedFor .= Just candidateNode
+          voteFor (Just candidateNode)
           grantVote ourTerm
           trace (\ctx -> VotedFor ctx candidateTerm candidateNode)
         else do
