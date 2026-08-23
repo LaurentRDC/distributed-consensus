@@ -26,7 +26,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
-import Network.Consensus.Raft (Config (..), Microseconds, RPC, RPCResult, RaftSpec (..), runRaftServer)
+import Network.Consensus.Raft (Config (..), Microseconds, RPC, RPCResult, Specification (..), runRaftServer)
 import qualified Network.Consensus.Raft as Raft
 import Network.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Network.Consensus.Raft.Client
@@ -132,7 +132,7 @@ data ScenarioInputs
 data Server
   = MkServer
   { sConfig :: Config Node,
-    sSpec :: RaftSpec Command Node State Result IO
+    sSpec :: Specification Command Node State Result IO
   }
 
 type Mailbox a = IntMap (TQueue a)
@@ -175,25 +175,25 @@ mkServer network hbto etolb etoub seed node =
             maxLogLength = Nothing
           },
       sSpec =
-        MkRaftSpec
-          { _readLogEntry = \_ _ -> pure Nothing,
-            _writeLogEntry = \_ _ _ _ -> pure (),
-            _readTerm = \_ -> pure 0,
-            _writeTerm = \_ _ -> pure (),
-            _readVotedFor = \_ _ -> pure Nothing,
-            _writeVotedFor = \_ _ _ -> pure (),
-            _readSnapshot = \_ -> pure Nothing,
-            _writeSnapshot = \_ _ -> pure (),
-            _applyLogEntry = step,
-            _sendRPC = send network.rpcMailbox,
-            _sendRPCResult = send network.rpcResultsMailbox,
-            _sendClientResponse = send network.responsesMailbox,
-            _sendAdminResponse = send network.adminResponsesMailbox,
-            _receiveRPC = receive network.rpcMailbox node <&> Right,
-            _receiveRPCResult = receive network.rpcResultsMailbox node <&> Right,
-            _receiveClientRequests = receiveAll network.requestsMailbox node,
-            _receiveAdminRequest = receive network.adminMailbox node <&> Right,
-            _tracer = \_ -> pure ()
+        Specification
+          { readLogEntry = \_ _ -> pure Nothing,
+            writeLogEntry = \_ _ _ _ -> pure (),
+            readTerm = \_ -> pure 0,
+            writeTerm = \_ _ -> pure (),
+            readVotedFor = \_ _ -> pure Nothing,
+            writeVotedFor = \_ _ _ -> pure (),
+            readSnapshot = \_ -> pure Nothing,
+            writeSnapshot = \_ _ -> pure (),
+            applyLogEntry = step,
+            sendRPC = send network.rpcMailbox,
+            sendRPCResult = send network.rpcResultsMailbox,
+            sendClientResponse = send network.responsesMailbox,
+            sendAdminResponse = send network.adminResponsesMailbox,
+            receiveRPC = receive network.rpcMailbox node <&> Right,
+            receiveRPCResult = receive network.rpcResultsMailbox node <&> Right,
+            receiveClientRequests = receiveAll network.requestsMailbox node,
+            receiveAdminRequest = receive network.adminMailbox node <&> Right,
+            tracer = \_ -> pure ()
           }
     }
 

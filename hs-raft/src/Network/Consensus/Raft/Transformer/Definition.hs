@@ -35,7 +35,7 @@ import Data.Word (Word64)
 import Lens.Micro.Platform (makeLenses)
 import Network.Consensus.Raft.Domain (Role (..))
 import Network.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
-import Network.Consensus.Raft.Transformer.Spec (Event (..), RaftSpec, RaftState, initialRaftState)
+import Network.Consensus.Raft.Transformer.Spec (Event (..), RaftState, Specification, initialRaftState)
 
 type RaftT entry node state result m =
   RWST
@@ -59,7 +59,7 @@ runRaftT ::
   Config node ->
   ClusterState node ->
   state ->
-  RaftSpec entry node state result m ->
+  Specification entry node state result m ->
   RaftT entry node state result m a ->
   m a
 runRaftT config startingState internalState spec f = do
@@ -87,7 +87,7 @@ runRaftT config startingState internalState spec f = do
 data RaftEnv entry node state result m
   = MkRaftEnv
   { _configuration :: !(Config node),
-    _specification :: !(RaftSpec entry node state result m),
+    _specification :: !(Specification entry node state result m),
     _eventQueue :: TQueue m (Event node entry result state),
     -- Handle to a thread which will send a heartbeat timeout
     -- event after the appropriate amount of time.

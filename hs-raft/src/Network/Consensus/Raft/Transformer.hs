@@ -4,7 +4,6 @@
 
 module Network.Consensus.Raft.Transformer
   ( module Network.Consensus.Raft.Transformer.Definition,
-    module Network.Consensus.Raft.Transformer.Spec,
 
     -- * Cluster nodes
     self,
@@ -74,7 +73,7 @@ import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Traversable (for)
-import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (<%=), (^.))
+import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (<%=))
 import Network.Consensus.Raft.Admin (AdminResponse)
 import Network.Consensus.Raft.Client (ClientRequest, ClientResponse, ClientResult (..))
 import Network.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId (clientRequestId), Role (..), Snapshot (..), SnapshotMetadata (..), Term, allNodes, hasQuorum, mkRequestId)
@@ -121,7 +120,7 @@ enqueueEvent event = do
 sendRPC :: (Monad m) => node -> RPC node entry state -> RaftT entry node state result m ()
 sendRPC node rpc = do
   spec <- view specification
-  lift $ (spec ^. Spec.sendRPC) node rpc
+  lift $ Spec.sendRPC spec node rpc
 
 -- | Send a 'RPC' concurrently to other nodes.
 --
@@ -129,22 +128,22 @@ sendRPC node rpc = do
 sendRPCConcurrently :: (MonadAsync m) => Set node -> RPC node entry state -> RaftT entry node state result m ()
 sendRPCConcurrently nodes rpc = do
   spec <- view specification
-  lift $ mapConcurrently_ (flip (spec ^. Spec.sendRPC) rpc) nodes
+  lift $ mapConcurrently_ (flip (Spec.sendRPC spec) rpc) nodes
 
 sendRPCResult :: (Monad m) => node -> RPCResult node result -> RaftT entry node state result m ()
 sendRPCResult node rpc = do
   spec <- view specification
-  lift $ (spec ^. Spec.sendRPCResult) node rpc
+  lift $ Spec.sendRPCResult spec node rpc
 
 sendClientResponse :: (Monad m) => node -> ClientResponse node result -> RaftT entry node state result m ()
 sendClientResponse node response = do
   spec <- view specification
-  lift $ (spec ^. Spec.sendClientResponse) node response
+  lift $ Spec.sendClientResponse spec node response
 
 sendAdminResponse :: (Monad m) => node -> AdminResponse node -> RaftT entry node state result m ()
 sendAdminResponse admin response = do
   spec <- view specification
-  lift $ (spec ^. Spec.sendAdminResponse) admin response
+  lift $ Spec.sendAdminResponse spec admin response
 
 whenRole ::
   (Monad m) =>
@@ -228,7 +227,7 @@ applyEntry ::
   ) =>
   LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
 applyEntry (LogEntryCommand (Command reqId entry)) = do
-  apply <- view (specification . applyLogEntry)
+  apply <- view specification <&> applyLogEntry
   (newState, result) <- use internalState <&> flip apply entry
   trace (`LogEntryApplied` entry)
 
@@ -316,7 +315,7 @@ voteFor mNode = do
   spec <- view specification
   s <- self
   t <- use term
-  lift $ (spec ^. writeVotedFor) s t mNode
+  lift $ writeVotedFor spec s t mNode
   votedFor .= mNode
   traverse_ (\n -> trace (\ctx -> VotedFor ctx t n)) mNode
 
@@ -394,7 +393,7 @@ trace :: (Monad m) => (EventContext node -> RaftTrace entry result node state) -
 trace makeTrace = do
   eventCtx <- EventContext <$> use term <*> self
   spec <- view specification
-  lift $ (spec ^. tracer) (makeTrace eventCtx)
+  lift $ tracer spec (makeTrace eventCtx)
 
 -- | Update the internal term state, returning the previous and new 'Term's.
 --
@@ -408,7 +407,7 @@ updateTerm update = do
   when (newTerm > currTerm) $ do
     spec <- view specification
 
-    lift $ (spec ^. writeTerm) s newTerm
+    lift $ writeTerm spec s newTerm
     term .= newTerm
   pure (currTerm, newTerm)
 
@@ -465,7 +464,7 @@ persistSnapshot snapshot = do
   queue <- view eventQueue
 
   void $ lift $ async $ do
-    (spec ^. writeSnapshot) s snapshot
+    writeSnapshot spec s snapshot
     atomically $
       writeTQueue
         queue
@@ -532,7 +531,7 @@ appendLogEntries entries = do
   commandLog %= (`Log.extend` ((ourTerm,) <$> Seq.fromList (NonEmpty.toList entries)))
 
   for_ (zip [succ startingLogIndex ..] (NonEmpty.toList entries)) $ \(ix, entry) -> do
-    lift $ (spec ^. writeLogEntry) s ix ourTerm entry
+    lift $ writeLogEntry spec s ix ourTerm entry
     trace (\ctx -> LogEntryAppended ctx ix entry)
 
   adoptConfigurationFromLog
@@ -557,10 +556,10 @@ restoreState = do
 
   (persistedTerm, persistedVote, mPersistedSnapshot) <-
     lift $ do
-      t <- (spec ^. readTerm) s
+      t <- readTerm spec s
       (t,,)
-        <$> (spec ^. readVotedFor) s t
-        <*> (spec ^. readSnapshot) s
+        <$> readVotedFor spec s t
+        <*> readSnapshot spec s
 
   term .= persistedTerm
   votedFor .= persistedVote
@@ -570,7 +569,7 @@ restoreState = do
   entries <-
     lift $
       let loop ix acc =
-            (spec ^. readLogEntry) s ix >>= \case
+            readLogEntry spec s ix >>= \case
               Nothing -> pure acc
               Just entry -> loop (succ ix) (acc |> entry)
        in loop (succ snapshotIndex) Seq.empty
@@ -652,7 +651,7 @@ becomeCandidate = do
 
   s <- self
   term += 1
-  w <- view (specification . writeTerm)
+  w <- view specification <&> writeTerm
   thisTerm <- use term
   lift (w s thisTerm)
 

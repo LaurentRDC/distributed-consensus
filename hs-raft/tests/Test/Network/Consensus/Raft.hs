@@ -47,9 +47,9 @@ import Network.Consensus.Raft
     Microseconds,
     RPC,
     RPCResult,
-    RaftSpec (..),
     RaftTrace (..),
     Snapshot,
+    Specification (..),
     Term,
     runRaftServer,
   )
@@ -371,7 +371,7 @@ instance Exception TestFault
 data Server s
   = MkServer
   { sConfig :: Config Node,
-    sSpec :: RaftSpec Command Node State Result (IOSim s),
+    sSpec :: Specification Command Node State Result (IOSim s),
     sFaultInjector :: TVar (IOSim s) (Maybe (ThreadId (IOSim s))) -> IOSim s ()
   }
 
@@ -397,7 +397,7 @@ runServerWithFaults server clusterState = do
       atomically $ writeTVar tidVar Nothing
       case r of
         Left _ -> do
-          server.sSpec._tracer (Crashed server.sConfig.nodeId)
+          server.sSpec.tracer (Crashed server.sConfig.nodeId)
           threadDelay $ fromIntegral clientRetryTick -- simulate a restart
           supervisor tidVar workload
         Right () -> pure ()
@@ -545,27 +545,27 @@ mkServer debug resources hbto etolb etoub faultProb seed node =
             maxLogLength = Just 5 -- TODO: make configurable
           },
       sSpec =
-        MkRaftSpec
-          { _readLogEntry = readLogEntry resources.logPersistence,
-            _writeLogEntry = writeLogEntry resources.logPersistence,
-            _readTerm = read resources.termPersistence,
-            _writeTerm = write resources.termPersistence,
-            _readVotedFor = readVotedFor resources.votePersistence,
-            _writeVotedFor = writeVotedFor resources.votePersistence,
-            _readSnapshot = read resources.snapshotPersistence,
-            _writeSnapshot = \self snapshot -> write resources.snapshotPersistence self (Just snapshot),
-            _applyLogEntry = step,
-            _sendRPC = send resources.networkFabric.rpcMailbox,
-            _sendRPCResult = send resources.networkFabric.rpcResultsMailbox,
-            _sendClientResponse = send resources.networkFabric.responsesMailbox,
-            _sendAdminResponse = send resources.networkFabric.adminResponsesMailbox,
-            _receiveRPC = receive resources.networkFabric.rpcMailbox node <&> Right,
-            _receiveRPCResult = receive resources.networkFabric.rpcResultsMailbox node <&> Right,
-            _receiveClientRequests = receiveAll resources.networkFabric.requestsMailbox node,
-            _receiveAdminRequest = receive resources.networkFabric.adminMailbox node <&> Right,
+        Specification
+          { readLogEntry = readLogEntryTest resources.logPersistence,
+            writeLogEntry = writeLogEntryTest resources.logPersistence,
+            readTerm = readTest resources.termPersistence,
+            writeTerm = writeTest resources.termPersistence,
+            readVotedFor = readVotedForTest resources.votePersistence,
+            writeVotedFor = writeVotedForTest resources.votePersistence,
+            readSnapshot = readTest resources.snapshotPersistence,
+            writeSnapshot = \self snapshot -> writeTest resources.snapshotPersistence self (Just snapshot),
+            applyLogEntry = step,
+            sendRPC = send resources.networkFabric.rpcMailbox,
+            sendRPCResult = send resources.networkFabric.rpcResultsMailbox,
+            sendClientResponse = send resources.networkFabric.responsesMailbox,
+            sendAdminResponse = send resources.networkFabric.adminResponsesMailbox,
+            receiveRPC = receive resources.networkFabric.rpcMailbox node <&> Right,
+            receiveRPCResult = receive resources.networkFabric.rpcResultsMailbox node <&> Right,
+            receiveClientRequests = receiveAll resources.networkFabric.requestsMailbox node,
+            receiveAdminRequest = receive resources.networkFabric.adminMailbox node <&> Right,
             -- We debug-print events here, rather than in `checkScenario`,
             -- because `checkScenario` can fail and produce no trace.
-            _tracer = traceM . debug
+            tracer = traceM . debug
           },
       sFaultInjector = faultInjector faultProb seed
     }
@@ -667,7 +667,7 @@ testHarness
             receiveAdminResponse = receive network.adminResponsesMailbox adminNode <&> Right
           }
 
-writeLogEntry ::
+writeLogEntryTest ::
   (MonadSTM m) =>
   IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) ->
   Node ->
@@ -675,36 +675,36 @@ writeLogEntry ::
   Term ->
   LogEntry Node Command ->
   m ()
-writeLogEntry storage self logIndex term entry = case IntMap.lookup (fromIntegral self) storage of
+writeLogEntryTest storage self logIndex term entry = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
   Just var -> atomically $ do
     log' <- readTVar var
     writeTVar var (Map.insert logIndex (term, entry) log')
 
-readLogEntry :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) -> Node -> LogIndex -> m (Maybe (Term, LogEntry Node Command))
-readLogEntry storage self logIndex = case IntMap.lookup (fromIntegral self) storage of
+readLogEntryTest :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) -> Node -> LogIndex -> m (Maybe (Term, LogEntry Node Command))
+readLogEntryTest storage self logIndex = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
   Just var -> readTVarIO var <&> Map.lookup logIndex
 
-writeVotedFor :: (MonadSTM m) => IntMap (TVar m (Map Term Node)) -> Node -> Term -> Maybe Node -> m ()
-writeVotedFor storage self term value = case IntMap.lookup (fromIntegral self) storage of
+writeVotedForTest :: (MonadSTM m) => IntMap (TVar m (Map Term Node)) -> Node -> Term -> Maybe Node -> m ()
+writeVotedForTest storage self term value = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
   Just var -> atomically $ do
     m <- readTVar var
     writeTVar var (Map.alter (const value) term m)
 
-readVotedFor :: (MonadSTM m) => IntMap (TVar m (Map Term Node)) -> Node -> Term -> m (Maybe Node)
-readVotedFor storage self term = case IntMap.lookup (fromIntegral self) storage of
+readVotedForTest :: (MonadSTM m) => IntMap (TVar m (Map Term Node)) -> Node -> Term -> m (Maybe Node)
+readVotedForTest storage self term = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
   Just var -> Map.lookup term <$> readTVarIO var
 
-write :: (MonadSTM m) => IntMap (TVar m a) -> Node -> a -> m ()
-write storage self value = case IntMap.lookup (fromIntegral self) storage of
+writeTest :: (MonadSTM m) => IntMap (TVar m a) -> Node -> a -> m ()
+writeTest storage self value = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
   Just var -> atomically $ writeTVar var value
 
-read :: (MonadSTM m) => IntMap (TVar m a) -> Node -> m a
-read storage self = case IntMap.lookup (fromIntegral self) storage of
+readTest :: (MonadSTM m) => IntMap (TVar m a) -> Node -> m a
+readTest storage self = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
   Just var -> readTVarIO var
 

@@ -22,7 +22,7 @@ import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Lens.Micro.Platform (at, use, view, (%=), (.=), (^.))
+import Lens.Micro.Platform (at, use, view, (%=), (.=))
 import Network.Consensus.Raft.Admin (AdminCommand (..), AdminRequest)
 import qualified Network.Consensus.Raft.Admin as Admin
 import Network.Consensus.Raft.Client (ClientRequest, ClientResult (..))
@@ -38,20 +38,8 @@ import Network.Consensus.Raft.Log (Lookup (..), (!?))
 import qualified Network.Consensus.Raft.Log as Log
 import Network.Consensus.Raft.Messaging (Request (..), Response (..))
 import Network.Consensus.Raft.Transformer
-  ( AppendEntries (..),
-    AppendEntriesResult (..),
-    ClusterMembershipRequest (..),
-    ClusterMembershipResult (..),
-    Command (..),
-    Config (..),
-    Event (..),
-    InstallSnapshot (..),
-    InstallSnapshotResult (..),
-    LogEntry (..),
-    RPC (..),
-    RPCResult (..),
+  ( Config (..),
     RaftT,
-    RaftTrace (..),
     acceptClientRequests,
     adoptConfigurationFromLog,
     appendLogEntries,
@@ -61,28 +49,17 @@ import Network.Consensus.Raft.Transformer
     becomeCandidate,
     becomeFollower,
     checkElection,
-    clusterConfiguration,
-    commandLog,
-    commitIndex,
     configuration,
-    currentLeader,
     currentSnapshot,
     dequeueEvent,
     eventQueue,
     exitLock,
     isClusterMember,
-    matchIndex,
-    nextIndex,
     peers,
     persistSnapshot,
-    receiveAdminRequest,
-    receiveClientRequests,
-    receiveRPC,
-    receiveRPCResult,
     resetElectionTimer,
     resetHeartBeatTimer,
     restoreState,
-    role,
     self,
     sendAdminResponse,
     sendAppendEntriesTo,
@@ -91,16 +68,38 @@ import Network.Consensus.Raft.Transformer
     sendRPC,
     sendRPCResult,
     specification,
-    term,
     trace,
-    tracer,
     updateTerm,
     voteFor,
+  )
+import Network.Consensus.Raft.Transformer.Spec
+  ( AppendEntries (..),
+    AppendEntriesResult (..),
+    ClusterMembershipError (..),
+    ClusterMembershipRequest (..),
+    ClusterMembershipResult (..),
+    Command (..),
+    Event (..),
+    InstallSnapshot (..),
+    InstallSnapshotResult (..),
+    LogEntry (..),
+    RPC (..),
+    RPCResult (..),
+    RaftTrace (..),
+    clusterConfiguration,
+    commandLog,
+    commitIndex,
+    currentLeader,
+    matchIndex,
+    nextIndex,
+    role,
+    term,
+    tracer,
     votedFor,
     writeLogEntry,
     yesVotes,
   )
-import Network.Consensus.Raft.Transformer.Spec (ClusterMembershipError (..))
+import qualified Network.Consensus.Raft.Transformer.Spec as Spec
 
 server ::
   ( Ord node,
@@ -116,7 +115,7 @@ server = do
   queue <- view eventQueue
   s <- self
 
-  let trace' makeTrace = spec ^. tracer $ makeTrace s
+  let trace' makeTrace = tracer spec $ makeTrace s
   t1 <- lift $ async $ receiveRPCsThread spec queue trace'
   t2 <- lift $ async $ receiveRPCResultsThread spec queue trace'
   t3 <- lift $ async $ receiveClientRequestsThread spec queue
@@ -155,25 +154,25 @@ server = do
   where
     receiveRPCsThread spec queue trace' = do
       labelThisThread "receiceRPCs"
-      let recv = spec ^. receiveRPC
+      let recv = Spec.receiveRPC spec
       forever $ do
         recv >>= \case
           Left errMsg -> trace' (`DeserializationError` errMsg)
           Right rpc -> atomically $ writeTQueue queue (EventRPC rpc)
     receiveRPCResultsThread spec queue trace' = do
       labelThisThread "receiceRPCResults"
-      let recv = spec ^. receiveRPCResult
+      let recv = Spec.receiveRPCResult spec
       forever $ do
         recv >>= \case
           Left errMsg -> trace' (`DeserializationError` errMsg)
           Right rpcResult -> atomically $ writeTQueue queue (EventRPCResult rpcResult)
     receiveClientRequestsThread spec queue = do
       labelThisThread "receiceClientRequests"
-      let recv = spec ^. receiveClientRequests
+      let recv = Spec.receiveClientRequests spec
       forever $ recv >>= atomically . writeTQueue queue . EventIncomingClientRequest
     receiveAdminRequestsThread spec queue trace' = do
       labelThisThread "receiveAdminRequests"
-      let recv = spec ^. receiveAdminRequest
+      let recv = Spec.receiveAdminRequest spec
       forever $ do
         recv >>= \case
           Left errMsg -> trace' (`DeserializationError` errMsg)
@@ -307,7 +306,7 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
         commandLog %= (`Log.keepEntriesUpTo` prevLogIndex)
 
         for_ (zip [firstNewIndex ..] (toList newEntries)) $ \(ix, (entryTerm, entry)) -> do
-          lift $ (spec ^. writeLogEntry) s ix entryTerm entry
+          lift $ writeLogEntry spec s ix entryTerm entry
           trace (\ctx -> LogEntryAppended ctx ix entry)
 
         commandLog %= (`Log.extend` newEntries)

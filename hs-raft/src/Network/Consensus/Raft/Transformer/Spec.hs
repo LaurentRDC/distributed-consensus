@@ -6,25 +6,7 @@
 
 module Network.Consensus.Raft.Transformer.Spec
   ( -- * Protocol specification
-    RaftSpec (..),
-    readLogEntry,
-    writeLogEntry,
-    readTerm,
-    writeTerm,
-    readVotedFor,
-    writeVotedFor,
-    writeSnapshot,
-    readSnapshot,
-    applyLogEntry,
-    sendRPC,
-    sendRPCResult,
-    sendClientResponse,
-    sendAdminResponse,
-    receiveRPC,
-    receiveRPCResult,
-    receiveClientRequests,
-    receiveAdminRequest,
-    tracer,
+    Specification (..),
 
     -- * Raft state
     RaftState,
@@ -264,36 +246,34 @@ data RaftTrace entry result node state
     Crashed node
   deriving (Eq, Show)
 
-data RaftSpec entry node state result m = MkRaftSpec
+data Specification entry node state result m = Specification
   { -- TODO: allow to read and write multiple log entries at once, for performance optimizations
-    _readLogEntry :: node -> LogIndex -> m (Maybe (Term, LogEntry node entry)),
-    _writeLogEntry :: node -> LogIndex -> Term -> LogEntry node entry -> m (),
-    _readTerm :: node -> m Term,
-    _writeTerm :: node -> Term -> m (),
-    _readVotedFor :: node -> Term -> m (Maybe node),
-    _writeVotedFor :: node -> Term -> Maybe node -> m (),
-    _readSnapshot :: node -> m (Maybe (Snapshot node state)),
-    _writeSnapshot :: node -> Snapshot node state -> m (),
-    _applyLogEntry :: state -> entry -> (state, result),
-    _sendRPC :: node -> RPC node entry state -> m (),
-    _sendRPCResult :: node -> RPCResult node result -> m (),
-    _sendClientResponse :: node -> ClientResponse node result -> m (),
-    _sendAdminResponse :: node -> AdminResponse node -> m (),
+    readLogEntry :: node -> LogIndex -> m (Maybe (Term, LogEntry node entry)),
+    writeLogEntry :: node -> LogIndex -> Term -> LogEntry node entry -> m (),
+    readTerm :: node -> m Term,
+    writeTerm :: node -> Term -> m (),
+    readVotedFor :: node -> Term -> m (Maybe node),
+    writeVotedFor :: node -> Term -> Maybe node -> m (),
+    readSnapshot :: node -> m (Maybe (Snapshot node state)),
+    writeSnapshot :: node -> Snapshot node state -> m (),
+    applyLogEntry :: state -> entry -> (state, result),
+    sendRPC :: node -> RPC node entry state -> m (),
+    sendRPCResult :: node -> RPCResult node result -> m (),
+    sendClientResponse :: node -> ClientResponse node result -> m (),
+    sendAdminResponse :: node -> AdminResponse node -> m (),
     -- We use 'Text' to represent deserialization errors because this is
     -- easiest to represent to the user. I don't think it's worth adding
     -- yet another type variable to the spec.
-    _receiveRPC :: m (Either Text (RPC node entry state)),
-    _receiveRPCResult :: m (Either Text (RPCResult node result)),
+    receiveRPC :: m (Either Text (RPC node entry state)),
+    receiveRPCResult :: m (Either Text (RPCResult node result)),
     -- | Receive client requests.
     -- This call should block until at least one request is available. If
     -- your software stack allows for it, queueing requests allows
     -- for pipelined processing which is much more efficient.
-    _receiveClientRequests :: m (NonEmpty (ClientRequest node entry)),
-    _receiveAdminRequest :: m (Either Text (AdminRequest node)),
-    _tracer :: RaftTrace entry result node state -> m ()
+    receiveClientRequests :: m (NonEmpty (ClientRequest node entry)),
+    receiveAdminRequest :: m (Either Text (AdminRequest node)),
+    tracer :: RaftTrace entry result node state -> m ()
   }
-
-makeLenses ''RaftSpec
 
 data RaftState node entry state = MkRaftState
   { _role :: !Role,
