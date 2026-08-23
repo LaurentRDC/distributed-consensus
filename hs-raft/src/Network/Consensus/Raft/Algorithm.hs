@@ -201,8 +201,6 @@ handleEvent EventHeartBeatTimeout = sendHeartbeat
 handleEvent (EventIncomingClientRequest requests) = handleClientRequest requests
 handleEvent (EventRPC (RequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm)) =
   handleRequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm
-handleEvent (EventRPC (HeartBeat aeTerm senderNodeId _lastLogIndex _aeCommitIndex)) =
-  handleHeartBeat aeTerm senderNodeId
 handleEvent (EventRPC (AE appendEntries)) = handleAppendEntries appendEntries
 handleEvent (EventRPC (IS installSnapshot)) = handleInstallSnapshot installSnapshot
 handleEvent (EventRPC (CM clusterMembershipRequest)) = handleClusterMembershipRequest clusterMembershipRequest
@@ -421,20 +419,6 @@ handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLas
       sendRPCResult candidateNode (RequestVoteResult s ourTerm True)
       r <- use role
       when (r == Follower) resetElectionTimer
-
-handleHeartBeat ::
-  ( MonadMVar m,
-    MonadAsync m,
-    MonadMask m,
-    MonadFork m,
-    MonadDelay m
-  ) =>
-  Term -> node -> RaftT entry node state result m ()
-handleHeartBeat aeTerm senderNodeId =
-  handleTermNumber aeTerm >>= \case
-    GT -> becomeFollower (Just senderNodeId) >> resetElectionTimer
-    EQ -> becomeFollower (Just senderNodeId) >> resetElectionTimer
-    LT -> pure ()
 
 handleRequestVoteResult ::
   ( Ord node,

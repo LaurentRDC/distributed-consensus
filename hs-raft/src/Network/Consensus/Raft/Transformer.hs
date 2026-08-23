@@ -170,15 +170,14 @@ sendHeartbeat ::
 sendHeartbeat =
   whenRole Leader $ do
     config <- view configuration
-    thisTerm <- use term
-    lastLogIx <- use commandLog <&> Log.lastLogIndex
-    theCommitIndex <- use commitIndex
-    let rpc = HeartBeat thisTerm config.nodeId lastLogIx theCommitIndex
-    peers >>= (`sendRPCConcurrently` rpc)
+    -- TODO: send append entries in parallel
+    peers >>= traverse_ sendAppendEntriesTo
     view heartBeatTimer >>= lift . resetTimer config.heartBeatTimeout
 
 -- | For a given destination node, look up which of the entries
 -- in our log should be replicated, and send an appropriate 'AppendEntries' RPC.
+--
+-- Even if a node
 sendAppendEntriesTo :: (Ord node, Monad m) => node -> RaftT entry node state result m ()
 sendAppendEntriesTo destination = do
   entries <- use commandLog
@@ -200,18 +199,17 @@ sendAppendEntriesTo destination = do
     >>= \case
       Just (previousLogIndex, previousLogTerm) -> do
         let toBeReplicated = Seq.drop (fromIntegral $ Log.relativeIndex entries previousLogIndex) (logEntries entries)
-        unless
-          (null toBeReplicated)
-          ( ( AppendEntries
-                <$> use term
-                <*> (view configuration <&> nodeId)
-                <*> pure previousLogIndex
-                <*> pure previousLogTerm
-                <*> pure toBeReplicated
-                <*> use commitIndex
-            )
-              >>= sendRPC destination . AE
+        -- We send 'AppendEntries' event if 'toBeReplicated'
+        -- is empty, as this serves as a heartbeat mechanism
+        ( AppendEntries
+            <$> use term
+            <*> (view configuration <&> nodeId)
+            <*> pure previousLogIndex
+            <*> pure previousLogTerm
+            <*> pure toBeReplicated
+            <*> use commitIndex
           )
+          >>= sendRPC destination . AE
       Nothing ->
         ( InstallSnapshot
             <$> use term

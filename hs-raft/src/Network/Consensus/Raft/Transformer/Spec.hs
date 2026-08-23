@@ -177,15 +177,6 @@ data RPC node entry state
   = AE (AppendEntries node entry)
   | IS (InstallSnapshot node state)
   | CM (ClusterMembershipRequest node)
-  | HeartBeat
-      -- | Leader's term
-      Term
-      -- | Identification of the leader
-      node
-      -- | Previous log index
-      LogIndex
-      -- | Commit index
-      LogIndex
   | RequestVote
       -- | Candidate term
       Term
