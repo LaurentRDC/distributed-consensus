@@ -59,7 +59,7 @@ import qualified Network.Consensus.Raft.Admin as Admin
 import Network.Consensus.Raft.Client (ClientRequest, ClientResponse, RaftClientSpec (..), RaftClientT, request, withRaftClientT)
 import System.Random (mkStdGen64, uniformR)
 import Test.Network.Consensus.Raft.Options (PrintTrace (..), setNumRacyTests, withExplorationOptions, withPrintTraceOption)
-import Test.Network.Consensus.Raft.Properties (allProperties)
+import Test.Network.Consensus.Raft.Properties (FaultInjection (..), allProperties)
 import Test.Network.Consensus.Raft.Scenario (checkScenario)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck
@@ -133,7 +133,7 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
             (scenario scenarioInputs)
             ( \_ trace ->
                 checkScenario
-                  (allProperties @Command @Result @Node @State)
+                  (allProperties @Command @Result @Node @State faultInjection)
                   trace
             )
   where
@@ -314,14 +314,6 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
                           <> show command
                           <> " served, and no node in this scenario can crash: "
                           <> why
-
--- | Whether we expect the cluster to always respond, or not.
---
--- In general, with faults, Raft clusters are not expected to be live.
--- However, if the fault injector is turned off, we DO expect an answer!
-data FaultInjection
-  = NoFaultInjection
-  | FaultInjection
 
 data ScenarioInputs
   = ScenarioInputs

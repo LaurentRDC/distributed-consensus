@@ -3,7 +3,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Test.Network.Consensus.Raft.Properties
-  ( allProperties,
+  ( FaultInjection (..),
+    allProperties,
 
     -- * Individual properties
     singleLeaderPerTermProperty,
@@ -45,24 +46,37 @@ import Test.Network.Consensus.Raft.Scenario
     stateRestored,
   )
 
+-- | Whether we expect the cluster to always respond, or not.
+--
+-- In general, with faults, Raft clusters are not expected to be live.
+-- However, if the fault injector is turned off, we DO expect an answer!
+data FaultInjection
+  = NoFaultInjection
+  | FaultInjection
+
 -- It's still not clear to me why, but without the explicit forall here,
--- RaftTrace events don't get picked up
-allProperties :: forall entry result node state. (Ord node, Show node) => Scenario entry result node state
-allProperties =
-  void $
-    allOf
-      [ singleLeaderPerTermProperty,
-        singleVoteCastPerTermProperty,
-        monotonicallyIncreasingTermProperty,
-        allAcceptedCommandReceiveResponseProperty,
-        allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration,
-        allAdminRequestToJoinComplete,
-        allAdminRequestToLeaveComplete,
-        indexRelationshipProperty,
-        monotonicallyIncreasingLastAppliedIndexProperty,
-        monotonicallyIncreasingCommitIndexProperty,
-        crashRecoveryProperty
-      ]
+-- RaftTrace events don't get picked up.
+allProperties :: forall entry result node state. (Ord node, Show node) => FaultInjection -> Scenario entry result node state
+allProperties faultInjection =
+  let common =
+        [ singleLeaderPerTermProperty,
+          singleVoteCastPerTermProperty,
+          monotonicallyIncreasingTermProperty,
+          indexRelationshipProperty,
+          monotonicallyIncreasingLastAppliedIndexProperty,
+          monotonicallyIncreasingCommitIndexProperty,
+          crashRecoveryProperty
+        ]
+      extras = case faultInjection of
+        NoFaultInjection ->
+          [ allAcceptedCommandReceiveResponseProperty,
+            allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration,
+            allAdminRequestToJoinComplete,
+            allAdminRequestToLeaveComplete
+          ]
+        FaultInjection -> []
+   in void $
+        allOf (common <> extras)
 
 -- | Ensure that in each term where a leader is elected, no other leader
 -- is elected
