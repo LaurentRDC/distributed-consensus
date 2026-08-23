@@ -398,7 +398,7 @@ runServerWithFaults server clusterState = do
       case r of
         Left _ -> do
           server.sSpec._tracer (Crashed server.sConfig.nodeId)
-          threadDelay 100_000 -- simulate a restart
+          threadDelay $ fromIntegral clientRetryTick -- simulate a restart
           supervisor tidVar workload
         Right () -> pure ()
 

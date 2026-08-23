@@ -298,11 +298,12 @@ indexRelationshipProperty = go mempty <?> "index relationship did not hold"
             _ -> go acc
         )
 
-crashRecoveryProperty :: (Eq node) => Scenario entry result node state
-crashRecoveryProperty = go <?> "Node did not restore state after crash"
+crashRecoveryProperty :: (Eq node, Show node) => Scenario entry result node state
+crashRecoveryProperty = go
   where
     go = void $ whenever crashed $ \node ->
       eventually
         ( stateRestored >>= \(EventContext _ node', _, _) -> predicate $ \_ ->
             unless (node' == node) Nothing
         )
+        <?> ("Node " <> Text.show node <> " did not restore state after crash")

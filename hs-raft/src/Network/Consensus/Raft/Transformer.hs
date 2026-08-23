@@ -631,8 +631,7 @@ becomeFollower mLeaderNodeId = do
   unless (r == Follower) $ do
     trace BecameFollower
     role .= Follower
-  -- TODO: clear 'currentClientRequests' here; otherwise, pending requests
-  --       may leak memory forever
+  currentClientRequests .= Map.empty
   traverse_ (\leaderNodeId -> currentLeader .= Just leaderNodeId) mLeaderNodeId
 
 becomeCandidate ::
