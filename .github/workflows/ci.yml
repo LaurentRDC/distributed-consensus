@@ -111,3 +111,48 @@ jobs:
       - name: Run benchmarks
         run: |
           cabal bench all --project-file=cabal.optimized.project
+
+  haddock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GHC_VERSION: '9.14'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: ${{ env.GHC_VERSION }}
+
+      - name: Configure build
+        run: |
+          cabal configure \
+            --enable-documentation \
+            --disable-tests \
+            --disable-benchmarks \
+            --disable-optimization \
+            --semaphore \
+            -j
+          # Generate a plan.json
+          cabal build all --dry-run
+
+      - name: Cache Cabal store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.cabal-store }}
+          key: ${{ runner.os }}-ghc-${{ env.GHC_VERSION }}-documentation-${{ hashFiles('**/plan.json') }}
+          restore-keys: |
+            ${{ runner.os }}-ghc-${{ env.GHC_VERSION }}-benchmark
+
+      - name: Build
+        run: cabal haddock all --haddock-for-hackage
+        
+      - name: Upload Haddock artifacts
+        if: ${{ github.ref == 'refs/heads/master' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: haddock-artifact
+          path: dist-newstyle/*-docs.tar.gz
+          retention-days: 7
