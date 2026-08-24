@@ -9,7 +9,7 @@ license-file:       LICENSE
 author:             Laurent P. René de Cotret
 maintainer:         laurent.decotret@outlook.com
 copyright:          Laurent P. René de Cotret
-category:           Network
+category:           Distributed Systems, Consensus
 build-type:         Simple
 extra-doc-files:    CHANGELOG.md
 
@@ -30,17 +30,17 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  Network.Consensus.Raft
-                      Network.Consensus.Raft.Admin
-                      Network.Consensus.Raft.Client
-    other-modules:    Network.Consensus.Raft.Algorithm
-                      Network.Consensus.Raft.Domain
-                      Network.Consensus.Raft.Log
-                      Network.Consensus.Raft.Messaging
-                      Network.Consensus.Raft.Transformer
-                      Network.Consensus.Raft.Transformer.Definition
-                      Network.Consensus.Raft.Transformer.Spec
-                      Network.Consensus.Raft.Timer
+    exposed-modules:  Distributed.Consensus.Raft
+                      Distributed.Consensus.Raft.Admin
+                      Distributed.Consensus.Raft.Client
+    other-modules:    Distributed.Consensus.Raft.Algorithm
+                      Distributed.Consensus.Raft.Domain
+                      Distributed.Consensus.Raft.Log
+                      Distributed.Consensus.Raft.Messaging
+                      Distributed.Consensus.Raft.Transformer
+                      Distributed.Consensus.Raft.Transformer.Definition
+                      Distributed.Consensus.Raft.Transformer.Spec
+                      Distributed.Consensus.Raft.Timer
     -- GHC 9.6+ (base 4.18+) is required to infer types properly when
     -- using io-classes
     build-depends:    base >= 4.18 && <4.23
@@ -63,10 +63,10 @@ test-suite hs-raft-test
     other-modules:    Control.Monitor
                       Control.Monitor.Predicate
                       Control.Monitor.Reason
-                      Test.Network.Consensus.Raft
-                      Test.Network.Consensus.Raft.Options
-                      Test.Network.Consensus.Raft.Properties
-                      Test.Network.Consensus.Raft.Scenario
+                      Test.Distributed.Consensus.Raft
+                      Test.Distributed.Consensus.Raft.Options
+                      Test.Distributed.Consensus.Raft.Properties
+                      Test.Distributed.Consensus.Raft.Scenario
     ghc-options:      -rtsopts -threaded +RTS -N
     build-depends:    base >= 4.18 && <4.23
                     , containers

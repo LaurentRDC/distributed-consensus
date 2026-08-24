@@ -1,4 +1,4 @@
-module Network.Consensus.Raft
+module Distributed.Consensus.Raft
   ( -- * Server
     runRaftServer,
     Config (..),
@@ -50,8 +50,8 @@ import Control.Monad.Class.MonadAsync (MonadAsync)
 import Control.Monad.Class.MonadFork (MonadFork)
 import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay)
-import Network.Consensus.Raft.Algorithm (server)
-import Network.Consensus.Raft.Domain
+import Distributed.Consensus.Raft.Algorithm (server)
+import Distributed.Consensus.Raft.Domain
   ( ClusterConfiguration (..),
     LogIndex,
     RequestId,
@@ -60,18 +60,18 @@ import Network.Consensus.Raft.Domain
     SnapshotMetadata (..),
     Term,
   )
-import Network.Consensus.Raft.Log (Log)
-import Network.Consensus.Raft.Messaging
+import Distributed.Consensus.Raft.Log (Log)
+import Distributed.Consensus.Raft.Messaging
   ( Request (..),
     Response (..),
   )
-import Network.Consensus.Raft.Timer (Microseconds (..))
-import Network.Consensus.Raft.Transformer
+import Distributed.Consensus.Raft.Timer (Microseconds (..))
+import Distributed.Consensus.Raft.Transformer
   ( ClusterState (..),
     Config (..),
     runRaftT,
   )
-import Network.Consensus.Raft.Transformer.Spec
+import Distributed.Consensus.Raft.Transformer.Spec
   ( AppendEntries (..),
     AppendEntriesResult (..),
     ClusterMembershipError (..),

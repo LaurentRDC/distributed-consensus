@@ -10,7 +10,7 @@
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 
-module Test.Network.Consensus.Raft
+module Test.Distributed.Consensus.Raft
   ( tests,
   )
 where
@@ -38,7 +38,7 @@ import qualified Data.Set as Set
 import qualified Data.Text.Lazy as Text
 import Data.Word (Word64)
 import qualified Debug.Trace as Debug
-import Network.Consensus.Raft
+import Distributed.Consensus.Raft
   ( ClusterConfiguration (..),
     ClusterState,
     Config (..),
@@ -53,14 +53,14 @@ import Network.Consensus.Raft
     Term,
     runRaftServer,
   )
-import qualified Network.Consensus.Raft as Raft
-import Network.Consensus.Raft.Admin
-import qualified Network.Consensus.Raft.Admin as Admin
-import Network.Consensus.Raft.Client (ClientRequest, ClientResponse, RaftClientSpec (..), RaftClientT, request, withRaftClientT)
+import qualified Distributed.Consensus.Raft as Raft
+import Distributed.Consensus.Raft.Admin
+import qualified Distributed.Consensus.Raft.Admin as Admin
+import Distributed.Consensus.Raft.Client (ClientRequest, ClientResponse, RaftClientSpec (..), RaftClientT, request, withRaftClientT)
 import System.Random (mkStdGen64, uniformR)
-import Test.Network.Consensus.Raft.Options (PrintTrace (..), setNumRacyTests, withExplorationOptions, withPrintTraceOption)
-import Test.Network.Consensus.Raft.Properties (FaultInjection (..), allProperties)
-import Test.Network.Consensus.Raft.Scenario (checkScenario)
+import Test.Distributed.Consensus.Raft.Options (PrintTrace (..), setNumRacyTests, withExplorationOptions, withPrintTraceOption)
+import Test.Distributed.Consensus.Raft.Properties (FaultInjection (..), allProperties)
+import Test.Distributed.Consensus.Raft.Scenario (checkScenario)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck
   ( Arbitrary (arbitrary),

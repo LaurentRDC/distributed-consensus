@@ -2,7 +2,7 @@
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module Network.Consensus.Raft.Timer
+module Distributed.Consensus.Raft.Timer
   ( Microseconds (Microseconds),
     Timer,
     newTimer,

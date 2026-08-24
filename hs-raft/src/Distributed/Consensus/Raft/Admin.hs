@@ -6,7 +6,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 
-module Network.Consensus.Raft.Admin
+module Distributed.Consensus.Raft.Admin
   ( RaftAdminT,
     RaftAdminSpec (..),
     withRaftAdminT,
@@ -37,10 +37,10 @@ import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import Data.Word (Word64)
+import Distributed.Consensus.Raft.Domain (ClusterConfiguration)
+import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
-import Network.Consensus.Raft.Domain (ClusterConfiguration)
-import Network.Consensus.Raft.Messaging (Request (..), Response (..))
 
 data AdminCommand node
   = JoinCluster

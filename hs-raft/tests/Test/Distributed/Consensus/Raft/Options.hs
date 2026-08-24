@@ -1,4 +1,4 @@
-module Test.Network.Consensus.Raft.Options
+module Test.Distributed.Consensus.Raft.Options
   ( setNumRacyTests,
     withExplorationOptions,
     withPrintTraceOption,

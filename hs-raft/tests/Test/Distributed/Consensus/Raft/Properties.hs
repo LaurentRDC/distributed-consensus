@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Test.Network.Consensus.Raft.Properties
+module Test.Distributed.Consensus.Raft.Properties
   ( FaultInjection (..),
     allProperties,
 
@@ -32,8 +32,8 @@ import Control.Monitor
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as Text
-import Network.Consensus.Raft (CommandResponse (..), EventContext (..), LogIndex, RaftTrace (..))
-import Test.Network.Consensus.Raft.Scenario
+import Distributed.Consensus.Raft (CommandResponse (..), EventContext (..), LogIndex, RaftTrace (..))
+import Test.Distributed.Consensus.Raft.Scenario
   ( Scenario,
     clusterMembershipChangeCompleted,
     clusterMembershipChangeInitiated,

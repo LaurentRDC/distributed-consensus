@@ -2,7 +2,7 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module Network.Consensus.Raft.Domain
+module Distributed.Consensus.Raft.Domain
   ( Term,
     InternalRequestId,
     RequestId,
@@ -26,8 +26,8 @@ import Data.Int (Int64)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word64)
+import Distributed.Consensus.Raft.Client (ClientRequestId)
 import GHC.Generics (Generic)
-import Network.Consensus.Raft.Client (ClientRequestId)
 
 -- | Election term
 newtype Term = Term Int64

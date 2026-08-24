@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Network.Consensus.Raft.Algorithm
+module Distributed.Consensus.Raft.Algorithm
   ( server,
   )
 where
@@ -22,11 +22,10 @@ import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Lens.Micro.Platform (at, use, view, (%=), (.=))
-import Network.Consensus.Raft.Admin (AdminCommand (..), AdminRequest)
-import qualified Network.Consensus.Raft.Admin as Admin
-import Network.Consensus.Raft.Client (ClientRequest, ClientResult (..))
-import Network.Consensus.Raft.Domain
+import Distributed.Consensus.Raft.Admin (AdminCommand (..), AdminRequest)
+import qualified Distributed.Consensus.Raft.Admin as Admin
+import Distributed.Consensus.Raft.Client (ClientRequest, ClientResult (..))
+import Distributed.Consensus.Raft.Domain
   ( ClusterConfiguration (..),
     LogIndex,
     Role (..),
@@ -34,10 +33,10 @@ import Network.Consensus.Raft.Domain
     SnapshotMetadata (..),
     Term,
   )
-import Network.Consensus.Raft.Log (Lookup (..), (!?))
-import qualified Network.Consensus.Raft.Log as Log
-import Network.Consensus.Raft.Messaging (Request (..), Response (..))
-import Network.Consensus.Raft.Transformer
+import Distributed.Consensus.Raft.Log (Lookup (..), (!?))
+import qualified Distributed.Consensus.Raft.Log as Log
+import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
+import Distributed.Consensus.Raft.Transformer
   ( Config (..),
     RaftT,
     acceptClientRequests,
@@ -72,7 +71,7 @@ import Network.Consensus.Raft.Transformer
     updateTerm,
     voteFor,
   )
-import Network.Consensus.Raft.Transformer.Spec
+import Distributed.Consensus.Raft.Transformer.Spec
   ( AppendEntries (..),
     AppendEntriesResult (..),
     ClusterMembershipError (..),
@@ -99,7 +98,8 @@ import Network.Consensus.Raft.Transformer.Spec
     writeLogEntry,
     yesVotes,
   )
-import qualified Network.Consensus.Raft.Transformer.Spec as Spec
+import qualified Distributed.Consensus.Raft.Transformer.Spec as Spec
+import Lens.Micro.Platform (at, use, view, (%=), (.=))
 
 server ::
   ( Ord node,

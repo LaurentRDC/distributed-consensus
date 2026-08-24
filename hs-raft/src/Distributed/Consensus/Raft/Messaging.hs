@@ -1,6 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 
-module Network.Consensus.Raft.Messaging
+module Distributed.Consensus.Raft.Messaging
   ( Request (..),
     Response (..),
   )

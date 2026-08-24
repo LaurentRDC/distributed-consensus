@@ -4,7 +4,7 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module Network.Consensus.Raft.Log
+module Distributed.Consensus.Raft.Log
   ( -- * Log
     Log (lEntries, lSnapshotMetadata),
     buildLog,
@@ -30,8 +30,8 @@ where
 import Data.Maybe (fromMaybe)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
+import Distributed.Consensus.Raft.Domain (LogIndex, SnapshotMetadata (..), Term)
 import GHC.Generics (Generic)
-import Network.Consensus.Raft.Domain (LogIndex, SnapshotMetadata (..), Term)
 
 -- | 'RelativeIndex' is a relative position within the 'Log'. It is
 -- specified with respect to the snapshot.

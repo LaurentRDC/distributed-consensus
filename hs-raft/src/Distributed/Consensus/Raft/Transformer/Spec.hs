@@ -4,7 +4,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TemplateHaskell #-}
 
-module Network.Consensus.Raft.Transformer.Spec
+module Distributed.Consensus.Raft.Transformer.Spec
   ( -- * Protocol specification
     Specification (..),
 
@@ -55,12 +55,12 @@ import Data.Sequence (Seq)
 import Data.Set (Set)
 import Data.Text (Text)
 import Data.Word (Word64)
+import Distributed.Consensus.Raft.Admin (AdminRequest, AdminResponse)
+import Distributed.Consensus.Raft.Client (ClientRequest, ClientResponse)
+import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), InternalRequestId, LogIndex, RequestId, Role (..), Snapshot, SnapshotMetadata, Term)
+import Distributed.Consensus.Raft.Log (Log, newLog)
 import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
-import Network.Consensus.Raft.Admin (AdminRequest, AdminResponse)
-import Network.Consensus.Raft.Client (ClientRequest, ClientResponse)
-import Network.Consensus.Raft.Domain (ClusterConfiguration (..), InternalRequestId, LogIndex, RequestId, Role (..), Snapshot, SnapshotMetadata, Term)
-import Network.Consensus.Raft.Log (Log, newLog)
 import System.Random (StdGen, mkStdGen64)
 
 -- | A 'Command' comes from clients

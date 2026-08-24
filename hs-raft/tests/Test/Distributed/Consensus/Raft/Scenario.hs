@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Test.Network.Consensus.Raft.Scenario
+module Test.Distributed.Consensus.Raft.Scenario
   ( Scenario,
     checkScenario,
     module Control.Monitor,
@@ -32,7 +32,7 @@ import Control.Monitor (Monitor, Predicate, ppReasonsWithTrace, predicate, runMo
 import Data.Dynamic (Typeable, fromDynamic)
 import Data.Set (Set)
 import qualified Data.Text as Text
-import Network.Consensus.Raft
+import Distributed.Consensus.Raft
   ( ClusterConfiguration (..),
     CommandResponse,
     Event (..),
@@ -47,7 +47,7 @@ import Network.Consensus.Raft
     RequestId,
     Term,
   )
-import Network.Consensus.Raft.Admin (AdminCommand (..))
+import Distributed.Consensus.Raft.Admin (AdminCommand (..))
 import Test.Tasty.QuickCheck (Property, counterexample)
 
 type Scenario entry result state node =

@@ -1,6 +1,6 @@
 {-# LANGUAGE TemplateHaskell #-}
 
-module Network.Consensus.Raft.Transformer.Definition
+module Distributed.Consensus.Raft.Transformer.Definition
   ( runRaftT,
     RaftT,
     Config (..),
@@ -32,10 +32,10 @@ import Control.Monad.Trans.RWS.CPS (RWST, ask, asks, evalRWST, get, gets, local,
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word64)
+import Distributed.Consensus.Raft.Domain (Role (..))
+import Distributed.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
+import Distributed.Consensus.Raft.Transformer.Spec (Event (..), RaftState, Specification, initialRaftState)
 import Lens.Micro.Platform (makeLenses)
-import Network.Consensus.Raft.Domain (Role (..))
-import Network.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
-import Network.Consensus.Raft.Transformer.Spec (Event (..), RaftState, Specification, initialRaftState)
 
 type RaftT entry node state result m =
   RWST

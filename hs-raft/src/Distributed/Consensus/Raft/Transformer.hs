@@ -2,8 +2,8 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE TupleSections #-}
 
-module Network.Consensus.Raft.Transformer
-  ( module Network.Consensus.Raft.Transformer.Definition,
+module Distributed.Consensus.Raft.Transformer
+  ( module Distributed.Consensus.Raft.Transformer.Definition,
 
     -- * Cluster nodes
     self,
@@ -73,17 +73,17 @@ import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Traversable (for)
+import Distributed.Consensus.Raft.Admin (AdminResponse)
+import Distributed.Consensus.Raft.Client (ClientRequest, ClientResponse, ClientResult (..))
+import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId (clientRequestId), Role (..), Snapshot (..), SnapshotMetadata (..), Term, allNodes, hasQuorum, mkRequestId)
+import Distributed.Consensus.Raft.Log (Lookup (..), absoluteIndex, logEntries)
+import qualified Distributed.Consensus.Raft.Log as Log
+import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
+import Distributed.Consensus.Raft.Timer (Microseconds, resetTimer)
+import Distributed.Consensus.Raft.Transformer.Definition
+import Distributed.Consensus.Raft.Transformer.Spec hiding (sendAdminResponse, sendClientResponse, sendRPC, sendRPCResult)
+import qualified Distributed.Consensus.Raft.Transformer.Spec as Spec
 import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (<%=))
-import Network.Consensus.Raft.Admin (AdminResponse)
-import Network.Consensus.Raft.Client (ClientRequest, ClientResponse, ClientResult (..))
-import Network.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId (clientRequestId), Role (..), Snapshot (..), SnapshotMetadata (..), Term, allNodes, hasQuorum, mkRequestId)
-import Network.Consensus.Raft.Log (Lookup (..), absoluteIndex, logEntries)
-import qualified Network.Consensus.Raft.Log as Log
-import Network.Consensus.Raft.Messaging (Request (..), Response (..))
-import Network.Consensus.Raft.Timer (Microseconds, resetTimer)
-import Network.Consensus.Raft.Transformer.Definition
-import Network.Consensus.Raft.Transformer.Spec hiding (sendAdminResponse, sendClientResponse, sendRPC, sendRPCResult)
-import qualified Network.Consensus.Raft.Transformer.Spec as Spec
 import System.Random (uniformR)
 
 -- | Node identifier

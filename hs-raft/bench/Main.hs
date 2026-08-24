@@ -25,17 +25,17 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Word (Word64)
-import GHC.Generics (Generic)
-import Network.Consensus.Raft (Config (..), Microseconds, RPC, RPCResult, Specification (..), runRaftServer)
-import qualified Network.Consensus.Raft as Raft
-import Network.Consensus.Raft.Admin (AdminRequest, AdminResponse)
-import Network.Consensus.Raft.Client
+import Distributed.Consensus.Raft (Config (..), Microseconds, RPC, RPCResult, Specification (..), runRaftServer)
+import qualified Distributed.Consensus.Raft as Raft
+import Distributed.Consensus.Raft.Admin (AdminRequest, AdminResponse)
+import Distributed.Consensus.Raft.Client
   ( ClientRequest,
     ClientResponse,
     RaftClientSpec (..),
     request,
     withRaftClientT,
   )
+import GHC.Generics (Generic)
 import Test.Tasty (withResource)
 import Test.Tasty.Bench (bench, bgroup, defaultMain, nfIO)
 

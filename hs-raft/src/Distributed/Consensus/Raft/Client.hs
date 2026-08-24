@@ -6,7 +6,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 
-module Network.Consensus.Raft.Client
+module Distributed.Consensus.Raft.Client
   ( RaftClientT,
     RaftClientSpec (..),
     withRaftClientT,
@@ -30,9 +30,9 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import Data.Word (Word64)
+import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import GHC.Generics (Generic)
 import Lens.Micro.Platform (makeLenses)
-import Network.Consensus.Raft.Messaging (Request (..), Response (..))
 
 -- Alphabet for communicating with clients
 
