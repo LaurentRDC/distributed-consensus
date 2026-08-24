@@ -76,18 +76,18 @@ withRaftClientT ::
   RaftClientSpec entry node result m ->
   ((forall a. RaftClientT entry node result m a -> m a) -> m b) ->
   m b
-withRaftClientT self spec withSession = do
+withRaftClientT self impl withSession = do
   nRId <- newTVarIO 0
   mbox <- newTVarIO mempty
   let env =
         MkRaftClientEnv
           { node = self,
             nextRequestId = nRId,
-            specification = spec,
+            implementation = impl,
             mailbox = mbox
           }
       recvLoop = do
-        receiveResponse spec >>= \resp -> do
+        receiveResponse impl >>= \resp -> do
           let reqId = responseRequestId resp
           atomically $ do
             box <- readTVar mbox
@@ -103,7 +103,7 @@ data RaftClientEnv entry node result m
   = MkRaftClientEnv
   { node :: !node,
     nextRequestId :: !(TVar m ClientRequestId),
-    specification :: RaftClientSpec entry node result m,
+    implementation :: RaftClientSpec entry node result m,
     mailbox :: TVar m (Map ClientRequestId (TMVar m (ClientResponse node result)))
   }
 
@@ -119,7 +119,7 @@ request ::
   entry ->
   RaftClientT entry node result m (Either Text (node, result))
 request lastKnownLeader entry = do
-  (self, send) <- MkRaftClientT $ asks (node &&& sendRequest . specification)
+  (self, send) <- MkRaftClientT $ asks (node &&& sendRequest . implementation)
   mbox <- MkRaftClientT $ asks mailbox
   reqIdVar <- MkRaftClientT $ asks nextRequestId
   lift

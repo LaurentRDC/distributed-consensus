@@ -76,13 +76,13 @@ import Data.Traversable (for)
 import Distributed.Consensus.Raft.Admin (AdminResponse)
 import Distributed.Consensus.Raft.Client (ClientRequest, ClientResponse, ClientResult (..))
 import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId (clientRequestId), Role (..), Snapshot (..), SnapshotMetadata (..), Term, allNodes, hasQuorum, mkRequestId)
+import Distributed.Consensus.Raft.Implementation hiding (sendAdminResponse, sendClientResponse, sendRPC, sendRPCResult)
+import qualified Distributed.Consensus.Raft.Implementation as Impl
 import Distributed.Consensus.Raft.Log (Lookup (..), absoluteIndex, logEntries)
 import qualified Distributed.Consensus.Raft.Log as Log
 import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import Distributed.Consensus.Raft.Timer (Microseconds, resetTimer)
 import Distributed.Consensus.Raft.Transformer.Definition
-import Distributed.Consensus.Raft.Transformer.Spec hiding (sendAdminResponse, sendClientResponse, sendRPC, sendRPCResult)
-import qualified Distributed.Consensus.Raft.Transformer.Spec as Spec
 import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (<%=))
 import System.Random (uniformR)
 
@@ -119,31 +119,31 @@ enqueueEvent event = do
 -- To send a 'RPC' to multiple other nodes, concurrently, see 'sendRPCConcurrently'
 sendRPC :: (Monad m) => node -> RPC node entry state -> RaftT entry node state result m ()
 sendRPC node rpc = do
-  spec <- view specification
-  lift $ Spec.sendRPC spec node rpc
+  impl <- view implementation
+  lift $ Impl.sendRPC impl node rpc
 
 -- | Send a 'RPC' concurrently to other nodes.
 --
 -- To send a 'RPC' to a single node, see 'sendRPC'
 sendRPCConcurrently :: (MonadAsync m) => Set node -> RPC node entry state -> RaftT entry node state result m ()
 sendRPCConcurrently nodes rpc = do
-  spec <- view specification
-  lift $ mapConcurrently_ (flip (Spec.sendRPC spec) rpc) nodes
+  impl <- view implementation
+  lift $ mapConcurrently_ (flip (Impl.sendRPC impl) rpc) nodes
 
 sendRPCResult :: (Monad m) => node -> RPCResult node result -> RaftT entry node state result m ()
 sendRPCResult node rpc = do
-  spec <- view specification
-  lift $ Spec.sendRPCResult spec node rpc
+  impl <- view implementation
+  lift $ Impl.sendRPCResult impl node rpc
 
 sendClientResponse :: (Monad m) => node -> ClientResponse node result -> RaftT entry node state result m ()
 sendClientResponse node response = do
-  spec <- view specification
-  lift $ Spec.sendClientResponse spec node response
+  impl <- view implementation
+  lift $ Impl.sendClientResponse impl node response
 
 sendAdminResponse :: (Monad m) => node -> AdminResponse node -> RaftT entry node state result m ()
 sendAdminResponse admin response = do
-  spec <- view specification
-  lift $ Spec.sendAdminResponse spec admin response
+  impl <- view implementation
+  lift $ Impl.sendAdminResponse impl admin response
 
 whenRole ::
   (Monad m) =>
@@ -227,7 +227,7 @@ applyEntry ::
   ) =>
   LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
 applyEntry (LogEntryCommand (Command reqId entry)) = do
-  apply <- view specification <&> applyLogEntry
+  apply <- view implementation <&> applyLogEntry
   (newState, result) <- use internalState <&> flip apply entry
   trace (`LogEntryApplied` entry)
 
@@ -312,10 +312,10 @@ updateCommitIndex = do
 -- This function doesn't emit any RPCs
 voteFor :: (Monad m) => Maybe node -> RaftT entry node state result m ()
 voteFor mNode = do
-  spec <- view specification
+  impl <- view implementation
   s <- self
   t <- use term
-  lift $ writeVotedFor spec s t mNode
+  lift $ writeVotedFor impl s t mNode
   votedFor .= mNode
   traverse_ (\n -> trace (\ctx -> VotedFor ctx t n)) mNode
 
@@ -392,8 +392,8 @@ nextElectionTimeout = do
 trace :: (Monad m) => (EventContext node -> RaftTrace entry result node state) -> RaftT entry node state result m ()
 trace makeTrace = do
   eventCtx <- EventContext <$> use term <*> self
-  spec <- view specification
-  lift $ tracer spec (makeTrace eventCtx)
+  impl <- view implementation
+  lift $ tracer impl (makeTrace eventCtx)
 
 -- | Update the internal term state, returning the previous and new 'Term's.
 --
@@ -405,9 +405,9 @@ updateTerm update = do
   let newTerm = update currTerm
 
   when (newTerm > currTerm) $ do
-    spec <- view specification
+    impl <- view implementation
 
-    lift $ writeTerm spec s newTerm
+    lift $ writeTerm impl s newTerm
     term .= newTerm
   pure (currTerm, newTerm)
 
@@ -460,11 +460,11 @@ currentSnapshot = do
 persistSnapshot :: (MonadAsync m) => Snapshot node state -> RaftT entry node state result m ()
 persistSnapshot snapshot = do
   s <- self
-  spec <- view specification
+  impl <- view implementation
   queue <- view eventQueue
 
   void $ lift $ async $ do
-    writeSnapshot spec s snapshot
+    writeSnapshot impl s snapshot
     atomically $
       writeTQueue
         queue
@@ -526,12 +526,12 @@ appendLogEntries ::
 appendLogEntries entries = do
   ourTerm <- use term
   s <- self
-  spec <- view specification
+  impl <- view implementation
   startingLogIndex <- use commandLog <&> Log.lastLogIndex
   commandLog %= (`Log.extend` ((ourTerm,) <$> Seq.fromList (NonEmpty.toList entries)))
 
   for_ (zip [succ startingLogIndex ..] (NonEmpty.toList entries)) $ \(ix, entry) -> do
-    lift $ writeLogEntry spec s ix ourTerm entry
+    lift $ writeLogEntry impl s ix ourTerm entry
     trace (\ctx -> LogEntryAppended ctx ix entry)
 
   adoptConfigurationFromLog
@@ -551,15 +551,15 @@ appendLogEntries entries = do
 
 restoreState :: (Monad m) => RaftT entry node state result m ()
 restoreState = do
-  spec <- view specification
+  impl <- view implementation
   s <- self
 
   (persistedTerm, persistedVote, mPersistedSnapshot) <-
     lift $ do
-      t <- readTerm spec s
+      t <- readTerm impl s
       (t,,)
-        <$> readVotedFor spec s t
-        <*> readSnapshot spec s
+        <$> readVotedFor impl s t
+        <*> readSnapshot impl s
 
   term .= persistedTerm
   votedFor .= persistedVote
@@ -569,7 +569,7 @@ restoreState = do
   entries <-
     lift $
       let loop ix acc =
-            readLogEntry spec s ix >>= \case
+            readLogEntry impl s ix >>= \case
               Nothing -> pure acc
               Just entry -> loop (succ ix) (acc |> entry)
        in loop (succ snapshotIndex) Seq.empty
@@ -651,7 +651,7 @@ becomeCandidate = do
 
   s <- self
   term += 1
-  w <- view specification <&> writeTerm
+  w <- view implementation <&> writeTerm
   thisTerm <- use term
   lift (w s thisTerm)
 

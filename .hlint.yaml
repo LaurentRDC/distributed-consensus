@@ -7,7 +7,7 @@
 
 # Specify additional command line arguments
 #
-# - arguments: [--color, --cpp-simple, -XQuasiQuotes]
+- arguments: [-j]
 
 
 # Control which extensions/flags/modules/functions can be used

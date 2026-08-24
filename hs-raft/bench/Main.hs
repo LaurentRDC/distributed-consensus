@@ -25,7 +25,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Word (Word64)
-import Distributed.Consensus.Raft (Config (..), Microseconds, RPC, RPCResult, Specification (..), runRaftServer)
+import Distributed.Consensus.Raft (Config (..), Implementation (..), Microseconds, RPC, RPCResult, runRaftServer)
 import qualified Distributed.Consensus.Raft as Raft
 import Distributed.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Distributed.Consensus.Raft.Client
@@ -132,7 +132,7 @@ data ScenarioInputs
 data Server
   = MkServer
   { sConfig :: Config Node,
-    sSpec :: Specification Command Node State Result IO
+    sSpec :: Implementation Command Node State Result IO
   }
 
 type Mailbox a = IntMap (TQueue a)
@@ -175,7 +175,7 @@ mkServer network hbto etolb etoub seed node =
             maxLogLength = Nothing
           },
       sSpec =
-        Specification
+        Implementation
           { readLogEntry = \_ _ -> pure Nothing,
             writeLogEntry = \_ _ _ _ -> pure (),
             readTerm = \_ -> pure 0,

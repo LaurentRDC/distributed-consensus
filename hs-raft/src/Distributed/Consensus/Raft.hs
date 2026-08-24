@@ -7,8 +7,8 @@ module Distributed.Consensus.Raft
     Microseconds (Microseconds),
     ClusterState (..),
 
-    -- * Protocol specification
-    Specification (..),
+    -- * Protocol implementation
+    Implementation (..),
 
     -- ** Domain types
     LogEntry (..),
@@ -60,6 +60,24 @@ import Distributed.Consensus.Raft.Domain
     SnapshotMetadata (..),
     Term,
   )
+import Distributed.Consensus.Raft.Implementation
+  ( AppendEntries (..),
+    AppendEntriesResult (..),
+    ClusterMembershipError (..),
+    ClusterMembershipRequest (..),
+    ClusterMembershipResult (..),
+    Command (..),
+    CommandResponse (..),
+    Event (..),
+    EventContext (..),
+    Implementation (..),
+    InstallSnapshot (..),
+    InstallSnapshotResult (..),
+    LogEntry (..),
+    RPC (..),
+    RPCResult (..),
+    RaftTrace (..),
+  )
 import Distributed.Consensus.Raft.Log (Log)
 import Distributed.Consensus.Raft.Messaging
   ( Request (..),
@@ -70,24 +88,6 @@ import Distributed.Consensus.Raft.Transformer
   ( ClusterState (..),
     Config (..),
     runRaftT,
-  )
-import Distributed.Consensus.Raft.Transformer.Spec
-  ( AppendEntries (..),
-    AppendEntriesResult (..),
-    ClusterMembershipError (..),
-    ClusterMembershipRequest (..),
-    ClusterMembershipResult (..),
-    Command (..),
-    CommandResponse (..),
-    Event (..),
-    EventContext (..),
-    InstallSnapshot (..),
-    InstallSnapshotResult (..),
-    LogEntry (..),
-    RPC (..),
-    RPCResult (..),
-    RaftTrace (..),
-    Specification (..),
   )
 
 runRaftServer ::
@@ -101,7 +101,7 @@ runRaftServer ::
   Config node ->
   ClusterState node ->
   state ->
-  Specification entry node state result m ->
+  Implementation entry node state result m ->
   m ()
-runRaftServer config startingState initState spec =
-  runRaftT config startingState initState spec server
+runRaftServer config startingState initState impl =
+  runRaftT config startingState initState impl server

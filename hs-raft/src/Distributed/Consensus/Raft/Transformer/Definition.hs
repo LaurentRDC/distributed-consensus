@@ -6,12 +6,32 @@ module Distributed.Consensus.Raft.Transformer.Definition
     Config (..),
     ClusterState (..),
     RaftEnv,
-    specification,
+    implementation,
     configuration,
     eventQueue,
     heartBeatTimer,
     electionTimer,
     exitLock,
+
+    -- * Internal Raft state
+    RaftState,
+    initialTerm,
+    initialRaftState,
+    role,
+    term,
+    clusterConfiguration,
+    internalState,
+    votedFor,
+    currentLeader,
+    commandLog,
+    commitIndex,
+    lastApplied,
+    nextIndex,
+    matchIndex,
+    yesVotes,
+    nextRequestId,
+    currentClientRequests,
+    randomGen,
 
     -- * Generic helpers
     ask,
@@ -29,15 +49,23 @@ import Control.Concurrent.Class.MonadMVar (MVar, MonadMVar, newEmptyMVar)
 import Control.Concurrent.Class.MonadSTM (TQueue, atomically, newTQueue, writeTQueue)
 import Control.Monad.Class.MonadSTM (MonadSTM)
 import Control.Monad.Trans.RWS.CPS (RWST, ask, asks, evalRWST, get, gets, local, modify, put, state)
+import Data.Map.Strict (Map)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word64)
-import Distributed.Consensus.Raft.Domain (Role (..))
+import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), InternalRequestId, LogIndex, RequestId, Role (..), Term)
+import Distributed.Consensus.Raft.Implementation (Event (..), Implementation, LogEntry)
+import Distributed.Consensus.Raft.Log (Log, newLog)
 import Distributed.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
-import Distributed.Consensus.Raft.Transformer.Spec (Event (..), RaftState, Specification, initialRaftState)
 import Lens.Micro.Platform (makeLenses)
+import System.Random (StdGen, mkStdGen64)
 
 type RaftT entry node state result m =
+  -- Note: using RWST prevents to use the `MonadAsync`, `MonadSTM`, ...
+  -- classes.
+  -- The alternative would be to keep the 'RaftState' in a mutable variable
+  -- (e.g. 'MVar'), but it's not clear how much of a performance or usability
+  -- downgrade this would be.
   RWST
     (RaftEnv entry node state result m)
     ()
@@ -51,6 +79,58 @@ data ClusterState node
     -- in which case this cluster has a single node
     InCluster (Set node)
 
+data RaftState node entry state = MkRaftState
+  { _role :: !Role,
+    _term :: !Term,
+    _clusterConfiguration :: !(ClusterConfiguration node),
+    _internalState :: !state,
+    _votedFor :: !(Maybe node),
+    _currentLeader :: !(Maybe node),
+    _commandLog :: !(Log node (LogEntry node entry)),
+    _commitIndex :: !LogIndex,
+    _lastApplied :: !LogIndex,
+    _nextIndex :: !(Map node LogIndex),
+    _matchIndex :: !(Map node LogIndex),
+    -- | Set of votes received in the current term
+    _yesVotes :: !(Set node),
+    _nextRequestId :: !InternalRequestId,
+    _currentClientRequests :: !(Map RequestId node),
+    _randomGen :: !StdGen
+  }
+
+initialTerm :: Term
+initialTerm = 1
+
+initialRaftState ::
+  (Ord node) =>
+  Role ->
+  -- | Random number generator seed
+  Word64 ->
+  -- | Initial cluster configuration
+  Set node ->
+  -- | Initial internal state
+  state ->
+  RaftState node entry state
+initialRaftState initRole seed clusterConf initialState =
+  MkRaftState
+    { _role = initRole,
+      _term = initialTerm,
+      _clusterConfiguration = Simple clusterConf,
+      _internalState = initialState,
+      _votedFor = Nothing,
+      _currentLeader = Nothing,
+      _commandLog = newLog,
+      _commitIndex = 0,
+      _lastApplied = 0,
+      _nextIndex = mempty,
+      _matchIndex = mempty,
+      _yesVotes = mempty,
+      _nextRequestId = 0,
+      _currentClientRequests = mempty,
+      -- We use mkStdGen64 for reproducibility across 32-bit and 64-bit architectures
+      _randomGen = mkStdGen64 seed
+    }
+
 runRaftT ::
   ( Ord node,
     MonadSTM m,
@@ -59,10 +139,10 @@ runRaftT ::
   Config node ->
   ClusterState node ->
   state ->
-  Specification entry node state result m ->
+  Implementation entry node state result m ->
   RaftT entry node state result m a ->
   m a
-runRaftT config startingState internalState spec f = do
+runRaftT config startingState internalState impl f = do
   queue <- atomically newTQueue
   hbTimer <- newTimer (atomically $ writeTQueue queue EventHeartBeatTimeout)
   elTimer <- newTimer (atomically $ writeTQueue queue EventElectionTimeout)
@@ -75,7 +155,7 @@ runRaftT config startingState internalState spec f = do
       f
       ( MkRaftEnv
           { _configuration = config,
-            _specification = spec,
+            _implementation = impl,
             _eventQueue = queue,
             _heartBeatTimer = hbTimer,
             _electionTimer = elTimer,
@@ -87,7 +167,7 @@ runRaftT config startingState internalState spec f = do
 data RaftEnv entry node state result m
   = MkRaftEnv
   { _configuration :: !(Config node),
-    _specification :: !(Specification entry node state result m),
+    _implementation :: !(Implementation entry node state result m),
     _eventQueue :: TQueue m (Event node entry result state),
     -- Handle to a thread which will send a heartbeat timeout
     -- event after the appropriate amount of time.
@@ -114,3 +194,4 @@ data Config node
   }
 
 makeLenses ''RaftEnv
+makeLenses ''RaftState

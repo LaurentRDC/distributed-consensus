@@ -107,12 +107,12 @@ withRaftAdminT ::
   RaftAdminSpec node m ->
   ((forall a. RaftAdminT node m a -> m a) -> m b) ->
   m b
-withRaftAdminT self spec withSession = do
+withRaftAdminT self impl withSession = do
   nRId <- newTVarIO 0
   mbox <- newTVarIO mempty
 
   let recvLoop = do
-        receiveAdminResponse spec >>= \case
+        receiveAdminResponse impl >>= \case
           Left _ -> recvLoop
           Right resp -> do
             let adminReqId = responseRequestId resp
@@ -124,12 +124,12 @@ withRaftAdminT self spec withSession = do
             recvLoop
 
   withAsync recvLoop $ \_ ->
-    withSession (\(MkRaftAdminT f) -> runReaderT f (MkRaftAdminEnv self spec nRId mbox))
+    withSession (\(MkRaftAdminT f) -> runReaderT f (MkRaftAdminEnv self impl nRId mbox))
 
 data RaftAdminEnv node m
   = MkRaftAdminEnv
   { node :: !node,
-    specification :: RaftAdminSpec node m,
+    implementation :: RaftAdminSpec node m,
     nextRequestId :: TVar m AdminRequestId,
     mailbox :: TVar m (Map AdminRequestId (TMVar m (AdminCommandResult node)))
   }
@@ -144,7 +144,7 @@ data AdminError node
 
 sendAdminCommand :: (MonadSTM m) => node -> AdminCommand node -> RaftAdminT node m (AdminCommandResult node)
 sendAdminCommand contact command = do
-  send <- asks (sendAdminRequest . specification)
+  send <- asks (sendAdminRequest . implementation)
   admin <- asks node
   mbox <- asks mailbox
   reqIdVar <- asks nextRequestId

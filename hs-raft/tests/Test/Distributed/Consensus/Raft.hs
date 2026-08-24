@@ -42,6 +42,7 @@ import Distributed.Consensus.Raft
   ( ClusterConfiguration (..),
     ClusterState,
     Config (..),
+    Implementation (..),
     LogEntry,
     LogIndex,
     Microseconds,
@@ -49,7 +50,6 @@ import Distributed.Consensus.Raft
     RPCResult,
     RaftTrace (..),
     Snapshot,
-    Specification (..),
     Term,
     runRaftServer,
   )
@@ -371,7 +371,7 @@ instance Exception TestFault
 data Server s
   = MkServer
   { sConfig :: Config Node,
-    sSpec :: Specification Command Node State Result (IOSim s),
+    sSpec :: Implementation Command Node State Result (IOSim s),
     sFaultInjector :: TVar (IOSim s) (Maybe (ThreadId (IOSim s))) -> IOSim s ()
   }
 
@@ -545,7 +545,7 @@ mkServer debug resources hbto etolb etoub faultProb seed node =
             maxLogLength = Just 5 -- TODO: make configurable
           },
       sSpec =
-        Specification
+        Implementation
           { readLogEntry = readLogEntryTest resources.logPersistence,
             writeLogEntry = writeLogEntryTest resources.logPersistence,
             readTerm = readTest resources.termPersistence,

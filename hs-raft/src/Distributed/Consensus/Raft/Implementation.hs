@@ -1,32 +1,10 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE ExistentialQuantification #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE TemplateHaskell #-}
 
-module Distributed.Consensus.Raft.Transformer.Spec
-  ( -- * Protocol specification
-    Specification (..),
-
-    -- * Raft state
-    RaftState,
-    initialTerm,
-    initialRaftState,
-    role,
-    term,
-    clusterConfiguration,
-    internalState,
-    votedFor,
-    currentLeader,
-    commandLog,
-    commitIndex,
-    lastApplied,
-    nextIndex,
-    matchIndex,
-    yesVotes,
-    nextRequestId,
-    currentClientRequests,
-    randomGen,
+module Distributed.Consensus.Raft.Implementation
+  ( -- * Protocol implementation
+    Implementation (..),
 
     -- * Types
     LogEntry (..),
@@ -50,18 +28,13 @@ where
 
 import Data.Binary (Binary)
 import Data.List.NonEmpty (NonEmpty)
-import Data.Map.Strict (Map)
 import Data.Sequence (Seq)
-import Data.Set (Set)
 import Data.Text (Text)
-import Data.Word (Word64)
 import Distributed.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Distributed.Consensus.Raft.Client (ClientRequest, ClientResponse)
-import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), InternalRequestId, LogIndex, RequestId, Role (..), Snapshot, SnapshotMetadata, Term)
-import Distributed.Consensus.Raft.Log (Log, newLog)
+import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, RequestId, Snapshot, SnapshotMetadata, Term)
+import Distributed.Consensus.Raft.Log (Log)
 import GHC.Generics (Generic)
-import Lens.Micro.Platform (makeLenses)
-import System.Random (StdGen, mkStdGen64)
 
 -- | A 'Command' comes from clients
 data Command entry
@@ -246,7 +219,7 @@ data RaftTrace entry result node state
     Crashed node
   deriving (Eq, Show)
 
-data Specification entry node state result m = Specification
+data Implementation entry node state result m = Implementation
   { -- TODO: allow to read and write multiple log entries at once, for performance optimizations
     readLogEntry :: node -> LogIndex -> m (Maybe (Term, LogEntry node entry)),
     writeLogEntry :: node -> LogIndex -> Term -> LogEntry node entry -> m (),
@@ -263,7 +236,7 @@ data Specification entry node state result m = Specification
     sendAdminResponse :: node -> AdminResponse node -> m (),
     -- We use 'Text' to represent deserialization errors because this is
     -- easiest to represent to the user. I don't think it's worth adding
-    -- yet another type variable to the spec.
+    -- yet another type variable to the impl.
     receiveRPC :: m (Either Text (RPC node entry state)),
     receiveRPCResult :: m (Either Text (RPCResult node result)),
     -- | Receive client requests.
@@ -274,57 +247,3 @@ data Specification entry node state result m = Specification
     receiveAdminRequest :: m (Either Text (AdminRequest node)),
     tracer :: RaftTrace entry result node state -> m ()
   }
-
-data RaftState node entry state = MkRaftState
-  { _role :: !Role,
-    _term :: !Term,
-    _clusterConfiguration :: !(ClusterConfiguration node),
-    _internalState :: !state,
-    _votedFor :: !(Maybe node),
-    _currentLeader :: !(Maybe node),
-    _commandLog :: !(Log node (LogEntry node entry)),
-    _commitIndex :: !LogIndex,
-    _lastApplied :: !LogIndex,
-    _nextIndex :: !(Map node LogIndex),
-    _matchIndex :: !(Map node LogIndex),
-    -- | Set of votes received in the current term
-    _yesVotes :: !(Set node),
-    _nextRequestId :: !InternalRequestId,
-    _currentClientRequests :: !(Map RequestId node),
-    _randomGen :: !StdGen
-  }
-
-makeLenses ''RaftState
-
-initialTerm :: Term
-initialTerm = 1
-
-initialRaftState ::
-  (Ord node) =>
-  Role ->
-  -- | Random number generator seed
-  Word64 ->
-  -- | Initial cluster configuration
-  Set node ->
-  -- | Initial internal state
-  state ->
-  RaftState node entry state
-initialRaftState initRole seed clusterConf initialState =
-  MkRaftState
-    { _role = initRole,
-      _term = initialTerm,
-      _clusterConfiguration = Simple clusterConf,
-      _internalState = initialState,
-      _votedFor = Nothing,
-      _currentLeader = Nothing,
-      _commandLog = newLog,
-      _commitIndex = 0,
-      _lastApplied = 0,
-      _nextIndex = mempty,
-      _matchIndex = mempty,
-      _yesVotes = mempty,
-      _nextRequestId = 0,
-      _currentClientRequests = mempty,
-      -- We use mkStdGen64 for reproducibility across 32-bit and 64-bit architectures
-      _randomGen = mkStdGen64 seed
-    }
