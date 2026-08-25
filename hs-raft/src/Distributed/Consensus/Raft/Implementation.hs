@@ -6,6 +6,7 @@ module Distributed.Consensus.Raft.Implementation
   ( -- * Protocol implementation
     Implementation (..),
     Networking (..),
+    Persistence (..),
 
     -- * Types
     LogEntry (..),
@@ -39,14 +40,7 @@ import GHC.Generics (Generic)
 
 data Implementation entry node state result m = Implementation
   { -- TODO: allow to read multiple log entries at once, for performance optimizations
-    readLogEntry :: node -> LogIndex -> m (Maybe (Term, LogEntry node entry)),
-    writeLogEntry :: node -> [(LogIndex, Term, LogEntry node entry)] -> m (),
-    readTerm :: node -> m Term,
-    writeTerm :: node -> Term -> m (),
-    readVotedFor :: node -> Term -> m (Maybe node),
-    writeVotedFor :: node -> Term -> Maybe node -> m (),
-    readSnapshot :: node -> m (Maybe (Snapshot node state)),
-    writeSnapshot :: node -> Snapshot node state -> m (),
+    persistence :: Persistence entry node state m,
     applyLogEntry :: state -> entry -> (state, result),
     networking :: Networking entry node state result m,
     tracer :: RaftTrace entry result node state -> m ()
@@ -72,6 +66,21 @@ data Networking entry node state result m = Networking
     -- for pipelined processing which is much more efficient.
     receiveClientRequests :: m (NonEmpty (ClientRequest node entry)),
     receiveAdminRequest :: m (Either Text (AdminRequest node))
+  }
+
+-- | Persistence implementation.
+--
+-- This is broken out into its own type so that it can be provided cleanly by
+-- third-party packages
+data Persistence entry node state m = Persistence
+  { readLogEntry :: node -> LogIndex -> m (Maybe (Term, LogEntry node entry)),
+    writeLogEntry :: node -> [(LogIndex, Term, LogEntry node entry)] -> m (),
+    readTerm :: node -> m Term,
+    writeTerm :: node -> Term -> m (),
+    readVotedFor :: node -> Term -> m (Maybe node),
+    writeVotedFor :: node -> Term -> Maybe node -> m (),
+    readSnapshot :: node -> m (Maybe (Snapshot node state)),
+    writeSnapshot :: node -> Snapshot node state -> m ()
   }
 
 -- | A 'Command' comes from clients

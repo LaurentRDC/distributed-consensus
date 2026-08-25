@@ -315,7 +315,7 @@ voteFor mNode = do
   impl <- view implementation
   s <- self
   t <- use term
-  lift $ writeVotedFor impl s t mNode
+  lift $ impl.persistence.writeVotedFor s t mNode
   votedFor .= mNode
   traverse_ (\n -> trace (\ctx -> VotedFor ctx t n)) mNode
 
@@ -407,7 +407,7 @@ updateTerm update = do
   when (newTerm > currTerm) $ do
     impl <- view implementation
 
-    lift $ writeTerm impl s newTerm
+    lift $ impl.persistence.writeTerm s newTerm
     term .= newTerm
   pure (currTerm, newTerm)
 
@@ -464,7 +464,7 @@ persistSnapshot snapshot = do
   queue <- view eventQueue
 
   void $ lift $ async $ do
-    writeSnapshot impl s snapshot
+    impl.persistence.writeSnapshot s snapshot
     atomically $
       writeTQueue
         queue
@@ -531,7 +531,7 @@ appendLogEntries entries = do
   commandLog %= (`Log.extend` ((ourTerm,) <$> Seq.fromList (NonEmpty.toList entries)))
 
   let batchToWrite = zip3 [succ startingLogIndex ..] (repeat ourTerm) (NonEmpty.toList entries)
-  lift $ Impl.writeLogEntry impl s batchToWrite
+  lift $ impl.persistence.writeLogEntry s batchToWrite
   for_ batchToWrite $ \(ix, _, entry) ->
     trace (\ctx -> LogEntryAppended ctx ix entry)
 
@@ -557,10 +557,10 @@ restoreState = do
 
   (persistedTerm, persistedVote, mPersistedSnapshot) <-
     lift $ do
-      t <- readTerm impl s
+      t <- impl.persistence.readTerm s
       (t,,)
-        <$> readVotedFor impl s t
-        <*> readSnapshot impl s
+        <$> impl.persistence.readVotedFor s t
+        <*> impl.persistence.readSnapshot s
 
   term .= persistedTerm
   votedFor .= persistedVote
@@ -570,7 +570,7 @@ restoreState = do
   entries <-
     lift $
       let loop ix acc =
-            readLogEntry impl s ix >>= \case
+            impl.persistence.readLogEntry s ix >>= \case
               Nothing -> pure acc
               Just entry -> loop (succ ix) (acc |> entry)
        in loop (succ snapshotIndex) Seq.empty
@@ -652,7 +652,7 @@ becomeCandidate = do
 
   s <- self
   term += 1
-  w <- view implementation <&> writeTerm
+  w <- view implementation <&> writeTerm . persistence
   thisTerm <- use term
   lift (w s thisTerm)
 

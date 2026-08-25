@@ -47,6 +47,7 @@ import Distributed.Consensus.Raft
     LogIndex,
     Microseconds,
     Networking (..),
+    Persistence (..),
     RPC,
     RPCResult,
     RaftTrace (..),
@@ -547,14 +548,17 @@ mkServer debug resources hbto etolb etoub faultProb seed node =
           },
       sSpec =
         Implementation
-          { readLogEntry = readLogEntryTest resources.logPersistence,
-            writeLogEntry = writeLogEntryTest resources.logPersistence,
-            readTerm = readTest resources.termPersistence,
-            writeTerm = writeTest resources.termPersistence,
-            readVotedFor = readVotedForTest resources.votePersistence,
-            writeVotedFor = writeVotedForTest resources.votePersistence,
-            readSnapshot = readTest resources.snapshotPersistence,
-            writeSnapshot = \self snapshot -> writeTest resources.snapshotPersistence self (Just snapshot),
+          { persistence =
+              Persistence
+                { readLogEntry = readLogEntryTest resources.logPersistence,
+                  writeLogEntry = writeLogEntryTest resources.logPersistence,
+                  readTerm = readTest resources.termPersistence,
+                  writeTerm = writeTest resources.termPersistence,
+                  readVotedFor = readVotedForTest resources.votePersistence,
+                  writeVotedFor = writeVotedForTest resources.votePersistence,
+                  readSnapshot = readTest resources.snapshotPersistence,
+                  writeSnapshot = \self snapshot -> writeTest resources.snapshotPersistence self (Just snapshot)
+                },
             applyLogEntry = step,
             networking =
               Networking

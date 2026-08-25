@@ -304,7 +304,7 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
         commandLog %= (`Log.keepEntriesUpTo` prevLogIndex)
 
         let batchToWrite = zipWith (\ix (t, e) -> (ix, t, e)) [firstNewIndex ..] (toList newEntries)
-        lift $ Impl.writeLogEntry impl s batchToWrite
+        lift $ impl.persistence.writeLogEntry s batchToWrite
         for_ batchToWrite $ \(ix, _, entry) ->
           trace (\ctx -> LogEntryAppended ctx ix entry)
 

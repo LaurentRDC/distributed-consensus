@@ -25,7 +25,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Word (Word64)
-import Distributed.Consensus.Raft (Config (..), Implementation (..), Microseconds, Networking (..), RPC, RPCResult, runRaftServer)
+import Distributed.Consensus.Raft (Config (..), Implementation (..), Microseconds, Networking (..), Persistence (..), RPC, RPCResult, runRaftServer)
 import qualified Distributed.Consensus.Raft as Raft
 import Distributed.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Distributed.Consensus.Raft.Client
@@ -176,14 +176,17 @@ mkServer network hbto etolb etoub seed node =
           },
       sSpec =
         Implementation
-          { readLogEntry = \_ _ -> pure Nothing,
-            writeLogEntry = \_ _ -> pure (),
-            readTerm = \_ -> pure 0,
-            writeTerm = \_ _ -> pure (),
-            readVotedFor = \_ _ -> pure Nothing,
-            writeVotedFor = \_ _ _ -> pure (),
-            readSnapshot = \_ -> pure Nothing,
-            writeSnapshot = \_ _ -> pure (),
+          { persistence =
+              Persistence
+                { readLogEntry = \_ _ -> pure Nothing,
+                  writeLogEntry = \_ _ -> pure (),
+                  readTerm = \_ -> pure 0,
+                  writeTerm = \_ _ -> pure (),
+                  readVotedFor = \_ _ -> pure Nothing,
+                  writeVotedFor = \_ _ _ -> pure (),
+                  readSnapshot = \_ -> pure Nothing,
+                  writeSnapshot = \_ _ -> pure ()
+                },
             applyLogEntry = step,
             networking =
               Networking
