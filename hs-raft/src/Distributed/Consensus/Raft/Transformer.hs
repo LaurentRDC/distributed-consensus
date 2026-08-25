@@ -117,7 +117,7 @@ enqueueEvent event = do
 -- | Send a 'RPC' to another node.
 --
 -- To send a 'RPC' to multiple other nodes, concurrently, see 'sendRPCConcurrently'
-sendRPC :: (Monad m) => node -> RPC node entry state -> RaftT entry node state result m ()
+sendRPC :: (Monad m) => node -> RPC node entry state -> RaftSendT entry node state result m ()
 sendRPC node rpc = do
   impl <- view implementation
   lift $ impl.networking.sendRPC node rpc
@@ -125,22 +125,22 @@ sendRPC node rpc = do
 -- | Send a 'RPC' concurrently to other nodes.
 --
 -- To send a 'RPC' to a single node, see 'sendRPC'
-sendRPCConcurrently :: (MonadAsync m) => Set node -> RPC node entry state -> RaftT entry node state result m ()
+sendRPCConcurrently :: (MonadAsync m) => Set node -> RPC node entry state -> RaftSendT entry node state result m ()
 sendRPCConcurrently nodes rpc = do
   impl <- view implementation
   lift $ mapConcurrently_ (flip impl.networking.sendRPC rpc) nodes
 
-sendRPCResult :: (Monad m) => node -> RPCResult node result -> RaftT entry node state result m ()
+sendRPCResult :: (Monad m) => node -> RPCResult node result -> RaftSendT entry node state result m ()
 sendRPCResult node rpc = do
   impl <- view implementation
   lift $ impl.networking.sendRPCResult node rpc
 
-sendClientResponse :: (Monad m) => node -> ClientResponse node result -> RaftT entry node state result m ()
+sendClientResponse :: (Monad m) => node -> ClientResponse node result -> RaftSendT entry node state result m ()
 sendClientResponse node response = do
   impl <- view implementation
   lift $ impl.networking.sendClientResponse node response
 
-sendAdminResponse :: (Monad m) => node -> AdminResponse node -> RaftT entry node state result m ()
+sendAdminResponse :: (Monad m) => node -> AdminResponse node -> RaftSendT entry node state result m ()
 sendAdminResponse admin response = do
   impl <- view implementation
   lift $ impl.networking.sendAdminResponse admin response
@@ -169,15 +169,12 @@ sendHeartbeat ::
 sendHeartbeat =
   whenRole Leader $ do
     config <- view configuration
-    -- TODO: send append entries in parallel
     peers >>= traverse_ sendAppendEntriesTo
     view heartBeatTimer >>= lift . resetTimer config.heartBeatTimeout
 
 -- | For a given destination node, look up which of the entries
 -- in our log should be replicated, and send an appropriate 'AppendEntries' RPC.
---
--- Even if a node
-sendAppendEntriesTo :: (Ord node, Monad m) => node -> RaftT entry node state result m ()
+sendAppendEntriesTo :: (Ord node, MonadAsync m) => node -> RaftT entry node state result m ()
 sendAppendEntriesTo destination = do
   entries <- use commandLog
   use (nextIndex . at destination)
@@ -208,14 +205,14 @@ sendAppendEntriesTo destination = do
             <*> pure toBeReplicated
             <*> use commitIndex
           )
-          >>= sendRPC destination . AE
+          >>= runSend . sendRPC destination . AE
       Nothing ->
         ( InstallSnapshot
             <$> use term
             <*> (view configuration <&> nodeId)
             <*> currentSnapshot
         )
-          >>= sendRPC destination . IS
+          >>= runSend . sendRPC destination . IS
 
 applyEntry ::
   ( Ord node,
@@ -368,8 +365,7 @@ applyCommittedEntries = do
             Nothing -> pure () -- TODO: isn't this unexpected?
             Just requester -> do
               for_ responses $ \response -> do
-                -- TODO: reply (and possibly retry) in a separate thread
-                sendClientResponse requester (MkResponse (clientRequestId reqId) (Just leaderId) (Success response))
+                runSend $ sendClientResponse requester (MkResponse (clientRequestId reqId) (Just leaderId) (Success response))
                 trace (`CommandResultResponded` MkCommandResponse response reqId)
               currentClientRequests %= Map.delete reqId
 
@@ -542,7 +538,6 @@ appendLogEntries entries = do
   -- it's hard to check that the commit index is always <= the last log index
   use commandLog <&> Log.lastLogIndex >>= trace . flip LastLogIndexChangedTo
 
-  -- TODO: sendAppendEntriesTo in parallel
   whenRole Leader $
     peers >>= traverse_ sendAppendEntriesTo
 
@@ -616,7 +611,6 @@ becomeLeader = do
     Joint _before after ->
       appendLogEntries (NonEmpty.singleton (LogEntryMembershipChange (Simple after)))
 
-  -- TODO: send append all entries messages to all followers
   sendHeartbeat -- Note that 'sendHeartbeat' will also reset the heartbeat timer
 
 becomeFollower ::
@@ -667,7 +661,7 @@ becomeCandidate = do
     currentTerm <- use term
     (lastLogIx, lastLogTerm) <- use commandLog <&> Log.lastLogInfo
     let rpc = RequestVote currentTerm s lastLogIx lastLogTerm
-    peers >>= (`sendRPCConcurrently` rpc)
+    peers >>= (runSend . (`sendRPCConcurrently` rpc))
 
 checkElection ::
   ( Ord node,

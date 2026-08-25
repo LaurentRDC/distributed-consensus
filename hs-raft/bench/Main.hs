@@ -111,13 +111,14 @@ stopCluster = runShutDown
 
 clusterScenario :: ScenarioInputs
 clusterScenario =
-  ScenarioInputs
-    { heartbeatTimeout = 10_000,
-      electionTimeoutLowerBound = 100_000,
-      electionTimeoutUpperBound = 300_000,
-      seeds = [1 .. 5],
-      numInitialClusterNodes = 5
-    }
+  let numNodes = 9
+   in ScenarioInputs
+        { heartbeatTimeout = 10_000,
+          electionTimeoutLowerBound = 100_000,
+          electionTimeoutUpperBound = 300_000,
+          seeds = [1 .. numNodes],
+          numInitialClusterNodes = fromIntegral numNodes
+        }
 
 data ScenarioInputs
   = ScenarioInputs
@@ -253,11 +254,14 @@ benchHarness
               receive network.responsesMailbox clientNode
           }
 
+simulatedNetworkLatency :: IO ()
+simulatedNetworkLatency = threadDelay 1_000
+
 send :: IntMap (TQueue a) -> Node -> a -> IO ()
 send mailbox node message =
   case IntMap.lookup (fromIntegral node) mailbox of
     Nothing -> error $ "Mailbox badly configures: missing node " <> show node
-    Just queue -> atomically $ writeTQueue queue message
+    Just queue -> simulatedNetworkLatency >> atomically (writeTQueue queue message)
 
 receive :: IntMap (TQueue a) -> Node -> IO a
 receive mailbox node =

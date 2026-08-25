@@ -13,6 +13,10 @@ module Distributed.Consensus.Raft.Transformer.Definition
     electionTimer,
     exitLock,
 
+    -- ** Read-only operations
+    RaftSendT,
+    runSend,
+
     -- * Internal Raft state
     RaftState,
     initialTerm,
@@ -47,8 +51,12 @@ where
 
 import Control.Concurrent.Class.MonadMVar (MVar, MonadMVar, newEmptyMVar)
 import Control.Concurrent.Class.MonadSTM (TQueue, atomically, newTQueue, writeTQueue)
+import Control.Monad (void)
+import Control.Monad.Class.MonadAsync (MonadAsync, async)
 import Control.Monad.Class.MonadSTM (MonadSTM)
+import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.RWS.CPS (RWST, ask, asks, evalRWST, get, gets, local, modify, put, state)
+import Control.Monad.Trans.Reader (ReaderT, runReaderT)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -71,6 +79,20 @@ type RaftT entry node state result m =
     ()
     (RaftState node entry state)
     m
+
+-- | This type exists so that we can spin out asynchronous threads
+-- for sending messages
+type RaftSendT entry node state result m =
+  ReaderT
+    (RaftEnv entry node state result m)
+    m
+
+-- | Run an action of type 'RaftSendT' asynchronously
+runSend ::
+  (MonadAsync m) =>
+  RaftSendT entry node state result m () ->
+  RaftT entry node state result m ()
+runSend act = ask >>= lift . void . async . runReaderT act
 
 data ClusterState node
   = -- | Lone node, not in a cluster

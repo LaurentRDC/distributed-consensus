@@ -87,6 +87,7 @@ import Distributed.Consensus.Raft.Transformer
     resetHeartBeatTimer,
     restoreState,
     role,
+    runSend,
     self,
     sendAppendEntriesTo,
     term,
@@ -221,17 +222,18 @@ handleClientRequest ::
 handleClientRequest requests = do
   mLeaderId <- use currentLeader
   use role >>= \case
-    NonMember -> do
-      for_ requests $ \(MkRequest reqId clientId _) ->
-        -- TODO: reply in parallel
-        Transformer.sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
+    NonMember ->
+      runSend $ do
+        for_ requests $ \(MkRequest reqId clientId _) ->
+          Transformer.sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
     Candidate ->
-      for_ requests $ \(MkRequest reqId clientId _) ->
-        -- TODO: reply in parallel
-        Transformer.sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
+      runSend $
+        for_ requests $ \(MkRequest reqId clientId _) ->
+          Transformer.sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
     Follower ->
-      for_ requests $ \(MkRequest reqId clientId _) ->
-        Transformer.sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
+      runSend $
+        for_ requests $ \(MkRequest reqId clientId _) ->
+          Transformer.sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
     Leader -> do
       reqIds <- acceptClientRequests requests
       let commands = NonEmpty.zipWith Command reqIds (requestPayload <$> requests)
@@ -280,17 +282,18 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
     if leaderTerm < ourTerm || not logIsConsistent
       then do
         let ourLastIndex = Log.lastLogIndex entries
-        Transformer.sendRPCResult
-          leaderNode
-          ( AER
-              ( AppendEntriesResult
-                  { aerCurrentTerm = ourTerm,
-                    aerNode = s,
-                    aerMatch = False,
-                    aerNewEntryLogIndex = ourLastIndex
-                  }
-              )
-          )
+        runSend $
+          Transformer.sendRPCResult
+            leaderNode
+            ( AER
+                ( AppendEntriesResult
+                    { aerCurrentTerm = ourTerm,
+                      aerNode = s,
+                      aerMatch = False,
+                      aerNewEntryLogIndex = ourLastIndex
+                    }
+                )
+            )
       else do
         -- TODO: unify the logic below with
         --       appendLogEntries
@@ -314,17 +317,18 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
         newLastEntry <- use commandLog <&> Log.lastLogIndex
         trace (`LastLogIndexChangedTo` newLastEntry)
 
-        Transformer.sendRPCResult
-          leaderNode
-          ( AER
-              ( AppendEntriesResult
-                  { aerCurrentTerm = ourTerm,
-                    aerNode = s,
-                    aerMatch = True,
-                    aerNewEntryLogIndex = newLastEntry
-                  }
-              )
-          )
+        runSend $
+          Transformer.sendRPCResult
+            leaderNode
+            ( AER
+                ( AppendEntriesResult
+                    { aerCurrentTerm = ourTerm,
+                      aerNode = s,
+                      aerMatch = True,
+                      aerNewEntryLogIndex = newLastEntry
+                    }
+                )
+            )
         ourCommitIndex <- use commitIndex
         when (leaderCommitIndex > ourCommitIndex) $ do
           let newCommitIndex = min leaderCommitIndex newLastEntry
@@ -403,18 +407,18 @@ handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLas
           grantVote ourTerm
           trace (\ctx -> VotedFor ctx candidateTerm candidateNode)
         else do
-          Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
+          runSend $ Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
     -- We already voted for this candidate
     Just someCandidate
       | someCandidate == candidateNode ->
-          Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm True)
+          runSend $ Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm True)
     -- We already voted, for another candidate
     Just _ ->
-      Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
+      runSend $ Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
   where
     grantVote ourTerm = do
       s <- self
-      Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm True)
+      runSend $ Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm True)
       r <- use role
       when (r == Follower) resetElectionTimer
 
@@ -456,11 +460,12 @@ handleInstallSnapshot (InstallSnapshot leaderTerm leaderNode snapshot) =
         <$> use term
         <*> (view configuration <&> nodeId)
         <*> pure (sMetadata snapshot)
-        >>= Transformer.sendRPCResult leaderNode . ISR
+        >>= runSend . Transformer.sendRPCResult leaderNode . ISR
 
 handleInstallSnapshotResult ::
   ( Ord node,
-    MonadMVar m
+    MonadMVar m,
+    MonadAsync m
   ) =>
   InstallSnapshotResult node -> RaftT entry node state result m ()
 handleInstallSnapshotResult (InstallSnapshotResult responderTerm responderNode (SnapshotMetadata lastIncludedIndex _)) = do
@@ -489,14 +494,14 @@ handleClusterMembershipRequest request = do
         ClusterMembershipJoinRequest r -> (r, ClusterMembershipJoinResult)
         ClusterMembershipLeaveRequest r -> (r, ClusterMembershipLeaveResult)
   use role >>= \case
-    NonMember -> self >>= \s -> Transformer.sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
-    Candidate -> self >>= \s -> Transformer.sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
+    NonMember -> self >>= \s -> runSend $ Transformer.sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
+    Candidate -> self >>= \s -> runSend $ Transformer.sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
     Follower ->
       use currentLeader >>= \case
         Nothing -> do
           s <- self
-          Transformer.sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
-        Just leader -> Transformer.sendRPC leader (CM request) -- forward to leader
+          runSend $ Transformer.sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
+        Just leader -> runSend $ Transformer.sendRPC leader (CM request) -- forward to leader
     Leader -> do
       s <- self
       let -- Whether the committed configuration already says what the requester
@@ -510,16 +515,16 @@ handleClusterMembershipRequest request = do
         --
         -- Note the early return: previously this answered with an error and
         -- then went on to initiate a second, concurrent change anyway.
-        Joint {} -> Transformer.sendRPCResult requester (CMR (resultCtor (Left (OngoingClusterMembershipChange s))))
+        Joint {} -> runSend $ Transformer.sendRPCResult requester (CMR (resultCtor (Left (OngoingClusterMembershipChange s))))
         Simple cluster
           -- We distinguish between a request that succeeds the first
           -- and subsequent times to better track executions
           | alreadySettled cluster -> do
               trace (`MembershipChangeAlreadySettled` requester)
-              Transformer.sendRPCResult requester (CMR (resultCtor (Right s)))
+              runSend $ Transformer.sendRPCResult requester (CMR (resultCtor (Right s)))
           | otherwise -> do
               trace MembershipChangeInitiated
-              Transformer.sendRPCResult requester (CMR (resultCtor (Right s)))
+              runSend $ Transformer.sendRPCResult requester (CMR (resultCtor (Right s)))
 
               case request of
                 ClusterMembershipJoinRequest _ -> do
@@ -530,7 +535,7 @@ handleClusterMembershipRequest request = do
                       <*> self
                       <*> currentSnapshot
                     )
-                    >>= Transformer.sendRPC requester . IS
+                    >>= runSend . Transformer.sendRPC requester . IS
                   appendLogEntries
                     ( NonEmpty.singleton
                         ( LogEntryMembershipChange
@@ -561,22 +566,22 @@ handleClusterMembershipResult = \case
   ClusterMembershipLeaveResult (Right _) -> pure () -- Nothing to do until log entry is applied
   ClusterMembershipLeaveResult (Left _) -> pure ()
 
-handleAdminRequest :: (MonadMVar m) => AdminRequest node -> RaftT entry node state result m ()
+handleAdminRequest :: (MonadMVar m, MonadAsync m) => AdminRequest node -> RaftT entry node state result m ()
 handleAdminRequest req@(MkRequest reqId adminId command) = do
   trace (`AdminRequestReceived` req)
   mLeaderId <- use currentLeader
   case command of
     ShutDown -> do
       view exitLock >>= lift . (`putMVar` ())
-      Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.ShutdownInitiated)
+      runSend $ Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.ShutdownInitiated)
     GetClusterConfiguration ->
       use role >>= \case
-        Leader -> use clusterConfiguration >>= \conf -> Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId (Admin.ClusterConfigurationIs conf))
-        _ -> Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId (Admin.NotLeader mLeaderId))
+        Leader -> use clusterConfiguration >>= \conf -> runSend $ Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId (Admin.ClusterConfigurationIs conf))
+        _ -> runSend $ Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId (Admin.NotLeader mLeaderId))
     (JoinCluster target) -> do
-      self >>= Transformer.sendRPC target . CM . ClusterMembershipJoinRequest
-      Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.JoinInitiated)
+      self >>= runSend . Transformer.sendRPC target . CM . ClusterMembershipJoinRequest
+      runSend $ Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.JoinInitiated)
     LeaveCluster -> do
       s <- self
-      Transformer.sendRPC s (CM (ClusterMembershipLeaveRequest s))
-      Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.LeaveInitiated)
+      runSend $ Transformer.sendRPC s (CM (ClusterMembershipLeaveRequest s))
+      runSend $ Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.LeaveInitiated)
