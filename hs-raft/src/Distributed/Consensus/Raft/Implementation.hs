@@ -5,6 +5,7 @@
 module Distributed.Consensus.Raft.Implementation
   ( -- * Protocol implementation
     Implementation (..),
+    Networking (..),
 
     -- * Types
     LogEntry (..),
@@ -47,7 +48,16 @@ data Implementation entry node state result m = Implementation
     readSnapshot :: node -> m (Maybe (Snapshot node state)),
     writeSnapshot :: node -> Snapshot node state -> m (),
     applyLogEntry :: state -> entry -> (state, result),
-    sendRPC :: node -> RPC node entry state -> m (),
+    networking :: Networking entry node state result m,
+    tracer :: RaftTrace entry result node state -> m ()
+  }
+
+-- | Networking implementation.
+--
+-- This is broken out into its own type so that it can be provided cleanly by
+-- third-party packages
+data Networking entry node state result m = Networking
+  { sendRPC :: node -> RPC node entry state -> m (),
     sendRPCResult :: node -> RPCResult node result -> m (),
     sendClientResponse :: node -> ClientResponse node result -> m (),
     sendAdminResponse :: node -> AdminResponse node -> m (),
@@ -61,8 +71,7 @@ data Implementation entry node state result m = Implementation
     -- your software stack allows for it, queueing requests allows
     -- for pipelined processing which is much more efficient.
     receiveClientRequests :: m (NonEmpty (ClientRequest node entry)),
-    receiveAdminRequest :: m (Either Text (AdminRequest node)),
-    tracer :: RaftTrace entry result node state -> m ()
+    receiveAdminRequest :: m (Either Text (AdminRequest node))
   }
 
 -- | A 'Command' comes from clients

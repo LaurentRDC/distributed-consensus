@@ -25,7 +25,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Word (Word64)
-import Distributed.Consensus.Raft (Config (..), Implementation (..), Microseconds, RPC, RPCResult, runRaftServer)
+import Distributed.Consensus.Raft (Config (..), Implementation (..), Microseconds, Networking (..), RPC, RPCResult, runRaftServer)
 import qualified Distributed.Consensus.Raft as Raft
 import Distributed.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Distributed.Consensus.Raft.Client
@@ -185,14 +185,17 @@ mkServer network hbto etolb etoub seed node =
             readSnapshot = \_ -> pure Nothing,
             writeSnapshot = \_ _ -> pure (),
             applyLogEntry = step,
-            sendRPC = send network.rpcMailbox,
-            sendRPCResult = send network.rpcResultsMailbox,
-            sendClientResponse = send network.responsesMailbox,
-            sendAdminResponse = send network.adminResponsesMailbox,
-            receiveRPC = receive network.rpcMailbox node <&> Right,
-            receiveRPCResult = receive network.rpcResultsMailbox node <&> Right,
-            receiveClientRequests = receiveAll network.requestsMailbox node,
-            receiveAdminRequest = receive network.adminMailbox node <&> Right,
+            networking =
+              Networking
+                { sendRPC = send network.rpcMailbox,
+                  sendRPCResult = send network.rpcResultsMailbox,
+                  sendClientResponse = send network.responsesMailbox,
+                  sendAdminResponse = send network.adminResponsesMailbox,
+                  receiveRPC = receive network.rpcMailbox node <&> Right,
+                  receiveRPCResult = receive network.rpcResultsMailbox node <&> Right,
+                  receiveClientRequests = receiveAll network.requestsMailbox node,
+                  receiveAdminRequest = receive network.adminMailbox node <&> Right
+                },
             tracer = \_ -> pure ()
           }
     }

@@ -120,7 +120,7 @@ enqueueEvent event = do
 sendRPC :: (Monad m) => node -> RPC node entry state -> RaftT entry node state result m ()
 sendRPC node rpc = do
   impl <- view implementation
-  lift $ Impl.sendRPC impl node rpc
+  lift $ impl.networking.sendRPC node rpc
 
 -- | Send a 'RPC' concurrently to other nodes.
 --
@@ -128,22 +128,22 @@ sendRPC node rpc = do
 sendRPCConcurrently :: (MonadAsync m) => Set node -> RPC node entry state -> RaftT entry node state result m ()
 sendRPCConcurrently nodes rpc = do
   impl <- view implementation
-  lift $ mapConcurrently_ (flip (Impl.sendRPC impl) rpc) nodes
+  lift $ mapConcurrently_ (flip impl.networking.sendRPC rpc) nodes
 
 sendRPCResult :: (Monad m) => node -> RPCResult node result -> RaftT entry node state result m ()
 sendRPCResult node rpc = do
   impl <- view implementation
-  lift $ Impl.sendRPCResult impl node rpc
+  lift $ impl.networking.sendRPCResult node rpc
 
 sendClientResponse :: (Monad m) => node -> ClientResponse node result -> RaftT entry node state result m ()
 sendClientResponse node response = do
   impl <- view implementation
-  lift $ Impl.sendClientResponse impl node response
+  lift $ impl.networking.sendClientResponse node response
 
 sendAdminResponse :: (Monad m) => node -> AdminResponse node -> RaftT entry node state result m ()
 sendAdminResponse admin response = do
   impl <- view implementation
-  lift $ Impl.sendAdminResponse impl admin response
+  lift $ impl.networking.sendAdminResponse admin response
 
 whenRole ::
   (Monad m) =>

@@ -46,6 +46,7 @@ import Distributed.Consensus.Raft
     LogEntry,
     LogIndex,
     Microseconds,
+    Networking (..),
     RPC,
     RPCResult,
     RaftTrace (..),
@@ -555,14 +556,17 @@ mkServer debug resources hbto etolb etoub faultProb seed node =
             readSnapshot = readTest resources.snapshotPersistence,
             writeSnapshot = \self snapshot -> writeTest resources.snapshotPersistence self (Just snapshot),
             applyLogEntry = step,
-            sendRPC = send resources.networkFabric.rpcMailbox,
-            sendRPCResult = send resources.networkFabric.rpcResultsMailbox,
-            sendClientResponse = send resources.networkFabric.responsesMailbox,
-            sendAdminResponse = send resources.networkFabric.adminResponsesMailbox,
-            receiveRPC = receive resources.networkFabric.rpcMailbox node <&> Right,
-            receiveRPCResult = receive resources.networkFabric.rpcResultsMailbox node <&> Right,
-            receiveClientRequests = receiveAll resources.networkFabric.requestsMailbox node,
-            receiveAdminRequest = receive resources.networkFabric.adminMailbox node <&> Right,
+            networking =
+              Networking
+                { sendRPC = send resources.networkFabric.rpcMailbox,
+                  sendRPCResult = send resources.networkFabric.rpcResultsMailbox,
+                  sendClientResponse = send resources.networkFabric.responsesMailbox,
+                  sendAdminResponse = send resources.networkFabric.adminResponsesMailbox,
+                  receiveRPC = receive resources.networkFabric.rpcMailbox node <&> Right,
+                  receiveRPCResult = receive resources.networkFabric.rpcResultsMailbox node <&> Right,
+                  receiveClientRequests = receiveAll resources.networkFabric.requestsMailbox node,
+                  receiveAdminRequest = receive resources.networkFabric.adminMailbox node <&> Right
+                },
             -- We debug-print events here, rather than in `checkScenario`,
             -- because `checkScenario` can fail and produce no trace.
             tracer = traceM . debug

@@ -9,6 +9,7 @@ module Distributed.Consensus.Raft
 
     -- * Protocol implementation
     Implementation (..),
+    Networking (..),
 
     -- ** Domain types
     LogEntry (..),
@@ -74,6 +75,7 @@ import Distributed.Consensus.Raft.Implementation
     InstallSnapshot (..),
     InstallSnapshotResult (..),
     LogEntry (..),
+    Networking (..),
     RPC (..),
     RPCResult (..),
     RaftTrace (..),

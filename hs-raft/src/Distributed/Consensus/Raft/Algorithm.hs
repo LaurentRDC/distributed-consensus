@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -41,9 +42,11 @@ import Distributed.Consensus.Raft.Implementation
     ClusterMembershipResult (..),
     Command (..),
     Event (..),
+    Implementation (..),
     InstallSnapshot (..),
     InstallSnapshotResult (..),
     LogEntry (..),
+    Networking (..),
     RPC (..),
     RPCResult (..),
     RaftTrace (..),
@@ -85,12 +88,7 @@ import Distributed.Consensus.Raft.Transformer
     restoreState,
     role,
     self,
-    sendAdminResponse,
     sendAppendEntriesTo,
-    sendClientResponse,
-    sendHeartbeat,
-    sendRPC,
-    sendRPCResult,
     term,
     trace,
     updateTerm,
@@ -98,6 +96,7 @@ import Distributed.Consensus.Raft.Transformer
     votedFor,
     yesVotes,
   )
+import qualified Distributed.Consensus.Raft.Transformer as Transformer
 import Lens.Micro.Platform (at, use, view, (%=), (.=))
 
 server ::
@@ -153,25 +152,25 @@ server = do
   where
     receiveRPCsThread impl queue trace' = do
       labelThisThread "receiceRPCs"
-      let recv = Impl.receiveRPC impl
+      let recv = impl.networking.receiveRPC
       forever $ do
         recv >>= \case
           Left errMsg -> trace' (`DeserializationError` errMsg)
           Right rpc -> atomically $ writeTQueue queue (EventRPC rpc)
     receiveRPCResultsThread impl queue trace' = do
       labelThisThread "receiceRPCResults"
-      let recv = Impl.receiveRPCResult impl
+      let recv = impl.networking.receiveRPCResult
       forever $ do
         recv >>= \case
           Left errMsg -> trace' (`DeserializationError` errMsg)
           Right rpcResult -> atomically $ writeTQueue queue (EventRPCResult rpcResult)
     receiveClientRequestsThread impl queue = do
       labelThisThread "receiceClientRequests"
-      let recv = Impl.receiveClientRequests impl
+      let recv = impl.networking.receiveClientRequests
       forever $ recv >>= atomically . writeTQueue queue . EventIncomingClientRequest
     receiveAdminRequestsThread impl queue trace' = do
       labelThisThread "receiveAdminRequests"
-      let recv = Impl.receiveAdminRequest impl
+      let recv = impl.networking.receiveAdminRequest
       forever $ do
         recv >>= \case
           Left errMsg -> trace' (`DeserializationError` errMsg)
@@ -195,7 +194,7 @@ handleEvent EventElectionTimeout = do
     unless (r == Candidate) $ do
       trace ElectionTriggered
     becomeCandidate
-handleEvent EventHeartBeatTimeout = sendHeartbeat
+handleEvent EventHeartBeatTimeout = Transformer.sendHeartbeat
 handleEvent (EventIncomingClientRequest requests) = handleClientRequest requests
 handleEvent (EventRPC (RequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm)) =
   handleRequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm
@@ -225,14 +224,14 @@ handleClientRequest requests = do
     NonMember -> do
       for_ requests $ \(MkRequest reqId clientId _) ->
         -- TODO: reply in parallel
-        sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
+        Transformer.sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
     Candidate ->
       for_ requests $ \(MkRequest reqId clientId _) ->
         -- TODO: reply in parallel
-        sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
+        Transformer.sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
     Follower ->
       for_ requests $ \(MkRequest reqId clientId _) ->
-        sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
+        Transformer.sendClientResponse clientId (MkResponse reqId mLeaderId NotLeader)
     Leader -> do
       reqIds <- acceptClientRequests requests
       let commands = NonEmpty.zipWith Command reqIds (requestPayload <$> requests)
@@ -281,7 +280,7 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
     if leaderTerm < ourTerm || not logIsConsistent
       then do
         let ourLastIndex = Log.lastLogIndex entries
-        sendRPCResult
+        Transformer.sendRPCResult
           leaderNode
           ( AER
               ( AppendEntriesResult
@@ -315,7 +314,7 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
         newLastEntry <- use commandLog <&> Log.lastLogIndex
         trace (`LastLogIndexChangedTo` newLastEntry)
 
-        sendRPCResult
+        Transformer.sendRPCResult
           leaderNode
           ( AER
               ( AppendEntriesResult
@@ -404,18 +403,18 @@ handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLas
           grantVote ourTerm
           trace (\ctx -> VotedFor ctx candidateTerm candidateNode)
         else do
-          sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
+          Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
     -- We already voted for this candidate
     Just someCandidate
       | someCandidate == candidateNode ->
-          sendRPCResult candidateNode (RequestVoteResult s ourTerm True)
+          Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm True)
     -- We already voted, for another candidate
     Just _ ->
-      sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
+      Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
   where
     grantVote ourTerm = do
       s <- self
-      sendRPCResult candidateNode (RequestVoteResult s ourTerm True)
+      Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm True)
       r <- use role
       when (r == Follower) resetElectionTimer
 
@@ -457,7 +456,7 @@ handleInstallSnapshot (InstallSnapshot leaderTerm leaderNode snapshot) =
         <$> use term
         <*> (view configuration <&> nodeId)
         <*> pure (sMetadata snapshot)
-        >>= sendRPCResult leaderNode . ISR
+        >>= Transformer.sendRPCResult leaderNode . ISR
 
 handleInstallSnapshotResult ::
   ( Ord node,
@@ -490,14 +489,14 @@ handleClusterMembershipRequest request = do
         ClusterMembershipJoinRequest r -> (r, ClusterMembershipJoinResult)
         ClusterMembershipLeaveRequest r -> (r, ClusterMembershipLeaveResult)
   use role >>= \case
-    NonMember -> self >>= \s -> sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
-    Candidate -> self >>= \s -> sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
+    NonMember -> self >>= \s -> Transformer.sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
+    Candidate -> self >>= \s -> Transformer.sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
     Follower ->
       use currentLeader >>= \case
         Nothing -> do
           s <- self
-          sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
-        Just leader -> sendRPC leader (CM request) -- forward to leader
+          Transformer.sendRPCResult requester (CMR (resultCtor (Left (NoKnownLeader s))))
+        Just leader -> Transformer.sendRPC leader (CM request) -- forward to leader
     Leader -> do
       s <- self
       let -- Whether the committed configuration already says what the requester
@@ -511,16 +510,16 @@ handleClusterMembershipRequest request = do
         --
         -- Note the early return: previously this answered with an error and
         -- then went on to initiate a second, concurrent change anyway.
-        Joint {} -> sendRPCResult requester (CMR (resultCtor (Left (OngoingClusterMembershipChange s))))
+        Joint {} -> Transformer.sendRPCResult requester (CMR (resultCtor (Left (OngoingClusterMembershipChange s))))
         Simple cluster
           -- We distinguish between a request that succeeds the first
           -- and subsequent times to better track executions
           | alreadySettled cluster -> do
               trace (`MembershipChangeAlreadySettled` requester)
-              sendRPCResult requester (CMR (resultCtor (Right s)))
+              Transformer.sendRPCResult requester (CMR (resultCtor (Right s)))
           | otherwise -> do
               trace MembershipChangeInitiated
-              sendRPCResult requester (CMR (resultCtor (Right s)))
+              Transformer.sendRPCResult requester (CMR (resultCtor (Right s)))
 
               case request of
                 ClusterMembershipJoinRequest _ -> do
@@ -531,7 +530,7 @@ handleClusterMembershipRequest request = do
                       <*> self
                       <*> currentSnapshot
                     )
-                    >>= sendRPC requester . IS
+                    >>= Transformer.sendRPC requester . IS
                   appendLogEntries
                     ( NonEmpty.singleton
                         ( LogEntryMembershipChange
@@ -569,15 +568,15 @@ handleAdminRequest req@(MkRequest reqId adminId command) = do
   case command of
     ShutDown -> do
       view exitLock >>= lift . (`putMVar` ())
-      sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.ShutdownInitiated)
+      Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.ShutdownInitiated)
     GetClusterConfiguration ->
       use role >>= \case
-        Leader -> use clusterConfiguration >>= \conf -> sendAdminResponse adminId (MkResponse reqId mLeaderId (Admin.ClusterConfigurationIs conf))
-        _ -> sendAdminResponse adminId (MkResponse reqId mLeaderId (Admin.NotLeader mLeaderId))
+        Leader -> use clusterConfiguration >>= \conf -> Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId (Admin.ClusterConfigurationIs conf))
+        _ -> Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId (Admin.NotLeader mLeaderId))
     (JoinCluster target) -> do
-      self >>= sendRPC target . CM . ClusterMembershipJoinRequest
-      sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.JoinInitiated)
+      self >>= Transformer.sendRPC target . CM . ClusterMembershipJoinRequest
+      Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.JoinInitiated)
     LeaveCluster -> do
       s <- self
-      sendRPC s (CM (ClusterMembershipLeaveRequest s))
-      sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.LeaveInitiated)
+      Transformer.sendRPC s (CM (ClusterMembershipLeaveRequest s))
+      Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.LeaveInitiated)
