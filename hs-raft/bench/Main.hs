@@ -177,7 +177,7 @@ mkServer network hbto etolb etoub seed node =
       sSpec =
         Implementation
           { readLogEntry = \_ _ -> pure Nothing,
-            writeLogEntry = \_ _ _ _ -> pure (),
+            writeLogEntry = \_ _ -> pure (),
             readTerm = \_ -> pure 0,
             writeTerm = \_ _ -> pure (),
             readVotedFor = \_ _ -> pure Nothing,

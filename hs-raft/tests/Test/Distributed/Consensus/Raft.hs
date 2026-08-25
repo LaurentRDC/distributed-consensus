@@ -671,15 +671,13 @@ writeLogEntryTest ::
   (MonadSTM m) =>
   IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) ->
   Node ->
-  LogIndex ->
-  Term ->
-  LogEntry Node Command ->
+  [(LogIndex, Term, LogEntry Node Command)] ->
   m ()
-writeLogEntryTest storage self logIndex term entry = case IntMap.lookup (fromIntegral self) storage of
+writeLogEntryTest storage self batch = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
   Just var -> atomically $ do
     log' <- readTVar var
-    writeTVar var (Map.insert logIndex (term, entry) log')
+    writeTVar var (log' <> Map.fromList [(ix, (term, entry)) | (ix, term, entry) <- batch])
 
 readLogEntryTest :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) -> Node -> LogIndex -> m (Maybe (Term, LogEntry Node Command))
 readLogEntryTest storage self logIndex = case IntMap.lookup (fromIntegral self) storage of

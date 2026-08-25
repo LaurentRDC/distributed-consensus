@@ -36,6 +36,35 @@ import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, R
 import Distributed.Consensus.Raft.Log (Log)
 import GHC.Generics (Generic)
 
+data Implementation entry node state result m = Implementation
+  { -- TODO: allow to read multiple log entries at once, for performance optimizations
+    readLogEntry :: node -> LogIndex -> m (Maybe (Term, LogEntry node entry)),
+    writeLogEntry :: node -> [(LogIndex, Term, LogEntry node entry)] -> m (),
+    readTerm :: node -> m Term,
+    writeTerm :: node -> Term -> m (),
+    readVotedFor :: node -> Term -> m (Maybe node),
+    writeVotedFor :: node -> Term -> Maybe node -> m (),
+    readSnapshot :: node -> m (Maybe (Snapshot node state)),
+    writeSnapshot :: node -> Snapshot node state -> m (),
+    applyLogEntry :: state -> entry -> (state, result),
+    sendRPC :: node -> RPC node entry state -> m (),
+    sendRPCResult :: node -> RPCResult node result -> m (),
+    sendClientResponse :: node -> ClientResponse node result -> m (),
+    sendAdminResponse :: node -> AdminResponse node -> m (),
+    -- We use 'Text' to represent deserialization errors because this is
+    -- easiest to represent to the user. I don't think it's worth adding
+    -- yet another type variable to the impl.
+    receiveRPC :: m (Either Text (RPC node entry state)),
+    receiveRPCResult :: m (Either Text (RPCResult node result)),
+    -- | Receive client requests.
+    -- This call should block until at least one request is available. If
+    -- your software stack allows for it, queueing requests allows
+    -- for pipelined processing which is much more efficient.
+    receiveClientRequests :: m (NonEmpty (ClientRequest node entry)),
+    receiveAdminRequest :: m (Either Text (AdminRequest node)),
+    tracer :: RaftTrace entry result node state -> m ()
+  }
+
 -- | A 'Command' comes from clients
 data Command entry
   = Command
@@ -218,32 +247,3 @@ data RaftTrace entry result node state
     -- on tracing this event in production.
     Crashed node
   deriving (Eq, Show)
-
-data Implementation entry node state result m = Implementation
-  { -- TODO: allow to read and write multiple log entries at once, for performance optimizations
-    readLogEntry :: node -> LogIndex -> m (Maybe (Term, LogEntry node entry)),
-    writeLogEntry :: node -> LogIndex -> Term -> LogEntry node entry -> m (),
-    readTerm :: node -> m Term,
-    writeTerm :: node -> Term -> m (),
-    readVotedFor :: node -> Term -> m (Maybe node),
-    writeVotedFor :: node -> Term -> Maybe node -> m (),
-    readSnapshot :: node -> m (Maybe (Snapshot node state)),
-    writeSnapshot :: node -> Snapshot node state -> m (),
-    applyLogEntry :: state -> entry -> (state, result),
-    sendRPC :: node -> RPC node entry state -> m (),
-    sendRPCResult :: node -> RPCResult node result -> m (),
-    sendClientResponse :: node -> ClientResponse node result -> m (),
-    sendAdminResponse :: node -> AdminResponse node -> m (),
-    -- We use 'Text' to represent deserialization errors because this is
-    -- easiest to represent to the user. I don't think it's worth adding
-    -- yet another type variable to the impl.
-    receiveRPC :: m (Either Text (RPC node entry state)),
-    receiveRPCResult :: m (Either Text (RPCResult node result)),
-    -- | Receive client requests.
-    -- This call should block until at least one request is available. If
-    -- your software stack allows for it, queueing requests allows
-    -- for pipelined processing which is much more efficient.
-    receiveClientRequests :: m (NonEmpty (ClientRequest node entry)),
-    receiveAdminRequest :: m (Either Text (AdminRequest node)),
-    tracer :: RaftTrace entry result node state -> m ()
-  }

@@ -304,8 +304,9 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
         -- TODO: optimize perhaps?
         commandLog %= (`Log.keepEntriesUpTo` prevLogIndex)
 
-        for_ (zip [firstNewIndex ..] (toList newEntries)) $ \(ix, (entryTerm, entry)) -> do
-          lift $ Impl.writeLogEntry impl s ix entryTerm entry
+        let batchToWrite = zipWith (\ix (t, e) -> (ix, t, e)) [firstNewIndex ..] (toList newEntries)
+        lift $ Impl.writeLogEntry impl s batchToWrite
+        for_ batchToWrite $ \(ix, _, entry) ->
           trace (\ctx -> LogEntryAppended ctx ix entry)
 
         commandLog %= (`Log.extend` newEntries)

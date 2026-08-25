@@ -530,8 +530,9 @@ appendLogEntries entries = do
   startingLogIndex <- use commandLog <&> Log.lastLogIndex
   commandLog %= (`Log.extend` ((ourTerm,) <$> Seq.fromList (NonEmpty.toList entries)))
 
-  for_ (zip [succ startingLogIndex ..] (NonEmpty.toList entries)) $ \(ix, entry) -> do
-    lift $ writeLogEntry impl s ix ourTerm entry
+  let batchToWrite = zip3 [succ startingLogIndex ..] (repeat ourTerm) (NonEmpty.toList entries)
+  lift $ Impl.writeLogEntry impl s batchToWrite
+  for_ batchToWrite $ \(ix, _, entry) ->
     trace (\ctx -> LogEntryAppended ctx ix entry)
 
   adoptConfigurationFromLog
