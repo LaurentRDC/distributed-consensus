@@ -65,3 +65,16 @@ test-suite wal-test
                     , tasty-hedgehog
                     , temporary
                     , wal
+
+benchmark wal
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   bench
+  main-is:          Main.hs
+  ghc-options:      -rtsopts -threaded +RTS -N
+  build-depends:    base
+                  , binary
+                  , bytestring
+                  , tasty-bench
+                  , temporary
+                  , wal

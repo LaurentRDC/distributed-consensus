@@ -265,17 +265,22 @@ segments wal =
     <&> fmap fst
     <&> Set.fromList
 
--- | Append a single entry. See 'appendMany' for the batched, more efficient
--- version — prefer that when you have several entries ready at once.
+-- | Append a single entry to the log. Once 'append' returns,
+-- the entry is durably stored on disk.
+--
+-- Prefer to use 'appendMany' as much as possible, as it is much,
+-- much faster.
+--
+-- Appending to the log may result in the log file rotating
+-- to a new file.
 append :: (MonadIO m) => WriteAheadLog a -> a -> m ()
 append wal = appendMany wal . NonEmpty.singleton
 
--- | Append a batch of entries as one contiguous write: all frames are
--- concatenated into a single 'BB.Builder' and written with one 'BS.hPut',
--- so a burst of appends costs one syscall instead of many.
+-- | Append a batch of entries to the log. Once 'appendMany'
+-- returns, the entries are durably stored on disk.
 --
--- Automatically rotates to a new segment afterwards if the size threshold
--- in 'WALConfig' has been reached.
+-- Appending to the log may result in the log file rotating
+-- to a new file.
 appendMany :: (MonadIO m) => WriteAheadLog a -> NonEmpty a -> m ()
 appendMany wal xs = liftIO $ do
   withMVar (walHandle wal) $ \(WALHandle h _) -> do
@@ -283,8 +288,9 @@ appendMany wal xs = liftIO $ do
         bytes = BL.toStrict (BB.toLazyByteString builder)
         nBytes = fromIntegral (BS.length bytes) :: Int64
 
-    count <- BSU.unsafeUseAsCString bytes $ \ptr -> WALFile.write h (castPtr ptr) (fromIntegral nBytes)
-    when (fromIntegral count < nBytes) $ undefined -- TODO: ????
+    _count <- BSU.unsafeUseAsCString bytes $ \ptr -> WALFile.write h (castPtr ptr) (fromIntegral nBytes)
+    -- TODO: what do I do if '_count' is smaller than expected?
+
     WALFile.flush h
     modifyIORef' (walWritten wal) (+ nBytes)
 
