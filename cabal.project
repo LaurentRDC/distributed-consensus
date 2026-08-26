@@ -1,4 +1,5 @@
 packages: raft-consensus/raft-consensus.cabal
+          wal/wal.cabal
 
 program-options
     ghc-options: +RTS -A64m -RTS

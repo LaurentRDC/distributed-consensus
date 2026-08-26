@@ -1,0 +1,67 @@
+cabal-version:      3.4
+name:               wal
+version:            0.1.0.0
+synopsis:           Write-ahead log implementation
+-- description:
+homepage:           https://github.com/LaurentRDC/hs-raft
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             Laurent P. René de Cotret
+maintainer:         laurent.decotret@outlook.com
+copyright:          Laurent P. René de Cotret
+category:           System
+build-type:         Simple
+extra-doc-files:    README.md
+                    CHANGELOG.md
+
+common warnings
+    ghc-options: -Wall
+                 -Wcompat
+                 -Widentities
+                 -Wincomplete-uni-patterns
+                 -Wincomplete-record-updates
+                 -Wredundant-constraints
+                 -fhide-source-paths
+                 -Wpartial-fields
+                 -Wunused-packages
+
+library
+    import:           warnings
+    exposed-modules:  System.IO.WAL
+    other-modules:    System.IO.File.Durable
+    build-depends:    attoparsec
+                    , base >= 4.18 && <4.23
+                      -- binary is already in the dependency closure, so adding
+                      -- it here is "free"
+                    , binary ^>=0.8
+                    , bytestring
+                    , containers >=0.7 && <0.9
+                    , digest
+                    , directory
+                    , filepath
+    hs-source-dirs:   src
+    default-language: Haskell2010
+
+    if os(windows)
+      other-modules:    System.IO.File.Durable.Windows
+      build-depends:  Win32 ^>=2.14
+    else
+      other-modules:    System.IO.File.Durable.Unix
+      build-depends:  unix ^>=2.8
+
+test-suite wal-test
+    import:           warnings
+    default-language: Haskell2010
+    other-modules:    Test.System.IO.WAL
+    type:             exitcode-stdio-1.0
+    ghc-options:      -rtsopts -threaded +RTS -N
+    hs-source-dirs:   tests
+    main-is:          Main.hs
+    build-depends:    base >= 4.18 && <4.23
+                    , bytestring
+                    , filepath
+                    , hedgehog ^>=1.7
+                    , tasty ^>= 1.5
+                    , tasty-hedgehog
+                    , temporary
+                    , wal

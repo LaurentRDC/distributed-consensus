@@ -27,11 +27,14 @@ jobs:
   #         fail-on: note
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        os:
+          - 'ubuntu-latest'
+          - 'windows-latest'
         ghc:
           - '9.6'
           - '9.8'
@@ -75,7 +78,8 @@ jobs:
           #
           # Therefore, the amount of exploration is capped to about 1/10 of the
           # default values in CI
-          cabal test all --test-options="--schedule-bound=10 --branching-factor=2"
+          cabal test raft-consensus --test-options="--schedule-bound=10 --branching-factor=2"
+          cabal test wal
 
   benchmark:
     runs-on: ubuntu-latest
