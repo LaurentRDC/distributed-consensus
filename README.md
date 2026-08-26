@@ -1,4 +1,4 @@
-# hs-raft
+# raft-consensus
 
 Haskell implementation of the Raft consensus protocol, with built-in support for deterministic simulation testing.
 
@@ -58,8 +58,8 @@ During the course of development, you may see a test failure for the determinist
 ```sh
 $ cabal test
 Running 1 test suites...
-Test suite hs-raft-test: RUNNING...
-hs-raft
+Test suite raft-consensus-test: RUNNING...
+raft-consensus
   Raft
     Property tests
       Cluster properties: FAIL

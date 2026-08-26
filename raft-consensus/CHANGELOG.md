@@ -1,4 +1,4 @@
-# Revision history for hs-raft
+# Revision history for raft-consensus
 
 ## 0.1.0.0 -- YYYY-mm-dd
 

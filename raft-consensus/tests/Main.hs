@@ -19,4 +19,4 @@ main =
         ]
         : defaultIngredients
     )
-    (testGroup "hs-raft" [tests])
+    (testGroup "raft-consensus" [tests])
