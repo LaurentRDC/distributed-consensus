@@ -47,7 +47,7 @@ library
     build-depends:    base >= 4.18 && <4.23
                     , binary ^>=0.8
                     , containers >=0.7 && <0.9
-                    , io-classes ^>=1.10
+                    , io-classes ^>=1.11
                     , microlens-platform ^>=0.4
                     , random ^>=1.3
                     , text >=2.1.2 && <2.2
@@ -73,7 +73,7 @@ test-suite raft-consensus-test
                     , containers
                     , raft-consensus
                     , io-classes
-                    , io-sim
+                    , io-sim ^>=1.11
                     , pretty-simple ^>=4.1
                     , random
                     , tagged ^>=0.8
