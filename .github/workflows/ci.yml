@@ -114,9 +114,10 @@ jobs:
       - name: Build
         run: cabal build all --project-file=cabal.optimized.project
 
+      # Run benchmarks with j1 so that we don't get interleaved output
       - name: Run benchmarks
         run: |
-          cabal bench all --project-file=cabal.optimized.project
+          cabal bench all -j1 --project-file=cabal.optimized.project
 
   haddock:
     runs-on: ubuntu-latest
