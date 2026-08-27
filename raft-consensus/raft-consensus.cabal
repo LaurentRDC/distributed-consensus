@@ -68,7 +68,7 @@ test-suite raft-consensus-test
                       Test.Distributed.Consensus.Raft.Options
                       Test.Distributed.Consensus.Raft.Properties
                       Test.Distributed.Consensus.Raft.Scenario
-    ghc-options:      -rtsopts -threaded +RTS -N
+    ghc-options:      -rtsopts -threaded -with-rtsopts=-N
     build-depends:    base >= 4.18 && <4.23
                     , containers
                     , raft-consensus
@@ -86,7 +86,7 @@ benchmark raft-cluster
   type:             exitcode-stdio-1.0
   hs-source-dirs:   bench
   main-is:          Main.hs
-  ghc-options:      -rtsopts -threaded +RTS -N
+  ghc-options:      -rtsopts -threaded -with-rtsopts=-N
   build-depends:    async
                   , base
                   , containers
