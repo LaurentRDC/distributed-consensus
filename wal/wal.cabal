@@ -3,7 +3,7 @@ name:               wal
 version:            0.1.0.0
 synopsis:           Write-ahead log implementation
 -- description:
-homepage:           https://github.com/LaurentRDC/hs-raft
+homepage:           https://github.com/LaurentRDC/distributed-consensus
 license:            BSD-3-Clause
 license-file:       LICENSE
 author:             Laurent P. René de Cotret
@@ -13,6 +13,11 @@ category:           System
 build-type:         Simple
 extra-doc-files:    README.md
                     CHANGELOG.md
+
+source-repository head
+    type: git
+    location: https://github.com/LaurentRDC/distributed-consensus
+    subdir: wal
 
 common warnings
     ghc-options: -Wall

@@ -3,7 +3,7 @@ name:               raft-consensus
 version:            0.1.0.0
 synopsis:           Haskell implementation of the Raft consensus protocol
 -- description:
-homepage:           https://github.com/LaurentRDC/hs-raft
+homepage:           https://github.com/LaurentRDC/distributed-consensus
 license:            BSD-3-Clause
 license-file:       LICENSE
 author:             Laurent P. René de Cotret
@@ -16,7 +16,8 @@ extra-doc-files:    README.md
 
 source-repository head
     type: git
-    location: https://github.com/LaurentRDC/hs-raft
+    location: https://github.com/LaurentRDC/distributed-consensus
+    subdir: raft-consensus
 
 common warnings
     ghc-options: -Wall
