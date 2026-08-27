@@ -15,16 +15,15 @@ jobs:
         with:
           mode: check
 
-  # Enable linting when the repository is public
-  # linting:
-  #   runs-on: ubuntu-latest
-  #   permissions:
-  #     security-events: write
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: haskell-actions/hlint-scan@v1
-  #       with:
-  #         fail-on: note
+  linting:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/hlint-scan@v1
+        with:
+          fail-on: note
 
   test:
     runs-on: ${{ matrix.os }}
