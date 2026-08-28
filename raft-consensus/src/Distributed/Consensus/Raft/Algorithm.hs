@@ -50,7 +50,6 @@ import Distributed.Consensus.Raft.Implementation
     RPC (..),
     RPCResult (..),
     RaftTrace (..),
-    tracer,
   )
 import qualified Distributed.Consensus.Raft.Implementation as Impl
 import Distributed.Consensus.Raft.Log (Lookup (..), (!?))
@@ -112,13 +111,11 @@ server ::
 server = do
   impl <- view implementation
   queue <- view eventQueue
-  s <- self
 
-  let trace' makeTrace = tracer impl $ makeTrace s
-  t1 <- lift $ async $ receiveRPCsThread impl queue trace'
-  t2 <- lift $ async $ receiveRPCResultsThread impl queue trace'
+  t1 <- lift $ async $ receiveRPCsThread impl queue
+  t2 <- lift $ async $ receiveRPCResultsThread impl queue
   t3 <- lift $ async $ receiveClientRequestsThread impl queue
-  t4 <- lift $ async $ receiveAdminRequestsThread impl queue trace'
+  t4 <- lift $ async $ receiveAdminRequestsThread impl queue
   let receiveLoops = [t1, t2, t3, t4]
   for_ receiveLoops (lift . link)
 
@@ -151,31 +148,26 @@ server = do
   for_ receiveLoops (lift . cancel)
   trace GracefulShutdown
   where
-    receiveRPCsThread impl queue trace' = do
+    receiveRPCsThread impl queue = do
       labelThisThread "receiceRPCs"
       let recv = impl.networking.receiveRPC
-      forever $ do
-        recv >>= \case
-          Left errMsg -> trace' (`DeserializationError` errMsg)
-          Right rpc -> atomically $ writeTQueue queue (EventRPC rpc)
-    receiveRPCResultsThread impl queue trace' = do
+      forever $
+        recv
+          >>= atomically . writeTQueue queue . EventRPC
+    receiveRPCResultsThread impl queue = do
       labelThisThread "receiceRPCResults"
       let recv = impl.networking.receiveRPCResult
-      forever $ do
-        recv >>= \case
-          Left errMsg -> trace' (`DeserializationError` errMsg)
-          Right rpcResult -> atomically $ writeTQueue queue (EventRPCResult rpcResult)
+      forever $
+        recv >>= atomically . writeTQueue queue . EventRPCResult
     receiveClientRequestsThread impl queue = do
       labelThisThread "receiceClientRequests"
       let recv = impl.networking.receiveClientRequests
       forever $ recv >>= atomically . writeTQueue queue . EventIncomingClientRequest
-    receiveAdminRequestsThread impl queue trace' = do
+    receiveAdminRequestsThread impl queue = do
       labelThisThread "receiveAdminRequests"
       let recv = impl.networking.receiveAdminRequest
-      forever $ do
-        recv >>= \case
-          Left errMsg -> trace' (`DeserializationError` errMsg)
-          Right request -> atomically $ writeTQueue queue (EventAdminRequest request)
+      forever $
+        recv >>= atomically . writeTQueue queue . EventAdminRequest
 
 handleEvent ::
   ( Ord node,

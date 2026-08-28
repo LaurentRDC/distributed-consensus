@@ -31,7 +31,6 @@ where
 import Data.Binary (Binary)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Sequence (Seq)
-import Data.Text (Text)
 import Distributed.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Distributed.Consensus.Raft.Client (ClientRequest, ClientResponse)
 import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, RequestId, Snapshot, SnapshotMetadata, Term)
@@ -58,14 +57,14 @@ data Networking entry node state result m = Networking
     -- We use 'Text' to represent deserialization errors because this is
     -- easiest to represent to the user. I don't think it's worth adding
     -- yet another type variable to the impl.
-    receiveRPC :: m (Either Text (RPC node entry state)),
-    receiveRPCResult :: m (Either Text (RPCResult node result)),
+    receiveRPC :: m (RPC node entry state),
+    receiveRPCResult :: m (RPCResult node result),
     -- | Receive client requests.
     -- This call should block until at least one request is available. If
     -- your software stack allows for it, queueing requests allows
     -- for pipelined processing which is much more efficient.
     receiveClientRequests :: m (NonEmpty (ClientRequest node entry)),
-    receiveAdminRequest :: m (Either Text (AdminRequest node))
+    receiveAdminRequest :: m (AdminRequest node)
   }
 
 -- | Persistence implementation.
@@ -237,7 +236,6 @@ data RaftTrace entry result node state
   | EventReceived (EventContext node) (Event node entry result state)
   | SplitElection (EventContext node)
   | ElectionTriggered (EventContext node)
-  | DeserializationError node Text
   | -- | Command received by the leader node. If the command needs to be redirected
     --    to another node, this event is not emitted
     -- All Commands should have the same request ID

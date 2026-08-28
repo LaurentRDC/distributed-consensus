@@ -195,10 +195,10 @@ mkServer network hbto etolb etoub seed node =
                   sendRPCResult = send network.rpcResultsMailbox,
                   sendClientResponse = send network.responsesMailbox,
                   sendAdminResponse = send network.adminResponsesMailbox,
-                  receiveRPC = receive network.rpcMailbox node <&> Right,
-                  receiveRPCResult = receive network.rpcResultsMailbox node <&> Right,
+                  receiveRPC = receive network.rpcMailbox node,
+                  receiveRPCResult = receive network.rpcResultsMailbox node,
                   receiveClientRequests = receiveAll network.requestsMailbox node,
-                  receiveAdminRequest = receive network.adminMailbox node <&> Right
+                  receiveAdminRequest = receive network.adminMailbox node
                 },
             tracer = \_ -> pure ()
           }

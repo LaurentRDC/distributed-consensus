@@ -566,10 +566,10 @@ mkServer debug resources hbto etolb etoub faultProb seed node =
                   sendRPCResult = send resources.networkFabric.rpcResultsMailbox,
                   sendClientResponse = send resources.networkFabric.responsesMailbox,
                   sendAdminResponse = send resources.networkFabric.adminResponsesMailbox,
-                  receiveRPC = receive resources.networkFabric.rpcMailbox node <&> Right,
-                  receiveRPCResult = receive resources.networkFabric.rpcResultsMailbox node <&> Right,
+                  receiveRPC = receive resources.networkFabric.rpcMailbox node,
+                  receiveRPCResult = receive resources.networkFabric.rpcResultsMailbox node,
                   receiveClientRequests = receiveAll resources.networkFabric.requestsMailbox node,
-                  receiveAdminRequest = receive resources.networkFabric.adminMailbox node <&> Right
+                  receiveAdminRequest = receive resources.networkFabric.adminMailbox node
                 },
             -- We debug-print events here, rather than in `checkScenario`,
             -- because `checkScenario` can fail and produce no trace.
