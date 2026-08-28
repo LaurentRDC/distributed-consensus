@@ -58,7 +58,7 @@ import Distributed.Consensus.Raft
 import qualified Distributed.Consensus.Raft as Raft
 import Distributed.Consensus.Raft.Admin
 import qualified Distributed.Consensus.Raft.Admin as Admin
-import Distributed.Consensus.Raft.Client (ClientRequest, ClientResponse, RaftClientSpec (..), RaftClientT, request, withRaftClientT)
+import Distributed.Consensus.Raft.Client (ClientImplementation (..), ClientRequest, ClientResponse, RaftClientT, request, withRaftClientT)
 import System.Random (mkStdGen64, uniformR)
 import Test.Distributed.Consensus.Raft.Options (PrintTrace (..), setNumRacyTests, withExplorationOptions, withPrintTraceOption)
 import Test.Distributed.Consensus.Raft.Properties (FaultInjection (..), allProperties)
@@ -600,9 +600,9 @@ data Harness s
     loneServers :: IntMap (Server s, MVar (IOSim s) (), Microseconds, Microseconds),
     -- TODO: have multiple concurrent clients
     hClientNode :: Node,
-    hClientSpec :: RaftClientSpec Command Node Result (IOSim s),
+    hClientSpec :: ClientImplementation Command Node Result (IOSim s),
     hAdminNode :: Node,
-    hAdminSpec :: RaftAdminSpec Node (IOSim s)
+    hAdminSpec :: AdminImplementation Node (IOSim s)
   }
 
 testHarness ::
@@ -663,14 +663,14 @@ testHarness
       loneNodesWithMeta = zip4 (drop numClusterNodes faultProbs) (drop numClusterNodes s) loneWaits loneNodes
 
       clientSpec network =
-        MkRaftClientSpec
+        ClientImplementation
           { sendRequest = send network.requestsMailbox,
             receiveResponse =
               receive network.responsesMailbox clientNode
           }
 
       adminSpec network =
-        MkRaftAdminSpec
+        AdminImplementation
           { sendAdminRequest = send network.adminMailbox,
             receiveAdminResponse = receive network.adminResponsesMailbox adminNode <&> Right
           }

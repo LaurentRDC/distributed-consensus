@@ -8,7 +8,7 @@
 
 module Distributed.Consensus.Raft.Client
   ( RaftClientT,
-    RaftClientSpec (..),
+    ClientImplementation (..),
     withRaftClientT,
     request,
 
@@ -61,7 +61,7 @@ newtype RaftClientT entry node result m a
 instance MonadTrans (RaftClientT entry node result) where
   lift = MkRaftClientT . lift
 
-data RaftClientSpec entry node result m = MkRaftClientSpec
+data ClientImplementation entry node result m = ClientImplementation
   { sendRequest :: node -> ClientRequest node entry -> m (),
     receiveResponse :: m (ClientResponse node result)
   }
@@ -73,7 +73,7 @@ withRaftClientT ::
   (MonadAsync m) =>
   -- | self identification
   node ->
-  RaftClientSpec entry node result m ->
+  ClientImplementation entry node result m ->
   ((forall a. RaftClientT entry node result m a -> m a) -> m b) ->
   m b
 withRaftClientT self impl withSession = do
@@ -103,11 +103,11 @@ data RaftClientEnv entry node result m
   = MkRaftClientEnv
   { node :: !node,
     nextRequestId :: !(TVar m ClientRequestId),
-    implementation :: RaftClientSpec entry node result m,
+    implementation :: ClientImplementation entry node result m,
     mailbox :: TVar m (Map ClientRequestId (TMVar m (ClientResponse node result)))
   }
 
-makeLenses ''RaftClientSpec
+makeLenses ''ClientImplementation
 
 -- | Send a request to a Raft cluster.
 --

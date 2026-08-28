@@ -29,9 +29,9 @@ import Distributed.Consensus.Raft (Config (..), Implementation (..), Microsecond
 import qualified Distributed.Consensus.Raft as Raft
 import Distributed.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Distributed.Consensus.Raft.Client
-  ( ClientRequest,
+  ( ClientImplementation (..),
+    ClientRequest,
     ClientResponse,
-    RaftClientSpec (..),
     request,
     withRaftClientT,
   )
@@ -248,7 +248,7 @@ benchHarness
       serverNodesWithSeeds = zip (take numClusterNodes s) serverNodes
 
       clientSpec network =
-        MkRaftClientSpec
+        ClientImplementation
           { sendRequest = send network.requestsMailbox,
             receiveResponse =
               receive network.responsesMailbox clientNode

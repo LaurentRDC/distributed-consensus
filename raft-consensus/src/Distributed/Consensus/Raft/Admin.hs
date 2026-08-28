@@ -8,7 +8,7 @@
 
 module Distributed.Consensus.Raft.Admin
   ( RaftAdminT,
-    RaftAdminSpec (..),
+    AdminImplementation (..),
     withRaftAdminT,
 
     -- * Available commands
@@ -86,7 +86,7 @@ instance MonadTrans (RaftAdminT node) where
 asks :: (Monad m) => (RaftAdminEnv node m -> a) -> RaftAdminT node m a
 asks = MkRaftAdminT . Reader.asks
 
-data RaftAdminSpec node m = MkRaftAdminSpec
+data AdminImplementation node m = AdminImplementation
   { -- | Send an admin request to a node.
     sendAdminRequest ::
       node ->
@@ -104,7 +104,7 @@ withRaftAdminT ::
   (MonadAsync m) =>
   -- | self identification
   node ->
-  RaftAdminSpec node m ->
+  AdminImplementation node m ->
   ((forall a. RaftAdminT node m a -> m a) -> m b) ->
   m b
 withRaftAdminT self impl withSession = do
@@ -129,12 +129,12 @@ withRaftAdminT self impl withSession = do
 data RaftAdminEnv node m
   = MkRaftAdminEnv
   { node :: !node,
-    implementation :: RaftAdminSpec node m,
+    implementation :: AdminImplementation node m,
     nextRequestId :: TVar m AdminRequestId,
     mailbox :: TVar m (Map AdminRequestId (TMVar m (AdminCommandResult node)))
   }
 
-makeLenses ''RaftAdminSpec
+makeLenses ''AdminImplementation
 
 data AdminError node
   = AdminFailed !Text
