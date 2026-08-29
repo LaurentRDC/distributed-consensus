@@ -1,0 +1,81 @@
+cabal-version:      3.4
+name:               distributed-process-raft-consensus
+version:            0.1.0.0
+synopsis:           Cloud Haskell facilities to the Raft consensus protocol
+-- description:
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             Laurent P. René de Cotret
+maintainer:         laurent.decotret@outlook.com
+copyright:          Laurent P. René de Cotret
+category:           Distributed Systems, Consensus, Cloud Haskell
+build-type:         Simple
+extra-doc-files:    README.md
+                    CHANGELOG.md
+
+source-repository head
+    type: git
+    location: https://github.com/LaurentRDC/distributed-consensus
+    subdir: distributed-process-raft-consensus
+
+common warnings
+    ghc-options: -Wall
+                 -Wcompat
+                 -Widentities
+                 -Wincomplete-uni-patterns
+                 -Wincomplete-record-updates
+                 -Wredundant-constraints
+                 -fhide-source-paths
+                 -Wpartial-fields
+                 -Wunused-packages
+
+library
+    import:           warnings
+    exposed-modules:  Control.Distributed.Process.Raft
+    hs-source-dirs:   src
+    -- GHC 9.6+ (base 4.18+) is required to infer types properly when
+    -- using io-classes
+    build-depends:    base >= 4.18 && <4.23
+                    , distributed-process ^>=0.7
+                    , distributed-process-raft-consensus:io-classes-instances
+                    , raft-consensus ^>=0.1
+                    , stm ^>=2.5
+    default-language: GHC2021
+
+library io-classes-instances
+    import:           warnings
+    hs-source-dirs:   src/instances
+    exposed-modules:  Control.Distributed.Process.Raft.Instances
+    build-depends:    base >= 4.18 && <4.23
+                    , array
+                    , async
+                    , distributed-process ^>=0.7
+                    , io-classes ^>=1.11
+                    , io-classes:si-timers
+                    , primitive
+                    , stm ^>=2.5
+                    , transformers
+    default-language: GHC2021
+
+library client
+    import:           warnings
+    hs-source-dirs:   src/client
+    exposed-modules:  Control.Distributed.Process.Raft.Client
+    build-depends:    base >= 4.18 && <4.23
+                    , distributed-process ^>=0.7
+                    , distributed-process-raft-consensus:io-classes-instances
+                    , raft-consensus ^>=0.1
+                    , stm ^>=2.5
+                    , text >=2.1.2 && <2.2
+    default-language: GHC2021
+
+library admin
+    import:           warnings
+    hs-source-dirs:   src/admin
+    exposed-modules:  Control.Distributed.Process.Raft.Admin
+    build-depends:    base >= 4.18 && <4.23
+                    , distributed-process ^>=0.7
+                    , distributed-process-raft-consensus:io-classes-instances
+                    , raft-consensus ^>=0.1
+                    , stm ^>=2.5
+    default-language: GHC2021

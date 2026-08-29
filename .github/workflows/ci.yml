@@ -82,6 +82,7 @@ jobs:
           # default values in CI
           cabal test raft-consensus --test-options="--schedule-bound=10 --branching-factor=2"
           cabal test wal
+          cabal test distributed-process-raft-consensus
 
   benchmark:
     runs-on: ubuntu-latest
