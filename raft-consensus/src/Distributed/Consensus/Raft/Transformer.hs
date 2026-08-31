@@ -68,7 +68,7 @@ import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromJust, isJust)
-import Data.Sequence (ViewR (..), (|>))
+import Data.Sequence (ViewR (..))
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -562,13 +562,7 @@ restoreState = do
 
   let snapshotIndex = maybe 0 (smLastIncludedIndex . sMetadata) mPersistedSnapshot
 
-  entries <-
-    lift $
-      let loop ix acc =
-            impl.persistence.readLogEntry s ix >>= \case
-              Nothing -> pure acc
-              Just entry -> loop (succ ix) (acc |> entry)
-       in loop (succ snapshotIndex) Seq.empty
+  entries <- lift $ Seq.fromList <$> impl.persistence.readLogEntriesFrom s (succ snapshotIndex)
 
   let restoredLog = Log.buildLog entries (sMetadata <$> mPersistedSnapshot)
   commandLog .= restoredLog

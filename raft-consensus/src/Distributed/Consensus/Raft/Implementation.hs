@@ -38,8 +38,7 @@ import Distributed.Consensus.Raft.Log (Log)
 import GHC.Generics (Generic)
 
 data Implementation entry node state result m = Implementation
-  { -- TODO: allow to read multiple log entries at once, for performance optimizations
-    persistence :: Persistence entry node state m,
+  { persistence :: Persistence entry node state m,
     applyLogEntry :: state -> entry -> (state, result),
     networking :: Networking entry node state result m,
     tracer :: RaftTrace entry result node state -> m ()
@@ -72,7 +71,8 @@ data Networking entry node state result m = Networking
 -- This is broken out into its own type so that it can be provided cleanly by
 -- third-party packages
 data Persistence entry node state m = Persistence
-  { readLogEntry :: node -> LogIndex -> m (Maybe (Term, LogEntry node entry)),
+  { -- | Read log entries, starting from and including, a given 'LogIndex'
+    readLogEntriesFrom :: node -> LogIndex -> m [(Term, LogEntry node entry)],
     writeLogEntry :: node -> [(LogIndex, Term, LogEntry node entry)] -> m (),
     readTerm :: node -> m Term,
     writeTerm :: node -> Term -> m (),

@@ -179,7 +179,7 @@ mkServer network hbto etolb etoub seed node =
         Implementation
           { persistence =
               Persistence
-                { readLogEntry = \_ _ -> pure Nothing,
+                { readLogEntriesFrom = \_ _ -> pure [],
                   writeLogEntry = \_ _ -> pure (),
                   readTerm = \_ -> pure 0,
                   writeTerm = \_ _ -> pure (),

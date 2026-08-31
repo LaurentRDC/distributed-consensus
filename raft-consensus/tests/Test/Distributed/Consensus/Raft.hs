@@ -550,7 +550,7 @@ mkServer debug resources hbto etolb etoub faultProb seed node =
         Implementation
           { persistence =
               Persistence
-                { readLogEntry = readLogEntryTest resources.logPersistence,
+                { readLogEntriesFrom = readLogEntriesFromTest resources.logPersistence,
                   writeLogEntry = writeLogEntryTest resources.logPersistence,
                   readTerm = readTest resources.termPersistence,
                   writeTerm = writeTest resources.termPersistence,
@@ -687,10 +687,10 @@ writeLogEntryTest storage self batch = case IntMap.lookup (fromIntegral self) st
     log' <- readTVar var
     writeTVar var (log' <> Map.fromList [(ix, (term, entry)) | (ix, term, entry) <- batch])
 
-readLogEntryTest :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) -> Node -> LogIndex -> m (Maybe (Term, LogEntry Node Command))
-readLogEntryTest storage self logIndex = case IntMap.lookup (fromIntegral self) storage of
+readLogEntriesFromTest :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) -> Node -> LogIndex -> m [(Term, LogEntry Node Command)]
+readLogEntriesFromTest storage self logIndex = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
-  Just var -> readTVarIO var <&> Map.lookup logIndex
+  Just var -> readTVarIO var <&> Map.elems . Map.filterWithKey (\ix _ -> ix >= logIndex)
 
 writeVotedForTest :: (MonadSTM m) => IntMap (TVar m (Map Term Node)) -> Node -> Term -> Maybe Node -> m ()
 writeVotedForTest storage self term value = case IntMap.lookup (fromIntegral self) storage of
