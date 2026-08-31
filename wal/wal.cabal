@@ -41,9 +41,10 @@ library
                     , binary ^>=0.8
                     , bytestring
                     , containers >=0.7 && <0.9
-                    , digest
-                    , directory
-                    , filepath
+                    , digest ^>=0.0.2
+                    , directory >=1.3.8.0 && <1.4
+                    , filepath >=1.4.101.0 && <1.6
+                    , file-io ^>=0.2
     hs-source-dirs:   src
     default-language: Haskell2010
 
@@ -64,6 +65,7 @@ test-suite wal-test
     main-is:          Main.hs
     build-depends:    base >= 4.18 && <4.23
                     , bytestring
+                    , file-io
                     , filepath
                     , hedgehog ^>=1.7
                     , tasty ^>= 1.5
@@ -81,6 +83,7 @@ benchmark wal
   build-depends:    base
                   , binary
                   , bytestring
+                  , filepath
                   , tasty-bench
                   , temporary
                   , wal

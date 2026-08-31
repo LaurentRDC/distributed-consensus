@@ -10,6 +10,7 @@ import qualified Data.List.NonEmpty as NonEmpty
 import GHC.Generics (Generic)
 import System.IO.Temp (withSystemTempDirectory)
 import System.IO.WAL
+import System.OsPath (encodeFS)
 import Test.Tasty.Bench
 
 newtype Entry = Entry StrictByteString
@@ -19,7 +20,8 @@ instance Binary Entry
 
 main :: IO ()
 main =
-  withSystemTempDirectory "wal-bench" $ \dir -> do
+  withSystemTempDirectory "wal-bench" $ \dirFP -> do
+    dir <- encodeFS dirFP
     let config =
           WALConfig
             { directory = dir,

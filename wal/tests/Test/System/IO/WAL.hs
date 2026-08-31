@@ -15,10 +15,11 @@ import qualified Data.List.NonEmpty as NonEmpty
 import Hedgehog (annotate, assert, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import System.FilePath ((</>))
-import System.IO (IOMode (..), hSetFileSize, withBinaryFile)
+import System.File.OsPath (withBinaryFile)
+import System.IO (IOMode (..), hSetFileSize)
 import System.IO.Temp (withSystemTempDirectory)
 import System.IO.WAL
+import System.OsPath (encodeFS, (</>))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.Hedgehog (testProperty)
 
@@ -38,7 +39,8 @@ testTripping = testProperty "Writing to WAL and replaying" $ property $ do
   entriesSegment2 <- forAll $ Gen.list (Range.linear 0 10) (Gen.bytes (Range.linear 0 24))
 
   replayed <- liftIO $ withSystemTempDirectory "wal-testing" $ \tmpDir -> do
-    withWriteAheadLog testCodec (WALConfig maxBound tmpDir) $ \wal -> do
+    dir <- encodeFS tmpDir
+    withWriteAheadLog testCodec (WALConfig maxBound dir) $ \wal -> do
       for_ entriesSegment1 (append wal)
       unless (null entriesSegment2) $ do
         _ <- rotate wal
@@ -74,17 +76,19 @@ testReplayIgnorePartialWrites = testProperty "Reading from a partially-written W
   assert (expectedPrefix `isPrefixOf` entries)
 
   replayed <- liftIO $ withSystemTempDirectory "wal-testing-partial" $ \tmpDir -> do
-    withWriteAheadLog testCodec (WALConfig maxBound tmpDir) $ \wal -> do
+    dir <- encodeFS tmpDir
+    withWriteAheadLog testCodec (WALConfig maxBound dir) $ \wal -> do
       traverse_ (appendMany wal) (nonEmpty entries)
 
+    fp <- (dir </>) <$> segmentPath 0
     liftIO
       $ withBinaryFile
-        (tmpDir </> segmentPath 0)
+        fp
         ReadWriteMode
       $ flip hSetFileSize (toInteger truncationPoint)
 
     replayedRef <- liftIO $ newIORef []
-    withWriteAheadLog testCodec (WALConfig maxBound tmpDir) $ \wal -> do
+    withWriteAheadLog testCodec (WALConfig maxBound dir) $ \wal -> do
       -- prepending to a list is faster, but then
       -- we need to reverse the output
       replayAll wal (\e -> modifyIORef' replayedRef (e :))
@@ -108,7 +112,8 @@ testSingleVsManyAppend = testProperty "append and appendMany give the same resul
   let entries = foldMap NonEmpty.toList entriesBatched
 
   replayedSingle <- liftIO $ withSystemTempDirectory "wal-testing" $ \tmpDir -> do
-    withWriteAheadLog testCodec (WALConfig walBound tmpDir) $ \wal -> do
+    dir <- encodeFS tmpDir
+    withWriteAheadLog testCodec (WALConfig walBound dir) $ \wal -> do
       for_ entries (append wal)
 
       replayedRef <- liftIO $ newIORef []
@@ -118,7 +123,8 @@ testSingleVsManyAppend = testProperty "append and appendMany give the same resul
   replayedSingle === entries
 
   replayedMany <- liftIO $ withSystemTempDirectory "wal-testing" $ \tmpDir -> do
-    withWriteAheadLog testCodec (WALConfig walBound tmpDir) $ \wal -> do
+    dir <- encodeFS tmpDir
+    withWriteAheadLog testCodec (WALConfig walBound dir) $ \wal -> do
       for_ entriesBatched (appendMany wal)
 
       replayedRef <- liftIO $ newIORef []

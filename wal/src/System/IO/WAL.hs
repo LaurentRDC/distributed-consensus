@@ -28,6 +28,7 @@ module System.IO.WAL
     Segment,
     segmentPath,
     segments,
+    activeSegment,
     replayAll,
     replaySegment,
 
@@ -72,18 +73,18 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word32)
 import Foreign.Ptr (castPtr)
-import System.Directory
+import System.Directory.OsPath
   ( createDirectoryIfMissing,
     doesFileExist,
     listDirectory,
   )
-import System.FilePath ((</>))
+import System.File.OsPath (withBinaryFile)
 import System.IO
   ( IOMode (ReadMode, WriteMode),
-    withBinaryFile,
   )
 import System.IO.File.Durable (FHandle)
 import qualified System.IO.File.Durable as WALFile
+import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
 import Text.Printf (printf)
 import Text.Read (readMaybe)
 
@@ -143,7 +144,7 @@ data WALConfig = WALConfig
     maxSegmentBytes :: !Int64,
     -- | Directory where to write write-ahead log files. This directory need
     -- not be empty.
-    directory :: !FilePath
+    directory :: !OsPath
   }
 
 -- | Open a 'WriteAheadLog' based on an input configuration, and a codec
@@ -172,7 +173,8 @@ open codec config = do
   let latest = case map fst segs of
         [] -> 0
         ns -> maximum ns
-      path = directory config </> segmentPath latest
+
+  path <- (directory config </>) <$> segmentPath latest
 
   exists <- doesFileExist path
   unless exists $ withBinaryFile path WriteMode (const (pure ()))
@@ -220,9 +222,9 @@ frameGet (WALCodec _ decode) = do
           (\e -> fail ("WAL: decode error: " ++ e))
           pure
 
--- 'ensureFileDurable' requires a known 'FilePath',
+-- 'ensureFileDurable' requires a known 'OsPath',
 -- which we must keep in sync with a 'Handle'
-data WALHandle = WALHandle !FHandle !FilePath
+data WALHandle = WALHandle !FHandle !OsPath
 
 newtype Segment = MkSegment Word32
   deriving (Show, Eq)
@@ -234,8 +236,8 @@ segPrefix = "wal-"
 segSuffix :: String
 segSuffix = ".log"
 
-segmentPath :: Segment -> FilePath
-segmentPath (MkSegment n) = printf "wal-%06d.log" (fromIntegral n :: Int)
+segmentPath :: Segment -> IO OsPath
+segmentPath (MkSegment n) = encodeFS $ printf "wal-%06d.log" (fromIntegral n :: Int)
 
 -- | Parse a segment number out of a file name produced by 'segmentName'.
 -- Returns 'Nothing' for anything that isn't one of our segment files, so
@@ -248,22 +250,29 @@ parseSegment f
   | otherwise =
       Nothing
 
-listSegmentsFromDir :: (MonadIO m) => FilePath -> m [(Segment, FilePath)]
+listSegmentsFromDir :: (MonadIO m) => OsPath -> m [(Segment, OsPath)]
 listSegmentsFromDir dir =
   liftIO $
     listDirectory dir
+      >>= traverse decodeFS
       <&> fmap (\fp -> (,fp) <$> parseSegment fp)
       <&> catMaybes
       <&> sortOn fst
+      >>= traverse (\(s, fs') -> (s,) <$> encodeFS fs')
 
 -- | List all segments relevant to this write-ahead log.
 --
--- This can be used to replay the appropriate segments
+-- This can be used to replay the appropriate segments.
+-- See 'activeSegment' for the most recent segment.
 segments :: (MonadIO m) => WriteAheadLog a -> m (Set Segment)
 segments wal =
   listSegmentsFromDir (directory (walConfig wal))
     <&> fmap fst
     <&> Set.fromList
+
+-- | Return the active segment of the write-ahead log
+activeSegment :: (MonadIO m) => WriteAheadLog a -> m Segment
+activeSegment = liftIO . readIORef . walActiveSegment
 
 -- | Append a single entry to the log. Once 'append' returns,
 -- the entry is durably stored on disk.
@@ -307,7 +316,7 @@ rotate wal = liftIO $ do
     WALFile.close h
 
     n' <- (+ 1) <$> readIORef (walActiveSegment wal)
-    let path = directory (walConfig wal) </> segmentPath n'
+    path <- (directory (walConfig wal) </>) <$> segmentPath n'
 
     -- The next segment file is overwritten
     withBinaryFile path WriteMode (const (pure ()))
@@ -333,7 +342,7 @@ replaySegment ::
   (a -> IO ()) ->
   m ()
 replaySegment wal segment onEntry = liftIO $ do
-  activeSegment <- liftIO $ readIORef (walActiveSegment wal)
+  active <- activeSegment wal
   -- If we're trying to naively replay the current active segment,
   -- then we'll get a 'resource busy' error since the file is
   -- open for appending.
@@ -342,7 +351,7 @@ replaySegment wal segment onEntry = liftIO $ do
   --
   -- Note that this is safe since 'replaySegment' locks access to the
   -- WALHandle while replaying
-  if activeSegment == segment
+  if active == segment
     then do
       modifyMVar (walHandle wal) $ \(WALHandle h fp) -> do
         WALFile.close h
@@ -351,10 +360,12 @@ replaySegment wal segment onEntry = liftIO $ do
         pure (WALHandle h' fp, ())
     else replayUnusedSegment
   where
-    replayUnusedSegment = withBinaryFile
-      (directory (walConfig wal) </> segmentPath segment)
-      ReadMode
-      $ \h -> go h (Parser.parse parseChunk BS.empty)
+    replayUnusedSegment = do
+      p <- segmentPath segment
+      withBinaryFile
+        (directory (walConfig wal) </> p)
+        ReadMode
+        $ \h -> go h (Parser.parse parseChunk BS.empty)
 
     parseChunk = Parser.many' (frameGet (walCodec wal))
 

@@ -11,6 +11,7 @@ where
 import Data.Word (Word32, Word8)
 import Foreign (Ptr)
 import System.IO
+import System.OsPath (OsPath, decodeFS)
 import System.Win32
   ( HANDLE,
     cREATE_ALWAYS,
@@ -26,9 +27,10 @@ import System.Win32.File (BY_HANDLE_FILE_INFORMATION (bhfiSize), getFileInformat
 
 newtype FHandle = FHandle HANDLE
 
-open :: FilePath -> IO FHandle
-open filename =
-  FHandle <$> createFile filename gENERIC_WRITE fILE_SHARE_NONE Nothing cREATE_ALWAYS fILE_ATTRIBUTE_NORMAL Nothing
+open :: OsPath -> IO FHandle
+open filename = do
+  fp <- decodeFS filename
+  FHandle <$> createFile fp gENERIC_WRITE fILE_SHARE_NONE Nothing cREATE_ALWAYS fILE_ATTRIBUTE_NORMAL Nothing
 
 size :: FHandle -> IO Integer
 size (FHandle handle) = fromIntegral . bhfiSize <$> getFileInformationByHandle handle

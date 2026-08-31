@@ -14,6 +14,7 @@ import Control.Monad (void)
 import Data.Word (Word32, Word8)
 import Foreign (Ptr)
 import Foreign.C (CInt (..))
+import System.OsPath (OsPath, decodeFS)
 import System.Posix
   ( Fd (Fd),
     OpenFileFlags (append, creat),
@@ -29,11 +30,12 @@ import System.Posix.Internals (fdFileSize)
 newtype FHandle = FHandle Fd
 
 -- should handle opening flags correctly
-open :: FilePath -> IO FHandle
-open filename =
+open :: OsPath -> IO FHandle
+open filename = do
+  fp <- decodeFS filename
   FHandle
     <$> openFd
-      filename
+      fp
       WriteOnly
       defaultFileFlags
         { creat = Just stdFileMode,
