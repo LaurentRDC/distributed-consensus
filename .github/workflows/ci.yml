@@ -2,6 +2,11 @@ name: CI
 
 on:
   push:
+    paths-ignore:
+      - 'justfile'
+      - 'hie.yaml'
+      - '*.md'
+      - '.helix/*/**'
     branches: [master]
   pull_request:
 
