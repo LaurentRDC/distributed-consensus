@@ -35,12 +35,13 @@ module System.IO.WAL
     -- ** Configuration
     WALCodec (..),
     binaryWALCodec,
+    rawWALCodec,
     WALConfig (..),
   )
 where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
-import Control.Monad (forM_, unless, void, when)
+import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Attoparsec.ByteString (Parser)
 import qualified Data.Attoparsec.ByteString as Parser
@@ -71,7 +72,7 @@ import qualified Data.List.NonEmpty as NonEmpty
 import Data.Maybe (catMaybes)
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Word (Word32)
+import Data.Word (Word32, Word64)
 import Foreign.Ptr (castPtr)
 import System.Directory.OsPath
   ( createDirectoryIfMissing,
@@ -80,7 +81,9 @@ import System.Directory.OsPath
   )
 import System.File.OsPath (withBinaryFile)
 import System.IO
-  ( IOMode (ReadMode, WriteMode),
+  ( Handle,
+    IOMode (..),
+    hSetFileSize,
   )
 import System.IO.File.Durable (FHandle)
 import qualified System.IO.File.Durable as WALFile
@@ -138,6 +141,14 @@ binaryWALCodec =
               . BL.fromStrict
         }
 
+-- | 'WALCodec' which doesn't decode payloads
+rawWALCodec :: WALCodec StrictByteString
+rawWALCodec =
+  WALCodec
+    { encodeEntry = BB.byteString,
+      decodeEntry = Right
+    }
+
 -- | Configuration
 data WALConfig = WALConfig
   { -- | Rotate to a new segment once the current one reaches this size.
@@ -165,6 +176,10 @@ withWriteAheadLog codec config act = do
   liftIO $ close wal
   pure r
 
+-- | Open a write-ahead log.
+--
+-- If active log file is torn, the partial log entry will be
+-- removed such that the log is repaired.
 open :: WALCodec a -> WALConfig -> IO (WriteAheadLog a)
 open codec config = do
   createDirectoryIfMissing True (directory config)
@@ -177,7 +192,11 @@ open codec config = do
   path <- (directory config </>) <$> segmentPath latest
 
   exists <- doesFileExist path
-  unless exists $ withBinaryFile path WriteMode (const (pure ()))
+  if exists
+    then withBinaryFile path ReadWriteMode $ \h -> do
+      v <- validSize h
+      hSetFileSize h (fromIntegral v)
+    else withBinaryFile path WriteMode (const (pure ()))
 
   h <- WALFile.open path
   sz <- WALFile.size h
@@ -221,6 +240,21 @@ frameGet (WALCodec _ decode) = do
         & either
           (\e -> fail ("WAL: decode error: " ++ e))
           pure
+
+framedP :: WALCodec a -> Parser (Framed a)
+framedP (WALCodec _ decode) = do
+  len <- anyWord32le
+  checksum <- anyWord32le
+  bytes <- Parser.take (fromIntegral len)
+  if crc32c bytes /= checksum
+    then fail "WAL: checksum mismatch (torn or corrupted write)"
+    else
+      decode bytes
+        & either
+          (\e -> fail ("WAL: decode error: " ++ e))
+          (pure . Framed len)
+
+data Framed a = Framed !Word32 !a
 
 -- 'ensureFileDurable' requires a known 'OsPath',
 -- which we must keep in sync with a 'Handle'
@@ -365,12 +399,23 @@ replaySegment wal segment onEntry = liftIO $ do
       withBinaryFile
         (directory (walConfig wal) </> p)
         ReadMode
-        $ \h -> go h (Parser.parse parseChunk BS.empty)
+        $ \h -> streamContents (frameGet (walCodec wal)) h onEntry
 
-    parseChunk = Parser.many' (frameGet (walCodec wal))
+-- | Replay every segment in the log directory, oldest first, feeding each
+-- decoded entry to the given callback in order.
+replayAll :: (MonadIO m) => WriteAheadLog a -> (a -> IO ()) -> m ()
+replayAll wal onEntry = do
+  segs <- listSegmentsFromDir (directory (walConfig wal))
+  forM_ segs $ \(seg, _) -> replaySegment wal seg onEntry
 
-    go h (Parser.Done leftover values) = mapM_ onEntry values >> go h (Parser.parse parseChunk leftover)
-    go h (Parser.Partial continue) = do
+-- | Stream the contents of a WAL
+streamContents :: Parser a -> Handle -> (a -> IO ()) -> IO ()
+streamContents p h onEntry = go (Parser.parse parseChunk BS.empty)
+  where
+    parseChunk = Parser.many' p
+
+    go (Parser.Done leftover values) = mapM_ onEntry values >> go (Parser.parse parseChunk leftover)
+    go (Parser.Partial continue) = do
       bytes <- liftIO $ BS.hGet h (64 * 1024)
       if BS.null bytes
         then case continue BS.empty of
@@ -382,12 +427,22 @@ replaySegment wal segment onEntry = liftIO $ do
           -- TODO: why
           Parser.Fail _ ctx msg -> fail ("Parser error: " <> msg <> ". Context: " <> show ctx)
         else
-          go h (continue bytes)
-    go _ (Parser.Fail _ _ msg) = fail ("Parser error: " <> msg)
+          go (continue bytes)
+    go (Parser.Fail _ _ msg) = fail ("Parser error: " <> msg)
 
--- | Replay every segment in the log directory, oldest first, feeding each
--- decoded entry to the given callback in order.
-replayAll :: (MonadIO m) => WriteAheadLog a -> (a -> IO ()) -> m ()
-replayAll wal onEntry = do
-  segs <- listSegmentsFromDir (directory (walConfig wal))
-  forM_ segs $ \(seg, _) -> replaySegment wal seg onEntry
+-- | Returns the size of the data that only includes valid
+-- write-ahead log entries.
+--
+-- This can be used to truncate write-ahead log files to
+-- remove partial entries.
+validSize :: Handle -> IO Word64
+validSize h = do
+  validSizeRef <- newIORef (0 :: Word64)
+
+  -- We use 'streamContents' because it will read as many *complete, valid* entries
+  -- as it can. This means ensuring the entries' integrity via the checksum
+  streamContents
+    (framedP rawWALCodec)
+    h
+    (\(Framed len _) -> modifyIORef' validSizeRef (\v -> v + 4 + 4 + fromIntegral len))
+  readIORef validSizeRef

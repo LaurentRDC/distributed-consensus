@@ -16,7 +16,7 @@ import Hedgehog (annotate, assert, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import System.File.OsPath (withBinaryFile)
-import System.IO (IOMode (..), hSetFileSize)
+import System.IO (IOMode (..), hFileSize, hSetFileSize)
 import System.IO.Temp (withSystemTempDirectory)
 import System.IO.WAL
 import System.OsPath (encodeFS, (</>))
@@ -29,6 +29,7 @@ tests =
     "System.IO.WAL"
     [ testTripping,
       testReplayIgnorePartialWrites,
+      testOpenRepairsPartialWrites,
       testSingleVsManyAppend
     ]
 
@@ -95,6 +96,47 @@ testReplayIgnorePartialWrites = testProperty "Reading from a partially-written W
       reverse <$> readIORef replayedRef
 
   replayed === expectedPrefix
+
+testOpenRepairsPartialWrites :: TestTree
+testOpenRepairsPartialWrites = testProperty "Opening a partially-torn WAL results in torn records being truncated" $ property $ do
+  entries <- forAll $ Gen.list (Range.linear 0 1024) (Gen.bytes (Range.linear 0 107))
+
+  let toFramedSize bytes = 4 + 4 + BS.length bytes
+      fullFileSize = sum (toFramedSize <$> entries)
+
+  truncationPoint <- forAll $ Gen.integral (Range.linear 0 fullFileSize)
+
+  let go _ numEntries [] = numEntries
+      go lengthSoFar numEntries (e : es) =
+        let extended = lengthSoFar + toFramedSize e
+         in if extended > truncationPoint
+              then numEntries
+              else go extended (numEntries + 1) es
+      expectedPrefixLength = go 0 0 entries
+      expectedPrefix = take expectedPrefixLength entries
+
+  -- sanity check
+  annotate $ "Expected prefix: " <> show expectedPrefix
+  assert (expectedPrefix `isPrefixOf` entries)
+
+  size <- liftIO $ withSystemTempDirectory "wal-testing-partial" $ \tmpDir -> do
+    dir <- encodeFS tmpDir
+    withWriteAheadLog testCodec (WALConfig maxBound dir) $ \wal -> do
+      traverse_ (appendMany wal) (nonEmpty entries)
+
+    fp <- (dir </>) <$> segmentPath 0
+    liftIO
+      $ withBinaryFile
+        fp
+        ReadWriteMode
+      $ flip hSetFileSize (toInteger truncationPoint)
+
+    -- Open the WAL but do nothing
+    withWriteAheadLog testCodec (WALConfig maxBound dir) $ \_wal -> pure ()
+
+    liftIO $ withBinaryFile fp ReadMode hFileSize
+
+  fromIntegral size === sum (toFramedSize <$> expectedPrefix)
 
 testSingleVsManyAppend :: TestTree
 testSingleVsManyAppend = testProperty "append and appendMany give the same result" $ property $ do
