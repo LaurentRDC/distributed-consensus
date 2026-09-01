@@ -54,7 +54,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Unsafe as BSU
-import Data.Digest.CRC32 (crc32)
+import Data.Digest.CRC32C (crc32c)
 import Data.Function ((&))
 import Data.Functor ((<&>))
 import Data.IORef
@@ -200,7 +200,7 @@ frame :: BB.Builder -> BB.Builder
 frame payloadB =
   let payload = BL.toStrict (BB.toLazyByteString payloadB)
       len = fromIntegral (BS.length payload) :: Word32
-      crc = crc32 payload
+      crc = crc32c payload
    in BB.word32LE len <> BB.word32LE crc <> BB.byteString payload
 
 anyWord32le :: Parser Word32
@@ -214,7 +214,7 @@ frameGet (WALCodec _ decode) = do
   len <- anyWord32le
   checksum <- anyWord32le
   bytes <- Parser.take (fromIntegral len)
-  if crc32 bytes /= checksum
+  if crc32c bytes /= checksum
     then fail "WAL: checksum mismatch (torn or corrupted write)"
     else
       decode bytes

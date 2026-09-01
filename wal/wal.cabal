@@ -41,7 +41,7 @@ library
                     , binary ^>=0.8
                     , bytestring
                     , containers >=0.7 && <0.9
-                    , digest ^>=0.0.2
+                    , crc32c ^>=0.2
                     , directory >=1.3.8.0 && <1.4
                     , filepath >=1.4.101.0 && <1.6
                     , file-io ^>=0.2
