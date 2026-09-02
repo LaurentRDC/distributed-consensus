@@ -5,7 +5,7 @@ module Control.Distributed.Process.Raft.Client
 where
 
 import Control.Concurrent.STM (atomically, newTQueueIO, readTQueue, writeTQueue)
-import Control.Distributed.Process (Process, ProcessId, exit, link, match, matchUnknown, receiveWait, send, spawnLocal)
+import Control.Distributed.Process (NodeId, Process, exit, getSelfNode, link, match, matchUnknown, nsendRemote, receiveWait, register, spawnLocal)
 import Control.Distributed.Process.Raft.Instances ()
 import Control.Distributed.Process.Serializable (Serializable)
 import Control.Monad (forever)
@@ -22,7 +22,7 @@ import Distributed.Consensus.Raft.Client qualified as Raft.Client
 -- See 'request' to build an appropriate request.
 withRaftClient ::
   (Serializable entry, Serializable result) =>
-  ((forall a. RaftClientT entry ProcessId result Process a -> Process a) -> Process b) ->
+  ((forall a. RaftClientT entry NodeId result Process a -> Process a) -> Process b) ->
   Process b
 withRaftClient f = do
   recvQueue <- liftIO newTQueueIO
@@ -37,19 +37,25 @@ withRaftClient f = do
 
   link mailPid
 
-  -- Note that we want our self-identification to point
-  -- not this THIS process ID, but the process ID
-  -- awaiting messages.
-  withRaftClientT mailPid (impl recvQueue) f <* exit mailPid "Completed"
+  register clientMailboxProcessName mailPid
+
+  thisNodeId <- getSelfNode
+
+  withRaftClientT thisNodeId (impl recvQueue) f <* exit mailPid "Completed"
   where
     impl recvQueue =
       ClientImplementation
-        { sendRequest = send,
+        { sendRequest = (`nsendRemote` clientMailboxProcessName),
           receiveResponse = liftIO $ atomically $ readTQueue recvQueue
         }
 
+-- | This value needs to be kept in sync with 'Control.Distributed.Process.Raft'.
+-- The alternative would be a tiny shared library...
+clientMailboxProcessName :: String
+clientMailboxProcessName = "raft-consensus-client-mailbox"
+
 request ::
-  ProcessId ->
+  NodeId ->
   entry ->
-  RaftClientT entry ProcessId result Process (Either Text (ProcessId, result))
+  RaftClientT entry NodeId result Process (Either Text (NodeId, result))
 request = Raft.Client.request

@@ -61,6 +61,7 @@ library client
     import:           warnings
     hs-source-dirs:   src/client
     exposed-modules:  Control.Distributed.Process.Raft.Client
+    visibility:       public
     build-depends:    base >= 4.18 && <4.23
                     , distributed-process ^>=0.7
                     , distributed-process-raft-consensus:io-classes-instances
@@ -73,6 +74,7 @@ library admin
     import:           warnings
     hs-source-dirs:   src/admin
     exposed-modules:  Control.Distributed.Process.Raft.Admin
+    visibility:       public
     build-depends:    base >= 4.18 && <4.23
                     , distributed-process ^>=0.7
                     , distributed-process-raft-consensus:io-classes-instances
