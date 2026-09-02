@@ -15,7 +15,9 @@ module Distributed.Consensus.Raft.Client
     -- * Communications between clients and clusters
     ClientRequestId (..),
     ClientRequest,
+    Request (..),
     ClientResponse,
+    Response (..),
     ClientResult (..),
   )
 where

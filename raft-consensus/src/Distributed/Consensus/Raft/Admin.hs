@@ -19,7 +19,9 @@ module Distributed.Consensus.Raft.Admin
 
     -- * Communications between admins and clusters
     AdminRequest,
+    Request (..),
     AdminResponse,
+    Response (..),
     AdminCommand (..),
     AdminCommandResult (..),
     AdminError (..),
@@ -94,7 +96,7 @@ data AdminImplementation node m = AdminImplementation
       m (),
     -- | Receive the next admin response.
     receiveAdminResponse ::
-      m (Either Text (AdminResponse node))
+      m (AdminResponse node)
   }
 
 -- | Open an admin session, and run an action with a runner for that session.
@@ -112,16 +114,14 @@ withRaftAdminT self impl withSession = do
   mbox <- newTVarIO mempty
 
   let recvLoop = do
-        receiveAdminResponse impl >>= \case
-          Left _ -> recvLoop
-          Right resp -> do
-            let adminReqId = responseRequestId resp
-            atomically $ do
-              box <- readTVar mbox
-              case Map.lookup adminReqId box of
-                Nothing -> pure ()
-                Just var -> putTMVar var (responsePayload resp)
-            recvLoop
+        receiveAdminResponse impl >>= \resp -> do
+          let adminReqId = responseRequestId resp
+          atomically $ do
+            box <- readTVar mbox
+            case Map.lookup adminReqId box of
+              Nothing -> pure ()
+              Just var -> putTMVar var (responsePayload resp)
+          recvLoop
 
   withAsync recvLoop $ \_ ->
     withSession (\(MkRaftAdminT f) -> runReaderT f (MkRaftAdminEnv self impl nRId mbox))

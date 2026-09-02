@@ -31,7 +31,7 @@ import GHC.Generics (Generic)
 
 -- | Election term
 newtype Term = Term Int64
-  deriving stock (Generic, Eq, Ord, Show)
+  deriving stock (Generic, Eq, Ord, Show, Read)
   deriving newtype (Real, Binary, Enum, Num, Integral)
 
 newtype InternalRequestId = InternalRequestId Word64

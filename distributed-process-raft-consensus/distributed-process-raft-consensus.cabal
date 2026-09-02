@@ -61,6 +61,7 @@ library client
     import:           warnings
     hs-source-dirs:   src/client
     exposed-modules:  Control.Distributed.Process.Raft.Client
+    visibility:       public
     build-depends:    base >= 4.18 && <4.23
                     , distributed-process ^>=0.7
                     , distributed-process-raft-consensus:io-classes-instances
@@ -73,9 +74,30 @@ library admin
     import:           warnings
     hs-source-dirs:   src/admin
     exposed-modules:  Control.Distributed.Process.Raft.Admin
+    visibility:       public
     build-depends:    base >= 4.18 && <4.23
                     , distributed-process ^>=0.7
                     , distributed-process-raft-consensus:io-classes-instances
                     , raft-consensus ^>=0.1
                     , stm ^>=2.5
     default-language: GHC2021
+
+test-suite distributed-process-raft-consensus-test
+    import:           warnings
+    default-language: Haskell2010
+    other-modules:    Test.Control.Distributed.Process.Raft
+    type:             exitcode-stdio-1.0
+    ghc-options:      -rtsopts -threaded -with-rtsopts=-N
+    hs-source-dirs:   tests
+    main-is:          Main.hs
+    build-depends:    async
+                    , base >= 4.18 && <4.23
+                    , distributed-process
+                    , distributed-process-raft-consensus
+                    , distributed-process-raft-consensus:admin
+                    , distributed-process-raft-consensus:client
+                    , raft-consensus
+                    , tasty ^>= 1.5
+                    , tasty-hunit ^>= 0.10
+                    , network-transport
+                    , network-transport-inmemory

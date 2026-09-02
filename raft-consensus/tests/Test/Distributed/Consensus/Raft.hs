@@ -672,7 +672,7 @@ testHarness
       adminSpec network =
         AdminImplementation
           { sendAdminRequest = send network.adminMailbox,
-            receiveAdminResponse = receive network.adminResponsesMailbox adminNode <&> Right
+            receiveAdminResponse = receive network.adminResponsesMailbox adminNode
           }
 
 writeLogEntryTest ::
