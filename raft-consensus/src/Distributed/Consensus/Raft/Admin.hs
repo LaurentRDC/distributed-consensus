@@ -10,6 +10,8 @@ module Distributed.Consensus.Raft.Admin
   ( RaftAdminT,
     AdminImplementation (..),
     withRaftAdminT,
+    AdminError (..),
+    Microseconds,
 
     -- * Available commands
     joinCluster,
@@ -24,59 +26,23 @@ module Distributed.Consensus.Raft.Admin
     Response (..),
     AdminCommand (..),
     AdminCommandResult (..),
-    AdminError (..),
   )
 where
 
 import Control.Concurrent.Class.MonadSTM (TMVar, TVar, atomically, newEmptyTMVar, newTVarIO, putTMVar, readTMVar, readTVar, writeTVar)
 import Control.Monad.Class.MonadAsync (MonadAsync, withAsync)
-import Control.Monad.Class.MonadSTM (MonadSTM)
+import Control.Monad.Class.MonadTimer (MonadTimer, timeout)
 import Control.Monad.Trans.Class (MonadTrans (lift))
 import Control.Monad.Trans.Reader (ReaderT (runReaderT))
 import qualified Control.Monad.Trans.Reader as Reader
-import Data.Binary (Binary)
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
-import Data.Word (Word64)
 import Distributed.Consensus.Raft.Domain (ClusterConfiguration)
+import Distributed.Consensus.Raft.Domain.Admin (AdminCommand (..), AdminCommandResult (..), AdminRequest, AdminRequestId, AdminResponse)
 import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
-import GHC.Generics (Generic)
+import Distributed.Consensus.Raft.Timer (Microseconds)
 import Lens.Micro.Platform (makeLenses)
-
-data AdminCommand node
-  = JoinCluster
-      -- | Target node
-      node
-  | LeaveCluster
-  | -- | Ask a node for the cluster configuration it has committed.
-    GetClusterConfiguration
-  | ShutDown
-  deriving (Eq, Show, Ord, Generic)
-
-instance (Binary node) => Binary (AdminCommand node)
-
-newtype AdminRequestId = AdminRequestId Word64
-  deriving stock (Generic, Eq, Ord, Show)
-  deriving newtype (Real, Binary, Enum, Num, Integral)
-
-type AdminRequest node = Request AdminRequestId node (AdminCommand node)
-
-data AdminCommandResult node
-  = JoinInitiated
-  | LeaveInitiated
-  | ShutdownInitiated
-  | ClusterConfigurationIs !(ClusterConfiguration node)
-  | -- | The command could not be completed.
-    AdminFailure !Text
-  | -- | The contacted node isn't the leader. The 'Maybe' contains the
-    -- | node believed to be the current leader, if known.
-    NotLeader !(Maybe node)
-  deriving (Eq, Show, Generic)
-
-instance (Binary node) => Binary (AdminCommandResult node)
-
-type AdminResponse node = Response AdminRequestId node (AdminCommandResult node)
 
 newtype RaftAdminT node m a
   = MkRaftAdminT (ReaderT (RaftAdminEnv node m) m a)
@@ -139,11 +105,18 @@ makeLenses ''AdminImplementation
 data AdminError node
   = AdminFailed !Text
   | AdminNotLeader !(Maybe node)
+  | Timeout
   | UnexpectedAdminResponse
   deriving (Eq, Show)
 
-sendAdminCommand :: (MonadSTM m) => node -> AdminCommand node -> RaftAdminT node m (AdminCommandResult node)
-sendAdminCommand contact command = do
+sendAdminCommand ::
+  (MonadTimer m) =>
+  node ->
+  AdminCommand node ->
+  -- | Timeout in microseconds
+  Microseconds ->
+  RaftAdminT node m (Maybe (AdminCommandResult node))
+sendAdminCommand contact command timeoutValue = do
   send <- asks (sendAdminRequest . implementation)
   admin <- asks node
   mbox <- asks mailbox
@@ -166,85 +139,101 @@ sendAdminCommand contact command = do
           requestOriginator = admin,
           requestPayload = command
         }
-
-    atomically
-      ( do
-          resp <- readTMVar resultVar
-          mbox' <- readTVar mbox
-          writeTVar mbox (Map.delete rid mbox')
-          pure resp
-      )
+    timeout (fromIntegral timeoutValue) $
+      atomically
+        ( do
+            resp <- readTMVar resultVar
+            mbox' <- readTVar mbox
+            writeTVar mbox (Map.delete rid mbox')
+            pure resp
+        )
 
 joinCluster ::
-  (MonadSTM m) =>
+  (MonadTimer m) =>
+  -- | Timeout in microseconds
+  Microseconds ->
   -- | Node to command
   node ->
   -- \| Node to join
   node ->
   RaftAdminT node m (Either (AdminError node) ())
-joinCluster contact target = do
-  sendAdminCommand contact (JoinCluster target)
+joinCluster timeoutValue contact target = do
+  sendAdminCommand contact (JoinCluster target) timeoutValue
     >>= \case
-      JoinInitiated ->
+      Just JoinInitiated ->
         pure (Right ())
-      AdminFailure err ->
+      Just (AdminFailure err) ->
         pure (Left (AdminFailed err))
-      NotLeader leader ->
+      Just (NotLeader leader) ->
         pure (Left (AdminNotLeader leader))
-      _ ->
+      Just _ ->
         pure (Left UnexpectedAdminResponse)
+      Nothing ->
+        pure (Left Timeout)
 
 leaveCluster ::
-  (MonadSTM m) =>
+  (MonadTimer m) =>
+  -- | Timeout in microseconds
+  Microseconds ->
   -- | Node to command
   node ->
   RaftAdminT node m (Either (AdminError node) ())
-leaveCluster contact = do
-  sendAdminCommand contact LeaveCluster
+leaveCluster timeoutValue contact = do
+  sendAdminCommand contact LeaveCluster timeoutValue
     >>= \case
-      LeaveInitiated ->
+      Just LeaveInitiated ->
         pure (Right ())
-      AdminFailure err ->
+      Just (AdminFailure err) ->
         pure (Left (AdminFailed err))
-      NotLeader leader ->
+      Just (NotLeader leader) ->
         pure (Left (AdminNotLeader leader))
-      _ ->
+      Just _ ->
         pure (Left UnexpectedAdminResponse)
+      Nothing ->
+        pure (Left Timeout)
 
 -- | Ask a node for the cluster configuration it has committed.
 --
 -- This is the only way for an admin to tell whether a 'joinCluster' or
 -- 'leaveCluster' has actually taken effect.
 getClusterConfiguration ::
-  (MonadSTM m) =>
+  (MonadTimer m) =>
+  -- | Timeout in microseconds
+  Microseconds ->
   -- | Node to ask.
   node ->
   RaftAdminT node m (Either (AdminError node) (ClusterConfiguration node))
-getClusterConfiguration contact = do
-  sendAdminCommand contact GetClusterConfiguration
+getClusterConfiguration timeoutValue contact = do
+  sendAdminCommand contact GetClusterConfiguration timeoutValue
     >>= \case
-      ClusterConfigurationIs conf ->
+      Just (ClusterConfigurationIs conf) ->
         pure (Right conf)
-      AdminFailure err ->
+      Just (AdminFailure err) ->
         pure (Left (AdminFailed err))
-      NotLeader leader ->
+      Just (NotLeader leader) ->
         pure (Left (AdminNotLeader leader))
-      _ ->
+      Just _ ->
         pure (Left UnexpectedAdminResponse)
+      Nothing ->
+        pure (Left Timeout)
 
 shutDown ::
-  (MonadSTM m) =>
+  (MonadTimer m) =>
+  -- | Timeout in microseconds
+  Microseconds ->
   -- | Node to command
   node ->
   RaftAdminT node m (Either (AdminError node) ())
-shutDown contact = do
-  sendAdminCommand contact ShutDown
+shutDown timeoutValue contact = do
+  sendAdminCommand contact ShutDown timeoutValue
     >>= \case
-      ShutdownInitiated ->
+      Just ShutdownInitiated ->
         pure (Right ())
-      AdminFailure err ->
+      Just (AdminFailure err) ->
         pure (Left (AdminFailed err))
-      NotLeader leader ->
+      Just (NotLeader leader) ->
         pure (Left (AdminNotLeader leader))
-      _ ->
+      Just _ ->
         pure (Left UnexpectedAdminResponse)
+      Nothing ->
+        pure (Left Timeout)

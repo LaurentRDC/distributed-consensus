@@ -31,9 +31,9 @@ where
 import Data.Binary (Binary)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Sequence (Seq)
-import Distributed.Consensus.Raft.Admin (AdminRequest, AdminResponse)
-import Distributed.Consensus.Raft.Client (ClientRequest, ClientResponse)
 import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, RequestId, Snapshot, SnapshotMetadata, Term)
+import Distributed.Consensus.Raft.Domain.Admin (AdminRequest, AdminResponse)
+import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientResponse)
 import Distributed.Consensus.Raft.Log (Log)
 import GHC.Generics (Generic)
 

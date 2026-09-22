@@ -2,6 +2,8 @@ module Control.Distributed.Process.Raft.Admin
   ( withRaftAdmin,
 
     -- * Re-exports
+    AdminError (..),
+    Microseconds,
     joinCluster,
     leaveCluster,
     getClusterConfiguration,
@@ -15,7 +17,7 @@ import Control.Distributed.Process.Raft.Instances ()
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
 import Distributed.Consensus.Raft (ClusterConfiguration)
-import Distributed.Consensus.Raft.Admin (AdminError, AdminImplementation (..), RaftAdminT, withRaftAdminT)
+import Distributed.Consensus.Raft.Admin (AdminError, AdminImplementation (..), Microseconds, RaftAdminT, withRaftAdminT)
 import Distributed.Consensus.Raft.Admin qualified as Raft.Admin
 
 -- | Send an admin request to a Raft cluster.
@@ -56,6 +58,8 @@ adminMailboxProcessName :: String
 adminMailboxProcessName = "raft-consensus-admin-mailbox"
 
 joinCluster ::
+  -- | Timeout in microseconds
+  Microseconds ->
   -- | Node to command
   NodeId ->
   -- \| Node to join
@@ -64,18 +68,24 @@ joinCluster ::
 joinCluster = Raft.Admin.joinCluster
 
 leaveCluster ::
+  -- | Timeout in microseconds
+  Microseconds ->
   -- | Node to command
   NodeId ->
   RaftAdminT NodeId Process (Either (AdminError NodeId) ())
 leaveCluster = Raft.Admin.leaveCluster
 
 getClusterConfiguration ::
+  -- | Timeout in microseconds
+  Microseconds ->
   -- | Node to ask.
   NodeId ->
   RaftAdminT NodeId Process (Either (AdminError NodeId) (ClusterConfiguration NodeId))
 getClusterConfiguration = Raft.Admin.getClusterConfiguration
 
 shutDown ::
+  -- | Timeout in microseconds
+  Microseconds ->
   -- | Node to command
   NodeId ->
   RaftAdminT NodeId Process (Either (AdminError NodeId) ())

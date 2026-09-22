@@ -33,10 +33,16 @@ common warnings
 library
     import:           warnings
     exposed-modules:  Distributed.Consensus.Raft
+                      -- TODO: split out client and admin modules
+                      --       into separate libraries so that a client
+                      --       executable doesn't need to compile the
+                      --       Raft algorithm?
                       Distributed.Consensus.Raft.Admin
                       Distributed.Consensus.Raft.Client
     other-modules:    Distributed.Consensus.Raft.Algorithm
                       Distributed.Consensus.Raft.Domain
+                      Distributed.Consensus.Raft.Domain.Admin
+                      Distributed.Consensus.Raft.Domain.Client
                       Distributed.Consensus.Raft.Implementation
                       Distributed.Consensus.Raft.Log
                       Distributed.Consensus.Raft.Messaging
@@ -97,4 +103,3 @@ benchmark raft-cluster
                   , stm
                   , tasty
                   , tasty-bench
-                  , text

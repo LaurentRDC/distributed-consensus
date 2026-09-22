@@ -26,7 +26,7 @@ import Data.Int (Int64)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word64)
-import Distributed.Consensus.Raft.Client (ClientRequestId)
+import Distributed.Consensus.Raft.Domain.Client (ClientRequestId)
 import GHC.Generics (Generic)
 
 -- | Election term

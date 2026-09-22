@@ -73,9 +73,9 @@ import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Traversable (for)
-import Distributed.Consensus.Raft.Admin (AdminResponse)
-import Distributed.Consensus.Raft.Client (ClientRequest, ClientResponse, ClientResult (..))
 import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId (clientRequestId), Role (..), Snapshot (..), SnapshotMetadata (..), Term, allNodes, hasQuorum, mkRequestId)
+import Distributed.Consensus.Raft.Domain.Admin (AdminResponse)
+import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientResponse, ClientResult (..))
 import Distributed.Consensus.Raft.Implementation hiding (sendAdminResponse, sendClientResponse, sendRPC, sendRPCResult)
 import qualified Distributed.Consensus.Raft.Implementation as Impl
 import Distributed.Consensus.Raft.Log (Lookup (..), absoluteIndex, logEntries)

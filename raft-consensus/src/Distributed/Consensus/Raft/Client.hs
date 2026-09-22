@@ -1,4 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
@@ -11,6 +10,8 @@ module Distributed.Consensus.Raft.Client
     ClientImplementation (..),
     withRaftClientT,
     request,
+    ClientError (..),
+    Microseconds,
 
     -- * Communications between clients and clusters
     ClientRequestId (..),
@@ -23,38 +24,18 @@ module Distributed.Consensus.Raft.Client
 where
 
 import Control.Arrow ((&&&))
-import Control.Concurrent.Class.MonadSTM (MonadSTM, TMVar, TVar, atomically, newEmptyTMVar, newTVarIO, putTMVar, readTMVar, readTVar, writeTVar)
+import Control.Concurrent.Class.MonadSTM (TMVar, TVar, atomically, newEmptyTMVar, newTVarIO, putTMVar, readTMVar, readTVar, writeTVar)
 import Control.Monad.Class.MonadAsync (MonadAsync, withAsync)
+import Control.Monad.Class.MonadTimer (MonadTimer, timeout)
 import Control.Monad.Trans.Class (MonadTrans, lift)
 import Control.Monad.Trans.Reader (ReaderT (runReaderT), asks)
-import Data.Binary (Binary)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
-import Data.Word (Word64)
+import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientRequestId (..), ClientResponse, ClientResult (..))
 import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
-import GHC.Generics (Generic)
+import Distributed.Consensus.Raft.Timer (Microseconds)
 import Lens.Micro.Platform (makeLenses)
-
--- Alphabet for communicating with clients
-
--- | Client-sourced request ID. This allows to correlate multiple client
--- side-responses.
-newtype ClientRequestId = ClientRequestId Word64
-  deriving stock (Generic, Eq, Ord, Show)
-  deriving newtype (Real, Binary, Enum, Num, Integral)
-
-type ClientRequest node entry = Request ClientRequestId node entry
-
-data ClientResult node result
-  = Success !result
-  | Failure !Text
-  | NotLeader
-  deriving (Eq, Show, Generic)
-
-instance (Binary node, Binary result) => Binary (ClientResult node result)
-
-type ClientResponse node result = Response ClientRequestId node (ClientResult node result)
 
 newtype RaftClientT entry node result m a
   = MkRaftClientT (ReaderT (RaftClientEnv entry node result m) m a)
@@ -111,16 +92,25 @@ data RaftClientEnv entry node result m
 
 makeLenses ''ClientImplementation
 
+-- | Possible client errors
+data ClientError
+  = Timeout
+  | NoKnownLeader
+  | SomeFailure !Text
+  deriving (Eq, Show, Ord)
+
 -- | Send a request to a Raft cluster.
 --
 -- It is perfectly safe, and encouraged, to send separate requests in
 -- separate threads.
 request ::
-  (MonadSTM m) =>
+  (MonadTimer m) =>
+  -- | Timeout in microseconds
+  Microseconds ->
   node ->
   entry ->
-  RaftClientT entry node result m (Either Text (node, result))
-request lastKnownLeader entry = do
+  RaftClientT entry node result m (Either ClientError (node, result))
+request timeoutValue lastKnownLeader entry = do
   (self, send) <- MkRaftClientT $ asks (node &&& sendRequest . implementation)
   mbox <- MkRaftClientT $ asks mailbox
   reqIdVar <- MkRaftClientT $ asks nextRequestId
@@ -140,17 +130,19 @@ request lastKnownLeader entry = do
           lastKnownLeader
           (MkRequest reqId self entry)
 
-        atomically
-          ( do
-              resp <- readTMVar resultVar
-              mbox' <- readTVar mbox
-              writeTVar mbox (Map.delete reqId mbox')
-              pure resp
-          )
+        timeout (fromIntegral timeoutValue) $
+          atomically
+            ( do
+                resp <- readTMVar resultVar
+                mbox' <- readTVar mbox
+                writeTVar mbox (Map.delete reqId mbox')
+                pure resp
+            )
     )
     >>= \case
-      MkResponse _ _ (Failure errmsg) -> pure $ Left errmsg
-      MkResponse _ (Just actualLeaderId) NotLeader -> request actualLeaderId entry
-      MkResponse _ (Just leader) (Success result) -> pure $ Right (leader, result)
+      Just (MkResponse _ _ (Failure errmsg)) -> pure $ Left $ SomeFailure errmsg
+      Just (MkResponse _ (Just actualLeaderId) NotLeader) -> request timeoutValue actualLeaderId entry
+      Just (MkResponse _ (Just leader) (Success result)) -> pure $ Right (leader, result)
       -- TODO: what if leader is @Nothing@ but response is `Success`??
-      MkResponse _ Nothing _ -> pure $ Left "No known leaders"
+      Just (MkResponse _ Nothing _) -> pure $ Left NoKnownLeader
+      Nothing -> pure $ Left Timeout

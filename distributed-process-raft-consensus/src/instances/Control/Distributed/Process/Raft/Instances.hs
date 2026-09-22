@@ -14,7 +14,6 @@
 
 module Control.Distributed.Process.Raft.Instances () where
 
-import Control.Applicative (Alternative)
 import Control.Concurrent qualified as IO
 import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.Class.MonadMVar
@@ -38,7 +37,6 @@ import Control.Exception qualified as IO
 #if __GLASGOW_HASKELL__ >= 910
 import Control.Exception.Annotation (ExceptionAnnotation)
 #endif
-import Control.Monad (MonadPlus)
 import Control.Monad.Class.MonadAsync (MonadAsync (..))
 import Control.Monad.Class.MonadEventlog (MonadEventlog (..))
 import Control.Monad.Class.MonadFork
@@ -72,7 +70,6 @@ import Control.Monad.Class.MonadTimer
   )
 import Control.Monad.Class.MonadTimer.SI qualified as SI
 import Control.Monad.Class.MonadUnique (MonadUnique (..))
-import Control.Monad.Fix (MonadFix)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Primitive (PrimMonad (..), RealWorld, stToPrim)
 import Control.Monad.STM qualified as STM
@@ -149,7 +146,7 @@ instance MonadEvaluate Process where
   evaluate = liftIO . IO.evaluate
 
 newtype ProcessSTM a = ProcessSTM {runProcessSTM :: STM.STM a}
-  deriving newtype (Functor, Applicative, Monad, Alternative, MonadPlus, MonadFix)
+  deriving newtype (Functor, Applicative, Monad)
 
 deriving newtype instance (Semigroup a) => Semigroup (ProcessSTM a)
 

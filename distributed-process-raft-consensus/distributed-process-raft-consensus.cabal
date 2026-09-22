@@ -67,7 +67,6 @@ library client
                     , distributed-process-raft-consensus:io-classes-instances
                     , raft-consensus ^>=0.1
                     , stm ^>=2.5
-                    , text >=2.1.2 && <2.2
     default-language: GHC2021
 
 library admin
@@ -97,6 +96,7 @@ test-suite distributed-process-raft-consensus-test
                     , distributed-process-raft-consensus:admin
                     , distributed-process-raft-consensus:client
                     , raft-consensus
+                    , stm
                     , tasty ^>= 1.5
                     , tasty-hunit ^>= 0.10
                     , network-transport

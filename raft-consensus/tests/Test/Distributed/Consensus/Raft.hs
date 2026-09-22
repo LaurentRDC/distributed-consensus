@@ -45,7 +45,6 @@ import Distributed.Consensus.Raft
     Implementation (..),
     LogEntry,
     LogIndex,
-    Microseconds,
     Networking (..),
     Persistence (..),
     RPC,
@@ -191,7 +190,7 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
                           tryShutDown attemptsLeft =
                             timeout
                               (fromIntegral scenarioInputs.electionTimeoutUpperBound)
-                              (runAdminAction (Admin.shutDown node))
+                              (runAdminAction (Admin.shutDown 1_000_000 node))
                               >>= maybe (tryShutDown (attemptsLeft - 1)) (const (pure ()))
                        in tryShutDown 3
 
@@ -241,11 +240,11 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
 
                   threadDelay (fromIntegral waitToJoin)
                   untilJoined runAdminAction contact requestTimeout betweenAttempts node $
-                    Admin.joinCluster node contact
+                    Admin.joinCluster requestTimeout node contact
 
                   threadDelay (fromIntegral waitToLeave)
                   untilLeft runAdminAction contact requestTimeout betweenAttempts node $
-                    Admin.leaveCluster node
+                    Admin.leaveCluster requestTimeout node
 
                   putMVar isDone ()
               )
@@ -270,7 +269,7 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
 
             attempt remaining = do
               threadDelay (fromIntegral clientRetryTick)
-              timeout (fromIntegral maxTime) (runRequest (request 0 command)) >>= \case
+              timeout (fromIntegral maxTime) (runRequest (request maxBound 0 command)) >>= \case
                 Nothing ->
                   giveUp $
                     "no response at all within "
@@ -468,7 +467,7 @@ untilMembership direction runAdminAction initialContact requestTimeout betweenAt
     go attemptsLeft contact
       | attemptsLeft <= 0 = pure ()
       | otherwise =
-          attempt (Admin.getClusterConfiguration contact) >>= \case
+          attempt (Admin.getClusterConfiguration 1_000_000 contact) >>= \case
             -- Settled: the configuration says what we wanted it to say.
             Just (Right (Simple cluster))
               | isDone cluster -> pure ()

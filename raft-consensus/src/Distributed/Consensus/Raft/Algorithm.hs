@@ -23,9 +23,7 @@ import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Distributed.Consensus.Raft.Admin (AdminCommand (..), AdminRequest)
 import qualified Distributed.Consensus.Raft.Admin as Admin
-import Distributed.Consensus.Raft.Client (ClientRequest, ClientResult (..))
 import Distributed.Consensus.Raft.Domain
   ( ClusterConfiguration (..),
     LogIndex,
@@ -34,6 +32,8 @@ import Distributed.Consensus.Raft.Domain
     SnapshotMetadata (..),
     Term,
   )
+import Distributed.Consensus.Raft.Domain.Admin (AdminCommand (..), AdminRequest)
+import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientResult (..))
 import Distributed.Consensus.Raft.Implementation
   ( AppendEntries (..),
     AppendEntriesResult (..),

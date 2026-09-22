@@ -23,13 +23,13 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Text (Text)
 import Data.Word (Word64)
 import Distributed.Consensus.Raft (Config (..), Implementation (..), Microseconds, Networking (..), Persistence (..), RPC, RPCResult, runRaftServer)
 import qualified Distributed.Consensus.Raft as Raft
 import Distributed.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Distributed.Consensus.Raft.Client
-  ( ClientImplementation (..),
+  ( ClientError,
+    ClientImplementation (..),
     ClientRequest,
     ClientResponse,
     request,
@@ -211,7 +211,7 @@ data Harness
     -- the whole benchmark: see 'withRaftClientT'.
     withClient ::
       forall b.
-      ((Node -> Command -> IO (Either Text (Node, Result))) -> IO b) ->
+      ((Node -> Command -> IO (Either ClientError (Node, Result))) -> IO b) ->
       IO b
   }
 
@@ -238,7 +238,7 @@ benchHarness
               map (\(serverSeed, n) -> (n, mkServer' serverSeed (fromIntegral n))) serverNodesWithSeeds,
           withClient = \useClient ->
             withRaftClientT clientNode (clientSpec networkFabric) $ \runSession ->
-              useClient (\leader comm -> runSession (request leader comm))
+              useClient (\leader comm -> runSession (request maxBound leader comm))
         }
     where
       adminNode = -1

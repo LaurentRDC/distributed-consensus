@@ -1,6 +1,8 @@
 module Control.Distributed.Process.Raft.Client
   ( withRaftClient,
     request,
+    Microseconds,
+    ClientError (..),
   )
 where
 
@@ -10,8 +12,7 @@ import Control.Distributed.Process.Raft.Instances ()
 import Control.Distributed.Process.Serializable (Serializable)
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
-import Data.Text (Text)
-import Distributed.Consensus.Raft.Client (ClientImplementation (..), RaftClientT, withRaftClientT)
+import Distributed.Consensus.Raft.Client (ClientError, ClientImplementation (..), Microseconds, RaftClientT, withRaftClientT)
 import Distributed.Consensus.Raft.Client qualified as Raft.Client
 
 -- | Send a request to a Raft cluster.
@@ -59,7 +60,9 @@ clientMailboxProcessName = "raft-consensus-client-mailbox"
 -- It is perfectly safe, and encouraged, to send separate requests in
 -- separate threads.
 request ::
+  -- | Timeout in microseconds
+  Microseconds ->
   NodeId ->
   entry ->
-  RaftClientT entry NodeId result Process (Either Text (NodeId, result))
+  RaftClientT entry NodeId result Process (Either ClientError (NodeId, result))
 request = Raft.Client.request
