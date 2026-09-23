@@ -59,7 +59,7 @@ library io-classes-instances
 
 library client
     import:           warnings
-    hs-source-dirs:   src/client
+    hs-source-dirs:   src
     exposed-modules:  Control.Distributed.Process.Raft.Client
     visibility:       public
     build-depends:    base >= 4.18 && <4.23
@@ -71,7 +71,7 @@ library client
 
 library admin
     import:           warnings
-    hs-source-dirs:   src/admin
+    hs-source-dirs:   src
     exposed-modules:  Control.Distributed.Process.Raft.Admin
     visibility:       public
     build-depends:    base >= 4.18 && <4.23
