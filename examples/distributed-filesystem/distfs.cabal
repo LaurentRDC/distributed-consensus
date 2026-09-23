@@ -1,0 +1,77 @@
+cabal-version:      3.4
+name:               distfs
+version:            0.1.0.0
+synopsis:           Distributed filesystem server
+-- description:
+homepage:           https://github.com/LaurentRDC/distributed-consensus
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             Laurent P. René de Cotret
+maintainer:         laurent.decotret@outlook.com
+copyright:          Laurent P. René de Cotret
+category:           Distributed Systems
+build-type:         Simple
+extra-doc-files:    README.md
+
+common warnings
+    ghc-options: -Wall
+                 -Wcompat
+                 -Widentities
+                 -Wincomplete-uni-patterns
+                 -Wincomplete-record-updates
+                 -Wredundant-constraints
+                 -fhide-source-paths
+                 -Wpartial-fields
+                 -Wunused-packages
+
+library
+    import:           warnings
+    exposed-modules:  FileSystem
+    build-depends:    base
+                    , binary
+                    , bytestring
+                    , containers
+                    , text
+    hs-source-dirs:   domain
+    default-language: Haskell2010
+
+executable distfs-server
+    import:           warnings
+    ghc-options:      -rtsopts -threaded -with-rtsopts=-N
+    main-is:          Main.hs
+    other-modules:    Server.Persistence
+                      Server.StateMachine
+    build-depends:    base >= 4.18 && <4.23
+                    , binary
+                    , bytestring
+                    , containers
+                    , directory
+                    , distributed-process ^>=0.7
+                    , distributed-process-raft-consensus
+                    , distfs
+                    , filepath >=1.5 && <1.6
+                    , file-io
+                    , network
+                    , network-transport-tcp
+                    , optparse-applicative ^>=0.19
+                    , raft-consensus
+                    , random
+                    , wal
+    hs-source-dirs:   server
+    default-language: Haskell2010
+
+executable distfs-client
+    import:           warnings
+    ghc-options:      -rtsopts -threaded -with-rtsopts=-N
+    main-is:          Main.hs
+    build-depends:    base >= 4.18 && <4.23
+                    , distributed-process ^>=0.7
+                    , distributed-process-raft-consensus:client
+                    , distfs
+                    , network
+                    , network-transport-tcp
+                    , optparse-applicative ^>=0.19
+                    -- need Data.Text.show support, which was new in 2.1.2
+                    , text >=2.1.2 && <2.3
+    hs-source-dirs:   client
+    default-language: Haskell2010

@@ -26,3 +26,5 @@ cabal.optimized.project.local~
 cabal.profiling.project.local~
 .HTF/
 .ghc.environment.*
+# For temporary files used by local examples
+.distfs/

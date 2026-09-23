@@ -1,6 +1,7 @@
 packages: raft-consensus/raft-consensus.cabal
           wal/wal.cabal
           distributed-process-raft-consensus/distributed-process-raft-consensus.cabal
+          examples/distributed-filesystem/distfs.cabal
 
 program-options
     ghc-options: +RTS -A64m -RTS
