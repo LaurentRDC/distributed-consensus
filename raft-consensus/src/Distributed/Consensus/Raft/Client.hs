@@ -37,6 +37,15 @@ import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import Distributed.Consensus.Raft.Timer (Microseconds)
 import Lens.Micro.Platform (makeLenses)
 
+-- | Client monad to make requests to a Raft cluster.
+--
+-- The only way to execute an action of type 'RaftClientT' is with
+-- 'withRaftClientT'.
+--
+-- The only way to construct an action of type 'RaftClientT' is to use
+-- 'request'.
+--
+-- If you must run computations in the base monad, use 'lift'.
 newtype RaftClientT entry node result m a
   = MkRaftClientT (ReaderT (RaftClientEnv entry node result m) m a)
   deriving (Functor, Applicative, Monad)
@@ -105,7 +114,7 @@ data ClientError
 -- separate threads.
 request ::
   (MonadTimer m) =>
-  -- | Timeout in microseconds
+  -- | Timeout in microseconds.
   Microseconds ->
   node ->
   entry ->

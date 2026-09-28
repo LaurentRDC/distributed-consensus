@@ -37,6 +37,14 @@ import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientResponse)
 import Distributed.Consensus.Raft.Log (Log)
 import GHC.Generics (Generic)
 
+-- | Implementation of the Raft protocol.
+--
+-- There are four categories of things that need an implementation:
+--
+-- * Persistence: how are values persisted durably?
+-- * State mechine: given an @entry@, how does the @state@ evolve?
+-- * Networking: how are nodes communicating?
+-- * Tracing: how is debugging information traced?
 data Implementation entry node state result m = Implementation
   { persistence :: Persistence entry node state m,
     applyLogEntry :: state -> entry -> (state, result),
@@ -45,24 +53,32 @@ data Implementation entry node state result m = Implementation
   }
 
 -- | Networking implementation.
---
--- This is broken out into its own type so that it can be provided cleanly by
--- third-party packages
 data Networking entry node state result m = Networking
-  { sendRPC :: node -> RPC node entry state -> m (),
+  { -- | Send a remote procedure call to another Raft node.
+    sendRPC :: node -> RPC node entry state -> m (),
+    -- | Send the result of a remote procedure call to another Raft node.
     sendRPCResult :: node -> RPCResult node result -> m (),
+    -- | Send a response to a client.
     sendClientResponse :: node -> ClientResponse node result -> m (),
+    -- | Send a response to an administrator.
     sendAdminResponse :: node -> AdminResponse node -> m (),
-    -- We use 'Text' to represent deserialization errors because this is
-    -- easiest to represent to the user. I don't think it's worth adding
-    -- yet another type variable to the impl.
+    -- | Receive a remote procedure call.
+    --
+    -- At the type implies, this call should /block/ until a message is ready.
     receiveRPC :: m (RPC node entry state),
+    -- | Receive the result of a remote procedure call.
+    --
+    -- At the type implies, this call should /block/ until a message is ready.
     receiveRPCResult :: m (RPCResult node result),
     -- | Receive client requests.
+    --
     -- This call should block until at least one request is available. If
     -- your software stack allows for it, queueing requests allows
     -- for pipelined processing which is much more efficient.
     receiveClientRequests :: m (NonEmpty (ClientRequest node entry)),
+    -- | Receive a request from an administrator.
+    --
+    -- At the type implies, this call should /block/ until a message is ready.
     receiveAdminRequest :: m (AdminRequest node)
   }
 
@@ -72,13 +88,39 @@ data Networking entry node state result m = Networking
 -- third-party packages
 data Persistence entry node state m = Persistence
   { -- | Read log entries, starting from and including, a given 'LogIndex'
+    --
+    -- Implementations should
     readLogEntriesFrom :: node -> LogIndex -> m [(Term, LogEntry node entry)],
+    -- | Write log entries durably.
+    --
+    -- This function also receives the node identification (of type @node@), which
+    -- allows to persist data in a shared location for multiple nodes
+    -- (e.g. in a remote database)
     writeLogEntry :: node -> [(LogIndex, Term, LogEntry node entry)] -> m (),
+    -- | Read the last persisted term. In case this is not known (for example, on a
+    -- first boot), then the term should be @0@.
     readTerm :: node -> m Term,
+    -- | Write the current term durably.
+    --
+    -- This function also receives the node identification (of type @node@), which
+    -- allows to persist data in a shared location for multiple nodes
+    -- (e.g. in a remote database)
     writeTerm :: node -> Term -> m (),
+    -- | Read the node for which /this/ node has voted, for a given term, if known.
     readVotedFor :: node -> Term -> m (Maybe node),
+    -- | Write this node's vote for the current term, durably.
+    --
+    -- This function also receives the node identification (of type @node@), which
+    -- allows to persist data in a shared location for multiple nodes
+    -- (e.g. in a remote database)
     writeVotedFor :: node -> Term -> Maybe node -> m (),
+    -- | Read the most recent snapshot, if one exists.
     readSnapshot :: node -> m (Maybe (Snapshot node state)),
+    -- | Write a snapshot durably.
+    --
+    -- This function also receives the node identification (of type @node@), which
+    -- allows to persist data in a shared location for multiple nodes
+    -- (e.g. in a remote database)
     writeSnapshot :: node -> Snapshot node state -> m ()
   }
 

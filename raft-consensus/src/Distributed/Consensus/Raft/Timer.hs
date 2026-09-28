@@ -38,6 +38,15 @@ data Timer m = MkTimer
     _handle :: MVar m (Async m ())
   }
 
+-- | Duration of time in microseconds.
+--
+-- The canonical way to build a 'Microsecond' value is to
+-- either use a literal integer, or via 'fromIntegral':
+--
+-- >>> 1000000 :: Microseconds
+-- Microseconds 1000000
+-- >>> fromIntegral (1000000 :: Int) :: Microseconds
+-- Microseconds 1000000
 newtype Microseconds = Microseconds Int32
   deriving stock (Eq, Ord, Show, Generic)
   deriving newtype (Real, Enum, Num, Integral, Bounded)

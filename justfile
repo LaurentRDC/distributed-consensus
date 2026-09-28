@@ -1,5 +1,12 @@
 format:
-    ormolu --mode inplace $(find . -name '*.hs')
+    # git ls-files might not return new Haskell files, so I
+    # prefer to use 'find'.
+    #
+    # The 'find' command starts by "don't list the directory dist-newstyle"
+    # (-type d -name dist-newstyle -prune)
+    # but otherwise (-o) print files with names like *.hs
+    # (-type f -name ... -print)
+    ormolu --mode inplace $(find . -type d -name dist-newstyle -prune -o -type f -name "*.hs" -print)
 
 lint:
     hlint .
@@ -18,4 +25,4 @@ distfs-servers n="5" keep-state="false":
 
 [group('example: distfs')]
 distfs-client *args:
-    cabal run distfs-client -- {{args}}
+    cabal -v0 run distfs-client -- {{args}}

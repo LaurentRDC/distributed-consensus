@@ -200,9 +200,14 @@ data RaftEnv entry node state result m
 
 data Config node
   = MkConfig
-  { nodeId :: !node,
+  { -- | Identification for the node
+    nodeId :: !node,
+    -- | Inclusive range of election timeouts. The actual election timeout will be
+    -- chosen at random, with a uniform probability distribution in the range.
     electionTimeoutRange :: !(Microseconds, Microseconds),
+    -- | Heartbeat timeout.
     heartBeatTimeout :: !Microseconds,
+    -- | Random seed for the generation of election timeouts.
     randomSeed :: !Word64,
     -- | If provided, once the log on any node
     -- reaches this length, a snapshot is produced
