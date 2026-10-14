@@ -24,7 +24,7 @@ import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word64)
-import Distributed.Consensus.Raft (Config (..), Implementation (..), Microseconds, Networking (..), Persistence (..), RPC, RPCResult, runRaftServer)
+import Distributed.Consensus.Raft (Config (..), Implementation (..), Microseconds, Networking (..), Persistence (..), RPC, RPCResult, StateMachineStep (..), runRaftServer)
 import qualified Distributed.Consensus.Raft as Raft
 import Distributed.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Distributed.Consensus.Raft.Client
@@ -188,7 +188,7 @@ mkServer network hbto etolb etoub seed node =
                   readSnapshot = \_ -> pure Nothing,
                   writeSnapshot = \_ _ -> pure ()
                 },
-            applyLogEntry = step,
+            stateMachine = step,
             networking =
               Networking
                 { sendRPC = send network.rpcMailbox,
@@ -300,9 +300,7 @@ data Result
 
 instance NFData Result
 
-step :: State -> Command -> (State, Result)
-step state (Insert k v) = (Map.insert k v state, Ok)
-step state (Delete k) = (Map.delete k state, Ok)
-step state (Get k) = case Map.lookup k state of
-  Nothing -> (state, Err)
-  Just v -> (state, Value v)
+step :: Command -> StateMachineStep State Result
+step (Insert k v) = Transition $ \state -> (Map.insert k v state, Ok)
+step (Delete k) = Transition $ \state -> (Map.delete k state, Ok)
+step (Get k) = Read $ \state -> maybe Err Value (Map.lookup k state)

@@ -51,8 +51,10 @@ import Distributed.Consensus.Raft
     RPCResult,
     RaftTrace (..),
     Snapshot,
+    StateMachineStep (..),
     Term,
     runRaftServer,
+    runStateMachineStep,
   )
 import qualified Distributed.Consensus.Raft as Raft
 import Distributed.Consensus.Raft.Admin
@@ -265,7 +267,7 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
         go _ [] = pure ()
         go state (command : rest) = attempt retryBudget
           where
-            (newState, expectedResults) = step state command
+            (newState, expectedResults) = runStateMachineStep (step command) state
 
             attempt remaining = do
               threadDelay (fromIntegral clientRetryTick)
@@ -558,7 +560,7 @@ mkServer debug resources hbto etolb etoub faultProb seed node =
                   readSnapshot = readTest resources.snapshotPersistence,
                   writeSnapshot = \self snapshot -> writeTest resources.snapshotPersistence self (Just snapshot)
                 },
-            applyLogEntry = step,
+            stateMachine = step,
             networking =
               Networking
                 { sendRPC = send resources.networkFabric.rpcMailbox,
@@ -763,9 +765,7 @@ data Result
   | Err
   deriving (Eq, Show)
 
-step :: State -> Command -> (State, Result)
-step state (Insert k v) = (Map.insert k v state, Ok)
-step state (Delete k) = (Map.delete k state, Ok)
-step state (Get k) = case Map.lookup k state of
-  Nothing -> (state, Err)
-  Just v -> (state, Value v)
+step :: Command -> StateMachineStep State Result
+step (Insert k v) = Transition $ \state -> (Map.insert k v state, Ok)
+step (Delete k) = Transition $ \state -> (Map.delete k state, Ok)
+step (Get k) = Read $ \state -> maybe Err Value (Map.lookup k state)

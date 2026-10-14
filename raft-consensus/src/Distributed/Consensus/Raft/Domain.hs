@@ -18,6 +18,10 @@ module Distributed.Consensus.Raft.Domain
     -- * Snapshots
     Snapshot (..),
     SnapshotMetadata (..),
+
+    -- * State machine
+    StateMachineStep (..),
+    runStateMachineStep,
   )
 where
 
@@ -129,3 +133,23 @@ data Snapshot node state = Snapshot
   deriving (Eq, Ord, Show, Generic)
 
 instance (Binary state, Binary node) => Binary (Snapshot node state)
+
+-- | A state machine entry results in a step which can either read the state ('Read')
+-- or mutate the state ('Write').
+--
+-- The distinction is important because reading from the state can be optimized
+-- differently than a mutation.
+--
+-- >>> data CounterOp = ReadCounter | Increment | Decrement
+-- >>> :{ let stateMachine = \op -> case op of
+--    ReadCounter -> Read id
+--    Increment -> Write $ \st -> (succ st, succ st)
+--    Decrement -> Write $ \st -> (pred st, pred st)
+-- :}
+data StateMachineStep state result
+  = Read (state -> result)
+  | Transition (state -> (state, result))
+
+runStateMachineStep :: StateMachineStep state result -> state -> (state, result)
+runStateMachineStep (Read runRead) st = (st, runRead st)
+runStateMachineStep (Transition runTrans) st = runTrans st

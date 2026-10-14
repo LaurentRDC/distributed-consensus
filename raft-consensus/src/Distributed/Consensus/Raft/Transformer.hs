@@ -73,7 +73,18 @@ import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Traversable (for)
-import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), RequestId (clientRequestId), Role (..), Snapshot (..), SnapshotMetadata (..), Term, allNodes, hasQuorum, mkRequestId)
+import Distributed.Consensus.Raft.Domain
+  ( ClusterConfiguration (..),
+    RequestId (clientRequestId),
+    Role (..),
+    Snapshot (..),
+    SnapshotMetadata (..),
+    StateMachineStep (..),
+    Term,
+    allNodes,
+    hasQuorum,
+    mkRequestId,
+  )
 import Distributed.Consensus.Raft.Domain.Admin (AdminResponse)
 import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientResponse, ClientResult (..))
 import Distributed.Consensus.Raft.Implementation hiding (sendAdminResponse, sendClientResponse, sendRPC, sendRPCResult)
@@ -224,8 +235,15 @@ applyEntry ::
   ) =>
   LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
 applyEntry (LogEntryCommand (Command reqId entry)) = do
-  apply <- view implementation <&> applyLogEntry
-  (newState, result) <- use internalState <&> flip apply entry
+  sm <- view implementation <&> stateMachine
+  currState <- use internalState
+  let (newState, result) =
+        case sm entry of
+          -- TODO: reading from the state doesn't require appending to the log.
+          --       The logic for 'Read' and 'Write' should be separated.
+          --       See issue #3
+          Read runRead -> let readResult = runRead currState in (currState, readResult)
+          Transition runWrite -> runWrite currState
   trace (`LogEntryApplied` entry)
 
   internalState .= newState

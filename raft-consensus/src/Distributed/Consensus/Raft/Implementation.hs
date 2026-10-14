@@ -31,7 +31,7 @@ where
 import Data.Binary (Binary)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Sequence (Seq)
-import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, RequestId, Snapshot, SnapshotMetadata, Term)
+import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, RequestId, Snapshot, SnapshotMetadata, StateMachineStep, Term)
 import Distributed.Consensus.Raft.Domain.Admin (AdminRequest, AdminResponse)
 import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientResponse)
 import Distributed.Consensus.Raft.Log (Log)
@@ -47,7 +47,7 @@ import GHC.Generics (Generic)
 -- * Tracing: how is debugging information traced?
 data Implementation entry node state result m = Implementation
   { persistence :: Persistence entry node state m,
-    applyLogEntry :: state -> entry -> (state, result),
+    stateMachine :: entry -> StateMachineStep state result,
     networking :: Networking entry node state result m,
     tracer :: RaftTrace entry result node state -> m ()
   }

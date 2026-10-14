@@ -10,7 +10,7 @@ import Control.Exception (throwIO)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Set as Set
 import Distributed.Consensus.Raft (ClusterState (..), Config (..), Implementation (..), runRaftServer)
-import FileSystem (Directory (..), FileSystem (..))
+import FileSystem (FileSystem (..))
 import GHC.IO.Handle (BufferMode (LineBuffering), hSetBuffering)
 import Network.Socket (HostName)
 import Network.Transport.TCP (createTransport, defaultTCPAddr, defaultTCPParameters)
@@ -89,10 +89,10 @@ main = do
             }
         )
         clusterState
-        (FileSystem {fsRoot = Directory mempty})
+        (FileSystem mempty)
         ( Implementation
             { persistence = persist,
-              applyLogEntry = runFileSystemCommand,
+              stateMachine = runFileSystemCommand,
               networking = network,
               tracer = liftIO . print
             }

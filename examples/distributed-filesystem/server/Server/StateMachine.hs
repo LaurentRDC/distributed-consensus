@@ -8,33 +8,21 @@ module Server.StateMachine
 where
 
 import Data.Function ((&))
+import Distributed.Consensus.Raft (StateMachineStep (..))
 import FileSystem
   ( FileSystem,
     FileSystemCommand (..),
     FileSystemResult (..),
     deleteFile,
-    mkDir,
+    list,
     touchFile,
   )
 
-runFileSystemCommand :: FileSystem -> FileSystemCommand -> (FileSystem, FileSystemResult)
-runFileSystemCommand fs (TouchFile path) =
-  touchFile path fs
-    & either
-      (\err -> (fs, FileSystemError err))
-      (,FileTouched path)
-runFileSystemCommand fs (MkDir path) =
-  mkDir path fs
-    & either
-      (\err -> (fs, FileSystemError err))
-      (,DirCreated path)
-runFileSystemCommand fs (DeleteFile path) =
+runFileSystemCommand :: FileSystemCommand -> StateMachineStep FileSystem FileSystemResult
+runFileSystemCommand ListDir = Read $ \fs -> list fs & \files -> FilesFound files
+runFileSystemCommand (TouchFile path) = Transition $ \fs -> touchFile path fs & (,FileTouched path)
+runFileSystemCommand (DeleteFile path) = Transition $ \fs ->
   deleteFile path fs
     & either
       (\err -> (fs, FileSystemError err))
       (,FileDeleted path)
-runFileSystemCommand fs (DeleteDir path) =
-  deleteFile path fs
-    & either
-      (\err -> (fs, FileSystemError err))
-      (,DirDeleted path)

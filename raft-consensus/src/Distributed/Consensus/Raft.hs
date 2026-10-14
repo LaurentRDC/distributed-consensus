@@ -11,6 +11,8 @@ module Distributed.Consensus.Raft
     Implementation (..),
     Networking (..),
     Persistence (..),
+    StateMachineStep (..),
+    runStateMachineStep,
 
     -- ** Domain types
     LogEntry (..),
@@ -60,7 +62,9 @@ import Distributed.Consensus.Raft.Domain
     Role,
     Snapshot (..),
     SnapshotMetadata (..),
+    StateMachineStep (..),
     Term,
+    runStateMachineStep,
   )
 import Distributed.Consensus.Raft.Implementation
   ( AppendEntries (..),
