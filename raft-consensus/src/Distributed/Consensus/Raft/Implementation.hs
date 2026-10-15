@@ -138,9 +138,11 @@ instance (Binary entry) => Binary (Command entry)
 
 -- | A 'LogEntry' is anything which gets persisted
 -- in the replicated log. This includes client commands,
--- but also cluster membership changes.
+-- byt also leadership changes (which are no-op entries)
+-- and cluster membership changes.
 data LogEntry node entry
   = LogEntryCommand (Command entry)
+  | LogEntryLeaderChange
   | LogEntryMembershipChange (ClusterConfiguration node)
   deriving (Eq, Show, Ord, Generic)
 

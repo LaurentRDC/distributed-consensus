@@ -248,6 +248,7 @@ applyEntry (LogEntryCommand (Command reqId entry)) = do
 
   internalState .= newState
   pure $ Just (MkCommandResponse result reqId)
+applyEntry LogEntryLeaderChange = pure Nothing
 applyEntry (LogEntryMembershipChange clusterConf) = do
   -- Cluster membership happens at append-time, not at apply-time
   -- See 'adoptConfigurationFromLog'
@@ -616,6 +617,10 @@ becomeLeader = do
   peers <&> Map.fromSet (const (lastIx + 1)) >>= assign nextIndex
 
   trace LeaderElected
+
+  -- In order to serve read-only queries, there needs to be at least
+  -- one entry committed in this term (see Raft paper, section 8)
+  appendLogEntries (NonEmpty.singleton LogEntryLeaderChange)
 
   -- cluster configuration could be ongoing, started under a different leader
   use clusterConfiguration >>= \case
