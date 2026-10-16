@@ -35,7 +35,16 @@ module Distributed.Consensus.Raft.Transformer.Definition
     yesVotes,
     nextRequestId,
     currentClientRequests,
+    pendingReadRequests,
     randomGen,
+
+    -- ** Read-only client requests
+    PendingRead (..),
+    pendingReadTerm,
+    pendingReadLogIndex,
+    pendingReadClient,
+    pendingReadLeaderAcknowledgedBy,
+    pendingReadProjection,
 
     -- * Generic helpers
     ask,
@@ -77,7 +86,7 @@ type RaftT entry node state result m =
   RWST
     (RaftEnv entry node state result m)
     ()
-    (RaftState node entry state)
+    (RaftState node entry state result)
     m
 
 -- | This type exists so that we can spin out asynchronous threads
@@ -101,7 +110,7 @@ data ClusterState node
     -- in which case this cluster has a single node
     InCluster (Set node)
 
-data RaftState node entry state = MkRaftState
+data RaftState node entry state result = MkRaftState
   { _role :: !Role,
     _term :: !Term,
     _clusterConfiguration :: !(ClusterConfiguration node),
@@ -117,7 +126,21 @@ data RaftState node entry state = MkRaftState
     _yesVotes :: !(Set node),
     _nextRequestId :: !InternalRequestId,
     _currentClientRequests :: !(Map RequestId node),
+    _pendingReadRequests :: !(Map RequestId (PendingRead node state result)),
     _randomGen :: !StdGen
+  }
+
+-- | A pending read-only request isn't part of the
+-- log, so we need a little bit of extra metadata
+data PendingRead node state result = MkPendingRead
+  { _pendingReadTerm :: !Term,
+    _pendingReadLogIndex :: !LogIndex,
+    _pendingReadClient :: !node,
+    -- After the request is accepted by the leader,
+    -- we store nodes that have acknowledged us as the leader
+    -- here. Once `hasQuorum` is reached, we can reply
+    _pendingReadLeaderAcknowledgedBy :: !(Set node),
+    _pendingReadProjection :: state -> result
   }
 
 initialTerm :: Term
@@ -132,7 +155,7 @@ initialRaftState ::
   Set node ->
   -- | Initial internal state
   state ->
-  RaftState node entry state
+  RaftState node entry state result
 initialRaftState initRole seed clusterConf initialState =
   MkRaftState
     { _role = initRole,
@@ -149,6 +172,7 @@ initialRaftState initRole seed clusterConf initialState =
       _yesVotes = mempty,
       _nextRequestId = 0,
       _currentClientRequests = mempty,
+      _pendingReadRequests = mempty,
       -- We use mkStdGen64 for reproducibility across 32-bit and 64-bit architectures
       _randomGen = mkStdGen64 seed
     }
@@ -222,3 +246,4 @@ data Config node
 
 makeLenses ''RaftEnv
 makeLenses ''RaftState
+makeLenses ''PendingRead

@@ -48,6 +48,7 @@ import Distributed.Consensus.Raft
     Term,
   )
 import Distributed.Consensus.Raft.Admin (AdminCommand (..))
+import Distributed.Consensus.Raft.Client (ClientResult)
 import Test.Tasty.QuickCheck (Property, counterexample)
 
 type Scenario entry result state node =
@@ -105,7 +106,7 @@ commandReceived = predicate $ \case
   (CommandReceived ctx reqId entry) -> Just (ctx, reqId, entry)
   _ -> Nothing
 
-commandResponded :: Predicate (RaftTrace entry result node state) (EventContext node, CommandResponse node result)
+commandResponded :: Predicate (RaftTrace entry result node state) (EventContext node, CommandResponse node (ClientResult result))
 commandResponded = predicate $ \case
   (CommandResultResponded ctx response) -> Just (ctx, response)
   _ -> Nothing

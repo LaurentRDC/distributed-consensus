@@ -33,7 +33,7 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.Sequence (Seq)
 import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, RequestId, Snapshot, SnapshotMetadata, StateMachineStep, Term)
 import Distributed.Consensus.Raft.Domain.Admin (AdminRequest, AdminResponse)
-import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientResponse)
+import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientResponse, ClientResult)
 import Distributed.Consensus.Raft.Log (Log)
 import GHC.Generics (Generic)
 
@@ -284,7 +284,7 @@ data RaftTrace entry result node state
     --    to another node, this event is not emitted
     -- All Commands should have the same request ID
     CommandReceived (EventContext node) RequestId entry
-  | CommandResultResponded (EventContext node) (CommandResponse node result)
+  | CommandResultResponded (EventContext node) (CommandResponse node (ClientResult result))
   | -- TODO: better traching of new joining/leaving cluster
     MembershipChangeInitiated (EventContext node)
   | MembershipChangeCompleted (EventContext node)
@@ -293,6 +293,7 @@ data RaftTrace entry result node state
   | LeftCluster (EventContext node)
   | CommitIndexIncreasedTo (EventContext node) LogIndex
   | LogEntryAppended (EventContext node) LogIndex (LogEntry node entry)
+  | ReadOnlyQueryQueued (EventContext node) LogIndex entry
   | LastLogIndexChangedTo (EventContext node) LogIndex
   | LogEntryApplied (EventContext node) entry
   | MembershipChangeApplied (EventContext node) (ClusterConfiguration node)

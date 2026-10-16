@@ -11,10 +11,7 @@ Features of the Raft algorithm include:
 * Log compaction (i.e. snapshotting);
 * Membership changes;
 * Client request pipelining;
-
-_Upcoming_ Raft features include:
-
-* Read-only queries optimizations
+* Read-only query optimizations;
 
 The goal is to have feature-parity with industry standard implementations such as [etcd's Raft implementation](https://github.com/etcd-io/raft).
 

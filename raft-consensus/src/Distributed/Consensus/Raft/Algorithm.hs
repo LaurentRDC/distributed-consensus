@@ -17,7 +17,7 @@ import Control.Monad.Class.MonadFork (MonadFork, labelThisThread)
 import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay)
 import Control.Monad.Trans.Class (lift)
-import Data.Foldable (for_, toList)
+import Data.Foldable (for_, toList, traverse_)
 import Data.Functor ((<&>))
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
@@ -30,6 +30,7 @@ import Distributed.Consensus.Raft.Domain
     Role (..),
     Snapshot (..),
     SnapshotMetadata (..),
+    StateMachineStep (..),
     Term,
   )
 import Distributed.Consensus.Raft.Domain.Admin (AdminCommand (..), AdminRequest)
@@ -78,9 +79,12 @@ import Distributed.Consensus.Raft.Transformer
     exitLock,
     implementation,
     isClusterMember,
+    leaderStepDown,
     matchIndex,
     nextIndex,
     peers,
+    pendingReadLeaderAcknowledgedBy,
+    pendingReadRequests,
     persistSnapshot,
     resetElectionTimer,
     resetHeartBeatTimer,
@@ -89,6 +93,7 @@ import Distributed.Consensus.Raft.Transformer
     runSend,
     self,
     sendAppendEntriesTo,
+    serveReadOnlyQueries,
     term,
     trace,
     updateTerm,
@@ -97,7 +102,7 @@ import Distributed.Consensus.Raft.Transformer
     yesVotes,
   )
 import qualified Distributed.Consensus.Raft.Transformer as Transformer
-import Lens.Micro.Platform (at, use, view, (%=), (.=))
+import Lens.Micro.Platform (at, mapped, use, view, (%=), (.=))
 
 server ::
   ( Ord node,
@@ -232,7 +237,20 @@ handleClientRequest requests = do
       -- TODO: trace in separate thread?
       for_ commands $ \(Command rid entry) ->
         trace (\ctx -> CommandReceived ctx rid entry)
-      appendLogEntries $ LogEntryCommand <$> commands
+
+      -- Special case: if this leader is the only node in the cluster,
+      -- we can service read-only request immediately
+      serveReadOnlyQueries
+
+      -- Not all commands need to be appended to the log
+      sm <- view implementation <&> stateMachine
+      let isNotReadOnly (Command _ entry) = case sm entry of
+            Read _ -> False
+            Transition _ -> True
+
+      traverse_
+        (appendLogEntries . fmap LogEntryCommand)
+        (NonEmpty.nonEmpty $ NonEmpty.filter isNotReadOnly commands)
 
 handleAppendEntries ::
   ( Ord node,
@@ -253,8 +271,6 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
   -- since any node can be thrust into the leader role
   -- due to a leader crash
   unless (ourRole == Leader) $ do
-    -- TODO: I believe the next line is redundant because we have a separate
-    -- heartbeat mechanism.
     when (termComparison == EQ || termComparison == GT) resetElectionTimer
 
     -- Consistency check
@@ -348,6 +364,11 @@ handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode respo
       then do
         matchIndex . at responderNode .= Just responderLogIndex
         nextIndex . at responderNode .= Just (succ responderLogIndex)
+
+        pendingReadRequests . mapped . pendingReadLeaderAcknowledgedBy %= Set.insert responderNode
+
+        serveReadOnlyQueries
+
         applyLogEntries
       else do
         nextIndex %= Map.adjust pred responderNode
@@ -384,7 +405,10 @@ handleRequestVote ::
   Term ->
   RaftT entry node state result m ()
 handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLastLogIndexTerm = do
-  _ <- handleTermNumber candidateTerm
+  handleTermNumber candidateTerm >>= \case
+    GT -> leaderStepDown Nothing
+    _ -> pure ()
+
   ourTerm <- use term
   trace (\ctx -> VoteRequestedBy ctx candidateTerm candidateNode)
   mAlreadyVoted <- use votedFor

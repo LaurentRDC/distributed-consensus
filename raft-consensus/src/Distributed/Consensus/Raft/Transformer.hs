@@ -32,6 +32,8 @@ module Distributed.Consensus.Raft.Transformer
     applySnapshot,
     adoptConfigurationFromLog,
     isClusterMember,
+    leaderStepDown,
+    serveReadOnlyQueries,
     currentSnapshot,
     appendLogEntries,
     restoreState,
@@ -94,7 +96,7 @@ import qualified Distributed.Consensus.Raft.Log as Log
 import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import Distributed.Consensus.Raft.Timer (Microseconds, resetTimer)
 import Distributed.Consensus.Raft.Transformer.Definition
-import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (<%=))
+import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (<%=), (^.))
 import System.Random (uniformR)
 
 -- | Node identifier
@@ -237,16 +239,16 @@ applyEntry ::
 applyEntry (LogEntryCommand (Command reqId entry)) = do
   sm <- view implementation <&> stateMachine
   currState <- use internalState
-  let (newState, result) =
-        case sm entry of
-          -- TODO: reading from the state doesn't require appending to the log.
-          --       The logic for 'Read' and 'Write' should be separated.
-          --       See issue #3
-          Read runRead -> let readResult = runRead currState in (currState, readResult)
-          Transition runWrite -> runWrite currState
-  trace (`LogEntryApplied` entry)
+  result <-
+    case sm entry of
+      Read runRead -> pure $ runRead currState
+      Transition runWrite -> do
+        let (newState, result) = runWrite currState
+        trace (`LogEntryApplied` entry)
+        internalState .= newState
 
-  internalState .= newState
+        pure result
+
   pure $ Just (MkCommandResponse result reqId)
 applyEntry LogEntryLeaderChange = pure Nothing
 applyEntry (LogEntryMembershipChange clusterConf) = do
@@ -385,7 +387,7 @@ applyCommittedEntries = do
             Just requester -> do
               for_ responses $ \response -> do
                 runSend $ sendClientResponse requester (MkResponse (clientRequestId reqId) (Just leaderId) (Success response))
-                trace (`CommandResultResponded` MkCommandResponse response reqId)
+                trace (`CommandResultResponded` MkCommandResponse (Success response) reqId)
               currentClientRequests %= Map.delete reqId
 
     view configuration <&> maxLogLength >>= \case
@@ -395,6 +397,10 @@ applyCommittedEntries = do
         when
           (Seq.length (logEntries entries') > maxLog)
           (currentSnapshot >>= persistSnapshot)
+
+  -- Since the last applied index could have been updated,
+  -- we might be able to serve some read-only requests
+  serveReadOnlyQueries
 
 nextElectionTimeout :: (Monad m) => RaftT entry node state result m Microseconds
 nextElectionTimeout = do
@@ -438,10 +444,29 @@ acceptClientRequests requests = do
   -- by an earlier leader could collide with one of ours, and we would answer
   -- the client with the result of that older command. See 'RequestId'.
   ourTerm <- use term
-  for requests $ \(MkRequest clientReqId clientId _) -> do
+  ci <- use commitIndex
+  sm <- view implementation <&> stateMachine
+  s <- self
+  for requests $ \(MkRequest clientReqId clientId entry) -> do
     internalReqId <- nextRequestId <%= succ
     let reqId = mkRequestId ourTerm internalReqId clientReqId
-    currentClientRequests %= Map.insert reqId clientId
+    case sm entry of
+      -- Read-only requests don't go to the log, and so
+      -- we need to persist more information about them.
+      Read runRead -> do
+        pendingReadRequests
+          %= Map.insert
+            reqId
+            ( MkPendingRead
+                { _pendingReadTerm = ourTerm,
+                  _pendingReadLogIndex = ci,
+                  _pendingReadClient = clientId,
+                  _pendingReadLeaderAcknowledgedBy = Set.singleton s,
+                  _pendingReadProjection = runRead
+                }
+            )
+        trace (\ctx -> ReadOnlyQueryQueued ctx ci entry)
+      Transition _ -> currentClientRequests %= Map.insert reqId clientId
     pure reqId
 
 currentSnapshot :: (Monad m) => RaftT entry node state result m (Snapshot node state)
@@ -508,6 +533,35 @@ isClusterMember :: (Ord node, Monad m) => RaftT entry node state result m Bool
 isClusterMember = do
   s <- self
   use clusterConfiguration <&> Set.member s . allNodes
+
+-- | Check if any of the pending read only queries
+-- can be served. If they can, serve them!
+serveReadOnlyQueries :: (Ord node, MonadAsync m) => RaftT entry node state result m ()
+serveReadOnlyQueries = whenRole Leader $ do
+  clusterConf <- use clusterConfiguration
+  appIx <- use lastApplied
+  ourTerm <- use term
+  leaderId <- self
+
+  let canBeServed pendingRead =
+        -- TODO: what if it's an old term? How could this even be possible?
+        (pendingRead ^. pendingReadTerm == ourTerm)
+          && (pendingRead ^. pendingReadLogIndex <= appIx)
+          && hasQuorum clusterConf (pendingRead ^. pendingReadLeaderAcknowledgedBy)
+
+  (ready, notReady) <- use pendingReadRequests <&> Map.partition canBeServed
+
+  st <- use internalState
+  for_ (Map.toList ready) $ \(reqId, request) -> do
+    let result = request ^. pendingReadProjection $ st
+    runSend $
+      sendClientResponse
+        (request ^. pendingReadClient)
+        (MkResponse (clientRequestId reqId) (Just leaderId) (Success result))
+
+    trace (`CommandResultResponded` MkCommandResponse (Success result) reqId)
+
+  pendingReadRequests .= notReady
 
 -- | Apply a snapshot to the internal state.
 --
@@ -630,19 +684,41 @@ becomeLeader = do
 
   sendHeartbeat -- Note that 'sendHeartbeat' will also reset the heartbeat timer
 
+-- | Reply to clients that the leader is stepping down. This function does nothing
+-- if the role isn't 'Leader'
+leaderStepDown :: (MonadAsync m) => Maybe node -> RaftT entry node state result m ()
+leaderStepDown mNewLeader = whenRole Leader $ do
+  clientReqs <- use currentClientRequests
+  for_ (Map.toList clientReqs) $ \(reqId, requester) -> do
+    runSend $ sendClientResponse requester (MkResponse (clientRequestId reqId) mNewLeader NotLeader)
+    trace (`CommandResultResponded` MkCommandResponse NotLeader reqId)
+
+  currentClientRequests .= mempty
+
+  readRequests <- use pendingReadRequests
+  for_ (Map.toList readRequests) $ \(reqId, request) -> do
+    runSend $
+      sendClientResponse
+        (request ^. pendingReadClient)
+        (MkResponse (clientRequestId reqId) mNewLeader NotLeader)
+    trace (`CommandResultResponded` MkCommandResponse NotLeader reqId)
+
+  pendingReadRequests .= mempty
+
 becomeFollower ::
   (MonadMVar m, MonadDelay m, MonadFork m, MonadMask m, MonadAsync m) =>
   -- | Leader if known
   Maybe node ->
   RaftT entry node state result m ()
 becomeFollower mLeaderNodeId = do
+  leaderStepDown mLeaderNodeId
   resetHeartBeatTimer
   resetElectionTimer
   r <- use role
   unless (r == Follower) $ do
     trace BecameFollower
     role .= Follower
-  currentClientRequests .= Map.empty
+
   traverse_ (\leaderNodeId -> currentLeader .= Just leaderNodeId) mLeaderNodeId
 
 becomeCandidate ::
@@ -694,10 +770,11 @@ checkElection = do
   when q becomeLeader
 
 becomeNonMember ::
-  (MonadMVar m) =>
+  (MonadMVar m, MonadAsync m) =>
   RaftT entry node state result m ()
 becomeNonMember = do
   r <- use role
+  leaderStepDown Nothing
   unless (r == NonMember) $ do
     trace BecameNonMember
     role .= NonMember

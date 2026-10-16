@@ -341,7 +341,7 @@ genScenarioInputs faultInjection = do
   -- Making the lower election timeout possibly shorter than the heartbeat timeout
   -- allows to have terms with no leaders elected
   etolb <- chooseBoundedIntegral (round $ (0.9 :: Double) * fromIntegral hb, hb * 10)
-  etoub <- chooseBoundedIntegral (etolb, 2 * etolb)
+  etoub <- chooseBoundedIntegral (max etolb (round $ (1.1 :: Double) * fromIntegral hb), 2 * etolb)
   faultProb <- case faultInjection of
     FaultInjection -> vectorOf (clusterSize + numLoneNodes) (elements [0.0, 0.001, 0.01])
     NoFaultInjection -> vectorOf (clusterSize + numLoneNodes) (pure 0)
