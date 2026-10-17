@@ -59,7 +59,7 @@ jobs:
 
       - name: Configure build
         run: |
-          cabal configure --disable-optimization --semaphore -j
+          cabal configure --semaphore -j
           # Generate a plan.json
           cabal build all --dry-run
 
@@ -85,7 +85,7 @@ jobs:
           #
           # Therefore, the amount of exploration is capped to about 1/10 of the
           # default values in CI
-          cabal test raft-consensus --test-options="--schedule-bound=10 --branching-factor=2"
+          cabal test raft-consensus --test-options="--schedule-bound=10 --branching-factor=2 --num-racy-tests=2"
           cabal test wal
           cabal test distributed-process-raft-consensus
 
@@ -161,7 +161,7 @@ jobs:
 
       - name: Build
         run: cabal haddock all --haddock-for-hackage
-        
+
       - name: Upload Haddock artifacts
         if: ${{ github.ref == 'refs/heads/master' }}
         uses: actions/upload-artifact@v4

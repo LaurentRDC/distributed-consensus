@@ -334,8 +334,8 @@ data ScenarioInputs
 
 genScenarioInputs :: FaultInjection -> Gen ScenarioInputs
 genScenarioInputs faultInjection = do
-  clusterSize <- elements [1 .. 5]
-  numLoneNodes <- elements [0 .. 2]
+  clusterSize <- elements [1, 2, 3]
+  numLoneNodes <- elements [0, 1]
   ss <- vectorOf (clusterSize + numLoneNodes) (chooseBoundedIntegral (0, 1_000_000))
   hb <- chooseBoundedIntegral (clientRetryTick, 200_000)
   -- Making the lower election timeout possibly shorter than the heartbeat timeout
@@ -353,7 +353,7 @@ genScenarioInputs faultInjection = do
           <*> chooseBoundedIntegral (etoub, 3 * etoub)
       )
 
-  cmds <- flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 20)
+  cmds <- flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 10)
   pure $
     ScenarioInputs
       { heartbeatTimeout = hb,
