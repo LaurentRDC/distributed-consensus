@@ -22,6 +22,7 @@ import Data.Functor ((<&>))
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
 import qualified Distributed.Consensus.Raft.Admin as Admin
 import Distributed.Consensus.Raft.Domain
@@ -53,7 +54,7 @@ import Distributed.Consensus.Raft.Implementation
     RaftTrace (..),
   )
 import qualified Distributed.Consensus.Raft.Implementation as Impl
-import Distributed.Consensus.Raft.Log (Lookup (..), (!?))
+import Distributed.Consensus.Raft.Log (Lookup (..), lastLogIndex, (!?))
 import qualified Distributed.Consensus.Raft.Log as Log
 import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import Distributed.Consensus.Raft.Transformer
@@ -371,8 +372,24 @@ handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode respo
 
         applyLogEntries
       else do
-        nextIndex %= Map.adjust pred responderNode
-        sendAppendEntriesTo responderNode -- Retry
+        lastIx <- use commandLog <&> lastLogIndex
+        -- Note that it's possible for a responder to not be known (we don't have its key
+        -- in `nextIndex`) due to in-flight cluster configuration changes. This is why
+        -- we have a fallback value (`fromMaybe`)
+        currentResponderIndex <- use (nextIndex . at responderNode) <&> fromMaybe (succ lastIx)
+
+        let backedOff =
+              max
+                -- minimum valid log index is 0, so the minimum next index
+                -- must be `succ 0`
+                (succ 0)
+                ( min
+                    (pred currentResponderIndex)
+                    (succ responderLogIndex)
+                )
+        nextIndex . at responderNode .= Just backedOff
+        when (backedOff < currentResponderIndex) $
+          sendAppendEntriesTo responderNode
 
 -- | How to handle a term provided by another node. If this term
 -- is larger than ours, this means that we must clear some state from
