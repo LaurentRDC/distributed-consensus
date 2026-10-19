@@ -186,7 +186,9 @@ mkServer network hbto etolb etoub seed node =
                   readVotedFor = \_ _ -> pure Nothing,
                   writeVotedFor = \_ _ _ -> pure (),
                   readSnapshot = \_ -> pure Nothing,
-                  writeSnapshot = \_ _ -> pure ()
+                  writeSnapshot = \_ _ -> pure (),
+                  readCommitIndex = \_ -> pure 0,
+                  writeCommitIndex = \_ _ -> pure ()
                 },
             stateMachine = step,
             networking =

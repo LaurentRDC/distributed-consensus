@@ -121,7 +121,12 @@ data Persistence entry node state m = Persistence
     -- This function also receives the node identification (of type @node@), which
     -- allows to persist data in a shared location for multiple nodes
     -- (e.g. in a remote database)
-    writeSnapshot :: node -> Snapshot node state -> m ()
+    writeSnapshot :: node -> Snapshot node state -> m (),
+    -- | Read the last persisted commit index. A default value of @0@ should be
+    -- returned if the commit index was never persisted
+    readCommitIndex :: node -> m LogIndex,
+    -- | Write the node's commit index durably.
+    writeCommitIndex :: node -> LogIndex -> m ()
   }
 
 -- | A 'Command' comes from clients

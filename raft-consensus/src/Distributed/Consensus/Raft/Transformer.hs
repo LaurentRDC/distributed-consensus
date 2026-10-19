@@ -21,6 +21,7 @@ module Distributed.Consensus.Raft.Transformer
     whenRole,
     sendHeartbeat,
     sendAppendEntriesTo,
+    setCommitIndex,
     voteFor,
     applyLogEntries,
     applyCommittedEntries,
@@ -77,6 +78,7 @@ import qualified Data.Set as Set
 import Data.Traversable (for)
 import Distributed.Consensus.Raft.Domain
   ( ClusterConfiguration (..),
+    LogIndex,
     RequestId (clientRequestId),
     Role (..),
     Snapshot (..),
@@ -324,6 +326,13 @@ updateCommitIndex = do
       trace (`CommitIndexIncreasedTo` lastIndex)
       pure True
 
+setCommitIndex :: (Monad m) => LogIndex -> RaftT entry node state result m ()
+setCommitIndex ix = do
+  impl <- view implementation
+  s <- self
+  commitIndex .= ix
+  lift $ impl.persistence.writeCommitIndex s ix
+
 -- | Set the current vote, both in the internal state
 -- but also in persisted state.
 --
@@ -569,15 +578,17 @@ serveReadOnlyQueries = whenRole Leader $ do
 -- as part of the 'InstallSnapshot' remote procedure call.
 applySnapshot :: (Monad m) => Snapshot node state -> RaftT entry node state result m ()
 applySnapshot snapshot = do
+  let snapshotIndex = snapshot.sMetadata.smLastIncludedIndex
+  alreadyApplied <- use lastApplied <&> (>= snapshotIndex)
   commandLog %= Log.applySnapshot snapshot.sMetadata
-  internalState .= sData snapshot
-  clusterConfiguration .= sCluster snapshot
 
-  -- In case we're applying a snapshot on state restore,
-  -- the commit index and last applied index might be
-  -- wrong
-  commitIndex %= max snapshot.sMetadata.smLastIncludedIndex
-  lastApplied %= max snapshot.sMetadata.smLastIncludedIndex
+  unless alreadyApplied $ do
+    internalState .= sData snapshot
+    clusterConfiguration .= sCluster snapshot
+
+    -- Commit index should never decrease
+    use commitIndex >>= \cix -> when (snapshotIndex > cix) (setCommitIndex snapshotIndex)
+    lastApplied %= max snapshot.sMetadata.smLastIncludedIndex
 
   trace (`SnapshotApplied` sMetadata snapshot)
 
@@ -618,17 +629,26 @@ appendLogEntries entries = do
   -- quorum to update our commit index
   applyLogEntries
 
-restoreState :: (Monad m) => RaftT entry node state result m ()
+restoreState ::
+  ( MonadMVar m,
+    MonadAsync m,
+    Ord node,
+    MonadMask m,
+    MonadFork m,
+    MonadDelay m
+  ) =>
+  RaftT entry node state result m ()
 restoreState = do
   impl <- view implementation
   s <- self
 
-  (persistedTerm, persistedVote, mPersistedSnapshot) <-
+  (persistedTerm, persistedVote, mPersistedSnapshot, persistedCommit) <-
     lift $ do
       t <- impl.persistence.readTerm s
-      (t,,)
+      (t,,,)
         <$> impl.persistence.readVotedFor s t
         <*> impl.persistence.readSnapshot s
+        <*> impl.persistence.readCommitIndex s
 
   term .= persistedTerm
   votedFor .= persistedVote
@@ -639,6 +659,7 @@ restoreState = do
 
   let restoredLog = Log.buildLog entries (sMetadata <$> mPersistedSnapshot)
   commandLog .= restoredLog
+  commitIndex .= min persistedCommit (Log.lastLogIndex restoredLog)
   traverse_ applySnapshot mPersistedSnapshot
 
   -- The snapshot only carries the configuration in the
@@ -652,6 +673,13 @@ restoreState = do
           persistedVote
           restoredLog
     )
+
+  restoredCommit <- use commitIndex
+  when (restoredCommit > 0) $ do
+    trace (`LastLogIndexChangedTo` Log.lastLogIndex restoredLog)
+    trace (`CommitIndexIncreasedTo` restoredCommit)
+
+  applyCommittedEntries
 
 becomeLeader ::
   ( Ord node,

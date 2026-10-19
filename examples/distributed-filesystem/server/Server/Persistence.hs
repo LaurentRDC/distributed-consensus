@@ -55,7 +55,9 @@ withServerPersistence dir f = do
                 readVotedFor = readVotedForFromFile,
                 writeVotedFor = writeVotedForToFile,
                 readSnapshot = readSnapshotFromWAL wal,
-                writeSnapshot = writeSnapshotToWAL wal
+                writeSnapshot = writeSnapshotToWAL wal,
+                readCommitIndex = readCommitIndexFromFile,
+                writeCommitIndex = writeCommitIndexToFile
               }
        in f persistence
   where
@@ -79,9 +81,13 @@ withServerPersistence dir f = do
 
     termFile = dir </> unsafeEncodeUtf "term"
     voteFile term = dir </> unsafeEncodeUtf "vote" <> OsPath.unsafeEncodeUtf (show (toInteger term))
+    commitIndexFile = dir </> unsafeEncodeUtf "commit_index"
 
     readTermFromFile _node = liftIO $ try (IO.readFile termFile) >>= either (\(_ :: SomeException) -> pure 0) (pure . Binary.decode)
     writeTermToFile _node = liftIO . IO.writeFile termFile . Binary.encode
+
+    readCommitIndexFromFile _node = liftIO $ try (IO.readFile commitIndexFile) >>= either (\(_ :: SomeException) -> pure 0) (pure . Binary.decode)
+    writeCommitIndexToFile _node = liftIO . IO.writeFile commitIndexFile . Binary.encode
 
     readVotedForFromFile _node term =
       liftIO $

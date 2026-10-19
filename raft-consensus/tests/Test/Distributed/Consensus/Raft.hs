@@ -510,7 +510,8 @@ data Environment s
     logPersistence :: IntMap (TVar (IOSim s) (Map LogIndex (Term, LogEntry Node Command))),
     votePersistence :: IntMap (TVar (IOSim s) (Map Term Node)),
     termPersistence :: IntMap (TVar (IOSim s) Term),
-    snapshotPersistence :: IntMap (TVar (IOSim s) (Maybe (Snapshot Node State)))
+    snapshotPersistence :: IntMap (TVar (IOSim s) (Maybe (Snapshot Node State))),
+    commitIndexPersistence :: IntMap (TVar (IOSim s) LogIndex)
   }
 
 newEnvironment :: Set Node -> IOSim s (Environment s)
@@ -528,6 +529,7 @@ newEnvironment nodes =
     <*> newPersistence mempty
     <*> newPersistence 0
     <*> newPersistence Nothing
+    <*> newPersistence 0
   where
     newMailbox =
       IntMap.fromList
@@ -558,7 +560,9 @@ mkServer debug resources hbto etolb etoub faultProb seed node =
                   readVotedFor = readVotedForTest resources.votePersistence,
                   writeVotedFor = writeVotedForTest resources.votePersistence,
                   readSnapshot = readTest resources.snapshotPersistence,
-                  writeSnapshot = \self snapshot -> writeTest resources.snapshotPersistence self (Just snapshot)
+                  writeSnapshot = \self snapshot -> writeTest resources.snapshotPersistence self (Just snapshot),
+                  readCommitIndex = readTest resources.commitIndexPersistence,
+                  writeCommitIndex = writeTest resources.commitIndexPersistence
                 },
             stateMachine = step,
             networking =

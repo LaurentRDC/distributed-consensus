@@ -96,6 +96,7 @@ import Distributed.Consensus.Raft.Transformer
     self,
     sendAppendEntriesTo,
     serveReadOnlyQueries,
+    setCommitIndex,
     term,
     trace,
     updateTerm,
@@ -342,7 +343,7 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
         ourCommitIndex <- use commitIndex
         when (leaderCommitIndex > ourCommitIndex) $ do
           let newCommitIndex = min leaderCommitIndex newLastEntry
-          commitIndex .= newCommitIndex
+          setCommitIndex newCommitIndex
           trace (`CommitIndexIncreasedTo` newCommitIndex)
           -- A follower takes the commit index from the leader; it must not
           -- try to re-derive it from match indices, which it doesn't track.
