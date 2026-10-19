@@ -38,6 +38,8 @@ module Distributed.Consensus.Raft.Transformer
     currentSnapshot,
     appendLogEntries,
     restoreState,
+    pendingClusterMembershipChanges,
+    proposeClusterMembership,
 
     -- ** Roles
     becomeFollower,
@@ -232,10 +234,7 @@ sendAppendEntriesTo destination = do
 applyEntry ::
   ( Ord node,
     MonadMVar m,
-    MonadAsync m,
-    MonadMask m,
-    MonadFork m,
-    MonadDelay m
+    MonadAsync m
   ) =>
   LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
 applyEntry (LogEntryCommand (Command reqId entry)) = do
@@ -254,20 +253,10 @@ applyEntry (LogEntryCommand (Command reqId entry)) = do
   pure $ Just (MkCommandResponse result reqId)
 applyEntry LogEntryLeaderChange = pure Nothing
 applyEntry (LogEntryMembershipChange clusterConf) = do
-  -- Cluster membership happens at append-time, not at apply-time
-  -- See 'adoptConfigurationFromLog'
-
-  -- If we just committed to a joint membership configuration,
-  -- then it's time to propose the move to the union
+  setClusterMembership clusterConf
   case clusterConf of
-    Simple cluster -> do
-      s <- self
-      whenRole Leader $ unless (s `Set.member` cluster) (becomeFollower Nothing)
-      trace MembershipChangeCompleted $> Nothing
-    Joint _before after -> do
-      whenRole Leader $
-        appendLogEntries (NonEmpty.singleton (LogEntryMembershipChange (Simple after)))
-      pure Nothing
+    Simple {} -> trace MembershipChangeCompleted $> Nothing
+    Joint {} -> pure Nothing
 
 -- | Updates the commit index. Returns 'True' if some log entries can be applied,
 -- and 'False' otherwise.
@@ -374,6 +363,7 @@ applyCommittedEntries = do
     lastApplied .= currentCommitIndex
     trace (`LastAppliedIndexIncreasedTo` currentCommitIndex)
 
+    confBefore <- use clusterConfiguration
     results <-
       mapM applyEntry unAppliedEntries
         -- Membership change commands don't return a result
@@ -406,6 +396,14 @@ applyCommittedEntries = do
         when
           (Seq.length (logEntries entries') > maxLog)
           (currentSnapshot >>= persistSnapshot)
+
+    -- If cluster configuration has changed, then the quorum
+    -- threshold may be different. Let's try to apply log entries
+    -- and unify the cluster membership
+    whenRole Leader $ do
+      reconfigured <- use clusterConfiguration <&> (/= confBefore)
+      when reconfigured applyLogEntries
+      unifyCluster
 
   -- Since the last applied index could have been updated,
   -- we might be able to serve some read-only requests
@@ -680,6 +678,53 @@ restoreState = do
     trace (`CommitIndexIncreasedTo` restoredCommit)
 
   applyCommittedEntries
+
+-- | Is a cluster membership change ongoing?
+pendingClusterMembershipChanges :: (Monad m) => RaftT entry node state result m Bool
+pendingClusterMembershipChanges =
+  (>) <$> use pendingConfigurationIndex <*> use lastApplied
+
+-- | Set the cluster membership configuration, updating
+-- the rest of the state as well.
+setClusterMembership ::
+  ( Ord node,
+    MonadMVar m,
+    MonadAsync m
+  ) =>
+  ClusterConfiguration node -> RaftT entry node state result m ()
+setClusterMembership clusterConf = do
+  clusterConfiguration .= clusterConf
+  trace (`MembershipChangeApplied` clusterConf)
+  whenRole Leader $ do
+    s <- self
+    ps <- peers
+    lastIx <- use commandLog <&> Log.lastLogIndex
+    -- Pre-emptively prepare state for new membership
+    nextIndex %= \m -> Map.fromSet (\p -> Map.findWithDefault (succ lastIx) p m) ps
+    matchIndex %= (`Map.restrictKeys` ps)
+    unless (s `Set.member` allNodes clusterConf) becomeNonMember
+
+proposeClusterMembership ::
+  ( MonadMVar m,
+    MonadAsync m,
+    Ord node,
+    MonadMask m,
+    MonadFork m,
+    MonadDelay m
+  ) =>
+  ClusterConfiguration node -> RaftT entry node state result m ()
+proposeClusterMembership clusterConf = do
+  use commandLog <&> succ . Log.lastLogIndex >>= assign pendingConfigurationIndex
+  appendLogEntries (NonEmpty.singleton (LogEntryMembershipChange clusterConf))
+
+-- | If the cluster is currently in a joint configuration, unify the
+-- membership to be in a simple configuration. Otherwise, do nothing.
+unifyCluster :: (MonadMVar m, MonadAsync m, Ord node, MonadMask m, MonadFork m, MonadDelay m) => RaftT entry node state result m ()
+unifyCluster = do
+  pending <- pendingClusterMembershipChanges
+  use clusterConfiguration >>= \case
+    Joint _ after | not pending -> proposeClusterMembership (Simple after)
+    _ -> pure ()
 
 becomeLeader ::
   ( Ord node,

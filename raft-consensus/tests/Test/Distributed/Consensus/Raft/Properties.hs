@@ -32,7 +32,7 @@ import Control.Monitor
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as Text
-import Distributed.Consensus.Raft (CommandResponse (..), EventContext (..), LogIndex, RaftTrace (..))
+import Distributed.Consensus.Raft (CommandResponse (..), EventContext (..), LogEntry (LogEntryMembershipChange), LogIndex, RaftTrace (..))
 import Test.Distributed.Consensus.Raft.Scenario
   ( Scenario,
     clusterMembershipChangeCompleted,
@@ -65,7 +65,8 @@ allProperties faultInjection =
           indexRelationshipProperty,
           monotonicallyIncreasingLastAppliedIndexProperty,
           monotonicallyIncreasingCommitIndexProperty,
-          crashRecoveryProperty
+          crashRecoveryProperty,
+          singleConfigurationChangeInFlight
         ]
       extras = case faultInjection of
         NoFaultInjection ->
@@ -193,6 +194,27 @@ allAcceptedCommandReceiveResponseProperty = go
             commandResponded >>= \(_, MkCommandResponse _result' reqId') ->
               predicate $ \_ -> unless (reqId == reqId') Nothing
        in eventually thisCommandResponded <?> "Never received a response for " <> Text.show reqId
+
+singleConfigurationChangeInFlight :: (Ord node) => Scenario entry result node state
+singleConfigurationChangeInFlight = go mempty <?> "A leader appended a configuration change while another was not completed"
+  where
+    go leaders =
+      step
+        ()
+        ( \case
+            LeaderElected (EventContext _ node) -> go (Map.insert node False leaders)
+            BecameFollower (EventContext _ node) -> go (Map.delete node leaders)
+            BecameCandidate (EventContext _ node) -> go (Map.delete node leaders)
+            BecameNonMember (EventContext _ node) -> go (Map.delete node leaders)
+            Crashed node -> go (Map.delete node leaders)
+            MembershipChangeApplied (EventContext _ node) _ -> go (Map.adjust (const False) node leaders)
+            LogEntryAppended (EventContext _ node) _ (LogEntryMembershipChange _) ->
+              case Map.lookup node leaders of
+                Just True -> assert "Expecting at most one unapplied configuration change" False
+                Just False -> go (Map.insert node True leaders)
+                Nothing -> go leaders
+            _ -> go leaders
+        )
 
 -- | Ensure that every cluster membership change that's accepted by a leader
 -- is seen through by the same leader

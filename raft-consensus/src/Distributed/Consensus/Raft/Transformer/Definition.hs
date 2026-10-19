@@ -32,6 +32,7 @@ module Distributed.Consensus.Raft.Transformer.Definition
     lastApplied,
     nextIndex,
     matchIndex,
+    pendingConfigurationIndex,
     yesVotes,
     nextRequestId,
     currentClientRequests,
@@ -122,6 +123,10 @@ data RaftState node entry state result = MkRaftState
     _lastApplied :: !LogIndex,
     _nextIndex :: !(Map node LogIndex),
     _matchIndex :: !(Map node LogIndex),
+    -- | Until this log index has been applied, a cluster configuration
+    -- change should not be started, possibly because another cluster
+    -- configuration change is ongoing.
+    _pendingConfigurationIndex :: !LogIndex,
     -- | Set of votes received in the current term
     _yesVotes :: !(Set node),
     _nextRequestId :: !InternalRequestId,
@@ -169,6 +174,7 @@ initialRaftState initRole seed clusterConf initialState =
       _lastApplied = 0,
       _nextIndex = mempty,
       _matchIndex = mempty,
+      _pendingConfigurationIndex = 0,
       _yesVotes = mempty,
       _nextRequestId = 0,
       _currentClientRequests = mempty,

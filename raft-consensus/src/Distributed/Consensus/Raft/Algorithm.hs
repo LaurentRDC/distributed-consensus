@@ -85,9 +85,11 @@ import Distributed.Consensus.Raft.Transformer
     matchIndex,
     nextIndex,
     peers,
+    pendingClusterMembershipChanges,
     pendingReadLeaderAcknowledgedBy,
     pendingReadRequests,
     persistSnapshot,
+    proposeClusterMembership,
     resetElectionTimer,
     resetHeartBeatTimer,
     restoreState,
@@ -539,19 +541,23 @@ handleClusterMembershipRequest request = do
         Just leader -> runSend $ Transformer.sendRPC leader (CM request) -- forward to leader
     Leader -> do
       s <- self
+      pending <- pendingClusterMembershipChanges
       let -- Whether the committed configuration already says what the requester
           -- is asking for.
           alreadySettled cluster = case request of
             ClusterMembershipJoinRequest r -> r `Set.member` cluster
             ClusterMembershipLeaveRequest r -> r `Set.notMember` cluster
+
+          ongoing = runSend $ Transformer.sendRPCResult requester (CMR (resultCtor (Left (OngoingClusterMembershipChange s))))
       use clusterConfiguration >>= \case
         -- By design, we cannot handle more than one membership request
         -- at a time. The requester must retry later.
         --
         -- Note the early return: previously this answered with an error and
         -- then went on to initiate a second, concurrent change anyway.
-        Joint {} -> runSend $ Transformer.sendRPCResult requester (CMR (resultCtor (Left (OngoingClusterMembershipChange s))))
+        Joint {} -> ongoing
         Simple cluster
+          | pending -> ongoing
           -- We distinguish between a request that succeeds the first
           -- and subsequent times to better track executions
           | alreadySettled cluster -> do
@@ -571,19 +577,9 @@ handleClusterMembershipRequest request = do
                       <*> currentSnapshot
                     )
                     >>= runSend . Transformer.sendRPC requester . IS
-                  appendLogEntries
-                    ( NonEmpty.singleton
-                        ( LogEntryMembershipChange
-                            (Joint cluster (Set.insert requester cluster))
-                        )
-                    )
+                  proposeClusterMembership (Joint cluster (Set.insert requester cluster))
                 ClusterMembershipLeaveRequest _ ->
-                  appendLogEntries
-                    ( NonEmpty.singleton
-                        ( LogEntryMembershipChange
-                            (Joint cluster (Set.delete requester cluster))
-                        )
-                    )
+                  proposeClusterMembership (Joint cluster (Set.delete requester cluster))
 
 handleClusterMembershipResult ::
   ( MonadDelay m,
