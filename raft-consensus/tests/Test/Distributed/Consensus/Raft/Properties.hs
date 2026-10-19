@@ -5,17 +5,6 @@
 module Test.Distributed.Consensus.Raft.Properties
   ( FaultInjection (..),
     allProperties,
-
-    -- * Individual properties
-    singleLeaderPerTermProperty,
-    singleVoteCastPerTermProperty,
-    monotonicallyIncreasingTermProperty,
-    allAcceptedCommandReceiveResponseProperty,
-    allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration,
-    indexRelationshipProperty,
-    monotonicallyIncreasingLastAppliedIndexProperty,
-    monotonicallyIncreasingCommitIndexProperty,
-    crashRecoveryProperty,
   )
 where
 
@@ -180,7 +169,6 @@ monotonicallyIncreasingCommitIndexProperty = go mempty <?> "Commit index not inc
                     (prevCommitIndex <= commitIndex)
 
               go (Map.insert node commitIndex acc)
-            Crashed node -> go (Map.delete node acc)
             _ -> go acc
         )
 

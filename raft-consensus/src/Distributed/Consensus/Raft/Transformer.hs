@@ -311,7 +311,7 @@ updateCommitIndex = do
     Seq.EmptyR -> pure False
     _ :> relativeLastIndex -> do
       let lastIndex = absoluteIndex entries relativeLastIndex
-      commitIndex .= lastIndex
+      setCommitIndex lastIndex
       trace (`CommitIndexIncreasedTo` lastIndex)
       pure True
 
@@ -657,6 +657,8 @@ restoreState = do
 
   let restoredLog = Log.buildLog entries (sMetadata <$> mPersistedSnapshot)
   commandLog .= restoredLog
+  -- Not persisting the commit index on purpose here,
+  -- since we're restoring from persisted state
   commitIndex .= min persistedCommit (Log.lastLogIndex restoredLog)
   traverse_ applySnapshot mPersistedSnapshot
 
