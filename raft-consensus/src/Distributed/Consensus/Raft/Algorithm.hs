@@ -76,6 +76,7 @@ import Distributed.Consensus.Raft.Transformer
     currentLeader,
     currentSnapshot,
     dequeueEvent,
+    enqueueEvent,
     eventQueue,
     exitLock,
     implementation,
@@ -616,5 +617,5 @@ handleAdminRequest req@(MkRequest reqId adminId command) = do
       runSend $ Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.JoinInitiated)
     LeaveCluster -> do
       s <- self
-      runSend $ Transformer.sendRPC s (CM (ClusterMembershipLeaveRequest s))
+      enqueueEvent (EventRPC (CM (ClusterMembershipLeaveRequest s)))
       runSend $ Transformer.sendAdminResponse adminId (MkResponse reqId mLeaderId Admin.LeaveInitiated)
