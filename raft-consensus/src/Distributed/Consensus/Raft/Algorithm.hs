@@ -61,7 +61,6 @@ import Distributed.Consensus.Raft.Transformer
   ( Config (..),
     RaftT,
     acceptClientRequests,
-    adoptConfigurationFromLog,
     appendLogEntries,
     applyCommittedEntries,
     applyLogEntries,
@@ -325,7 +324,6 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
           trace (\ctx -> LogEntryAppended ctx ix entry)
 
         commandLog %= (`Log.extend` newEntries)
-        adoptConfigurationFromLog
 
         newLastEntry <- use commandLog <&> Log.lastLogIndex
         trace (`LastLogIndexChangedTo` newLastEntry)

@@ -31,7 +31,6 @@ module Distributed.Consensus.Raft.Transformer
     acceptClientRequests,
     persistSnapshot,
     applySnapshot,
-    adoptConfigurationFromLog,
     isClusterMember,
     leaderStepDown,
     serveReadOnlyQueries,
@@ -517,24 +516,6 @@ persistSnapshot snapshot = do
         queue
         (EventSnapshotPersisted snapshot)
 
--- | Take the cluster configuration from the log, and bring our role into line
--- with it.
-adoptConfigurationFromLog :: (Monad m) => RaftT entry node state result m ()
-adoptConfigurationFromLog = do
-  entries <- use commandLog <&> logEntries
-
-  let latestLoggedConfiguration =
-        Foldable.foldl'
-          ( \acc -> \case
-              (_, LogEntryMembershipChange conf) -> Just conf
-              _ -> acc
-          )
-          Nothing
-          entries
-  -- With no membership entry in the log, whatever the snapshot gave us stands.
-  traverse_ (assign clusterConfiguration) latestLoggedConfiguration
-  traverse_ (\conf -> trace (`MembershipChangeApplied` conf)) latestLoggedConfiguration
-
 -- | Whether we are in the configuration we are currently using.
 isClusterMember :: (Ord node, Monad m) => RaftT entry node state result m Bool
 isClusterMember = do
@@ -613,8 +594,6 @@ appendLogEntries entries = do
   for_ batchToWrite $ \(ix, _, entry) ->
     trace (\ctx -> LogEntryAppended ctx ix entry)
 
-  adoptConfigurationFromLog
-
   -- It's important to emit this event because a new leader may have its
   -- log index jump. Without having visibility into this jump,
   -- it's hard to check that the commit index is always <= the last log index
@@ -661,10 +640,6 @@ restoreState = do
   -- since we're restoring from persisted state
   commitIndex .= min persistedCommit (Log.lastLogIndex restoredLog)
   traverse_ applySnapshot mPersistedSnapshot
-
-  -- The snapshot only carries the configuration in the
-  -- snapshot, but entries might have changed it
-  adoptConfigurationFromLog
 
   trace
     ( \ctx ->
