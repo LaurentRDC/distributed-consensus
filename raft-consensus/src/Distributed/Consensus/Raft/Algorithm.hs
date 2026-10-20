@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
@@ -252,8 +253,9 @@ handleClientRequest requests = do
             Read _ -> False
             Transition _ -> True
 
+      ourTerm <- use term
       traverse_
-        (appendLogEntries . fmap LogEntryCommand)
+        (appendLogEntries . fmap (\c -> (ourTerm, LogEntryCommand c)))
         (NonEmpty.nonEmpty $ NonEmpty.filter isNotReadOnly commands)
 
 handleAppendEntries ::
@@ -287,7 +289,7 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
               LogIndexInSnapshot _ ->
                 -- By snapshot construction, indices
                 prevLogIndex == lastIncludedIndex && previousLogTerm == lastIncludedTerm
-              Found (entryTerm, _) -> entryTerm == previousLogTerm
+              Found (!entryTerm, _, _) -> entryTerm == previousLogTerm
 
     ourTerm <- use term
     s <- self
@@ -318,10 +320,14 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
         -- TODO: optimize perhaps?
         commandLog %= (`Log.keepEntriesUpTo` prevLogIndex)
 
-        let batchToWrite = zipWith (\ix (t, e) -> (ix, t, e)) [firstNewIndex ..] (toList newEntries)
+        -- It's a little awkward to have to determine the log indices
+        -- of new entries before they're assigned.
+        -- Not clear if there's a better way to do this,
+        -- given that persistence must happen first
+        let batchToWrite = zipWith (\ix (t, e) -> (t, ix, e)) [firstNewIndex ..] (toList newEntries)
         lift $ impl.persistence.writeLogEntry s batchToWrite
-        for_ batchToWrite $ \(ix, _, entry) ->
-          trace (\ctx -> LogEntryAppended ctx ix entry)
+        for_ batchToWrite $ \(t, ix, entry) ->
+          trace (\ctx -> LogEntryAppended ctx t ix entry)
 
         commandLog %= (`Log.extend` newEntries)
 

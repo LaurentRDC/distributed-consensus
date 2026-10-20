@@ -90,13 +90,13 @@ data Persistence entry node state m = Persistence
   { -- | Read log entries, starting from and including, a given 'LogIndex'
     --
     -- Implementations should
-    readLogEntriesFrom :: node -> LogIndex -> m [(Term, LogEntry node entry)],
+    readLogEntriesFrom :: node -> LogIndex -> m [(Term, LogIndex, LogEntry node entry)],
     -- | Write log entries durably.
     --
     -- This function also receives the node identification (of type @node@), which
     -- allows to persist data in a shared location for multiple nodes
     -- (e.g. in a remote database)
-    writeLogEntry :: node -> [(LogIndex, Term, LogEntry node entry)] -> m (),
+    writeLogEntry :: node -> [(Term, LogIndex, LogEntry node entry)] -> m (),
     -- | Read the last persisted term. In case this is not known (for example, on a
     -- first boot), then the term should be @0@.
     readTerm :: node -> m Term,
@@ -275,8 +275,8 @@ instance (Show node) => Show (EventContext node) where
 data RaftTrace entry result node state
   = StateRestored (EventContext node) (Maybe node) (Log node (LogEntry node entry))
   | LeaderElected (EventContext node)
-  | VotedFor (EventContext node) Term node
-  | VoteRequestedBy (EventContext node) Term node
+  | VotedFor (EventContext node) !Term node
+  | VoteRequestedBy (EventContext node) !Term node
   | VoteGrantedFrom (EventContext node) node
   | VoteDeniedFrom (EventContext node) node
   | BecameCandidate (EventContext node)
@@ -288,7 +288,7 @@ data RaftTrace entry result node state
   | -- | Command received by the leader node. If the command needs to be redirected
     --    to another node, this event is not emitted
     -- All Commands should have the same request ID
-    CommandReceived (EventContext node) RequestId entry
+    CommandReceived (EventContext node) !RequestId entry
   | CommandResultResponded (EventContext node) (CommandResponse node (ClientResult result))
   | -- TODO: better traching of new joining/leaving cluster
     MembershipChangeInitiated (EventContext node)
@@ -296,17 +296,17 @@ data RaftTrace entry result node state
   | AdminRequestReceived (EventContext node) (AdminRequest node)
   | JoinedCluster (EventContext node)
   | LeftCluster (EventContext node)
-  | CommitIndexIncreasedTo (EventContext node) LogIndex
-  | LogEntryAppended (EventContext node) LogIndex (LogEntry node entry)
-  | ReadOnlyQueryQueued (EventContext node) LogIndex entry
-  | LastLogIndexChangedTo (EventContext node) LogIndex
-  | LogEntryApplied (EventContext node) entry
+  | CommitIndexIncreasedTo (EventContext node) !LogIndex
+  | LogEntryAppended (EventContext node) !Term !LogIndex (LogEntry node entry)
+  | ReadOnlyQueryQueued (EventContext node) !LogIndex entry
+  | LastLogIndexChangedTo (EventContext node) !LogIndex
+  | LogEntryApplied (EventContext node) !Term !LogIndex entry
   | MembershipChangeApplied (EventContext node) (ClusterConfiguration node)
   | -- | A leader was asked for a membership change that its committed
     -- configuration already satisfies, so it did nothing.
     MembershipChangeAlreadySettled (EventContext node) node
-  | LastAppliedIndexIncreasedTo (EventContext node) LogIndex
-  | SnapshotApplied (EventContext node) SnapshotMetadata
+  | LastAppliedIndexIncreasedTo (EventContext node) !LogIndex
+  | SnapshotApplied (EventContext node) !SnapshotMetadata
   | GracefulShutdown (EventContext node)
   | -- | The following event is emitted by the fault injector
     -- in deterministic simulation tests. Users should not rely

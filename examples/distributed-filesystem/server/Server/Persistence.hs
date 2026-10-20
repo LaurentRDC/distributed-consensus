@@ -12,6 +12,7 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Data.Binary as Binary
 import Data.Binary.Get (runGetOrFail)
 import qualified Data.ByteString.Lazy as BSL
+import Data.Foldable (traverse_)
 import Data.Functor ((<&>))
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List.NonEmpty (nonEmpty)
@@ -49,7 +50,7 @@ withServerPersistence dir f = do
             -- This means that we only ever need to read back the active segment (i.e. latest one)
             Persistence
               { readLogEntriesFrom = \_ -> readLogEntries wal,
-                writeLogEntry = \_processId -> maybe (pure ()) (appendMany wal) . nonEmpty . map Right,
+                writeLogEntry = \_processId -> traverse_ (appendMany wal) . nonEmpty . map Right,
                 readTerm = readTermFromFile,
                 writeTerm = writeTermToFile,
                 readVotedFor = readVotedForFromFile,
@@ -74,8 +75,8 @@ withServerPersistence dir f = do
         seg
         ( \case
             Left _ -> pure ()
-            Right (logIx, term, entry) ->
-              when (logIx >= minLogIndex) (modifyIORef' ref ((term, entry) :))
+            Right (term, logIx, entry) ->
+              when (logIx >= minLogIndex) (modifyIORef' ref ((term, logIx, entry) :))
         )
       reverse <$> liftIO (readIORef ref)
 

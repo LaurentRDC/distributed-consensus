@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE TupleSections #-}
@@ -99,7 +100,19 @@ import qualified Distributed.Consensus.Raft.Log as Log
 import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import Distributed.Consensus.Raft.Timer (Microseconds, resetTimer)
 import Distributed.Consensus.Raft.Transformer.Definition
-import Lens.Micro.Platform (assign, at, use, view, (%=), (+=), (.=), (<%=), (^.))
+import Lens.Micro.Platform
+  ( assign,
+    at,
+    use,
+    view,
+    (%=),
+    (+=),
+    (.=),
+    (<%=),
+    (^.),
+    _1,
+    _3,
+  )
 import System.Random (uniformR)
 
 -- | Node identifier
@@ -199,7 +212,7 @@ sendAppendEntriesTo destination = do
             Just destNextIndex ->
               let previousLogIndex = pred destNextIndex
                in case entries Log.!? previousLogIndex of
-                    Found (prevTerm, _) -> pure $ Just (previousLogIndex, prevTerm)
+                    Found (!prevTerm, _, _) -> pure $ Just (previousLogIndex, prevTerm)
                     NotFound -> pure $ Just (0, initialTerm)
                     -- The follower's next index is "lost" in the snapshot;
                     -- we can't specify entries to append. A snapshot will have
@@ -218,7 +231,7 @@ sendAppendEntriesTo destination = do
             <*> (view configuration <&> nodeId)
             <*> pure previousLogIndex
             <*> pure previousLogTerm
-            <*> pure toBeReplicated
+            <*> pure (((,) <$> view _1 <*> view _3) <$> toBeReplicated)
             <*> use commitIndex
           )
           >>= runSend . sendRPC destination . AE
@@ -235,8 +248,8 @@ applyEntry ::
     MonadMVar m,
     MonadAsync m
   ) =>
-  LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
-applyEntry (LogEntryCommand (Command reqId entry)) = do
+  Term -> LogIndex -> LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
+applyEntry entryTerm entryIndex (LogEntryCommand (Command reqId entry)) = do
   sm <- view implementation <&> stateMachine
   currState <- use internalState
   result <-
@@ -244,14 +257,14 @@ applyEntry (LogEntryCommand (Command reqId entry)) = do
       Read runRead -> pure $ runRead currState
       Transition runWrite -> do
         let (newState, result) = runWrite currState
-        trace (`LogEntryApplied` entry)
+        trace (\ctx -> LogEntryApplied ctx entryTerm entryIndex entry)
         internalState .= newState
 
         pure result
 
   pure $ Just (MkCommandResponse result reqId)
-applyEntry LogEntryLeaderChange = pure Nothing
-applyEntry (LogEntryMembershipChange clusterConf) = do
+applyEntry _entryTerm _entryIndex LogEntryLeaderChange = pure Nothing
+applyEntry _entryTerm _entryIndex (LogEntryMembershipChange clusterConf) = do
   setClusterMembership clusterConf
   case clusterConf of
     Simple {} -> trace MembershipChangeCompleted $> Nothing
@@ -287,7 +300,7 @@ updateCommitIndex = do
           )
           liveEntries
           & Seq.drop (fromIntegral relativeCommitIndex)
-          & Seq.filter ((== ourTerm) . fst . snd)
+          & Seq.filter ((== ourTerm) . view _1 . snd)
           & fmap fst
           -- By definition of the Raft algorithm, only a contiguous subset of
           -- indices can have been accepted with a quorum, hence the use of
@@ -352,7 +365,6 @@ applyCommittedEntries = do
             & (`Log.keepEntriesUpTo` currentCommitIndex)
             & logEntries
             & Seq.drop (fromIntegral (Log.relativeIndex entries lastAppliedIndex))
-            & fmap snd
 
     -- Claim the range before applying any of it. 'applyEntry' can re-enter this
     -- function -- a committed joint configuration makes the leader append the
@@ -364,7 +376,7 @@ applyCommittedEntries = do
 
     confBefore <- use clusterConfiguration
     results <-
-      mapM applyEntry unAppliedEntries
+      mapM (\(t, ix, e) -> applyEntry t ix e) unAppliedEntries
         -- Membership change commands don't return a result
         <&> fmap fromJust . Seq.filter isJust
 
@@ -490,7 +502,7 @@ currentSnapshot = do
   -- metadata fails, the leader backs up into the snapshot and installs it
   -- again, forever.
   let lastAppliedTerm = case entries Log.!? lastAppliedIndex of
-        Found (entryTerm, _) -> entryTerm
+        Found (entryTerm, _, _) -> entryTerm
         -- Already compacted into our own snapshot, whose metadata knows the term.
         LogIndexInSnapshot (SnapshotMetadata _ snapshotTerm) -> snapshotTerm
         -- Cannot happen: 'lastApplied' never runs past the log.
@@ -580,19 +592,22 @@ appendLogEntries ::
     MonadFork m,
     MonadDelay m
   ) =>
-  NonEmpty (LogEntry node entry) ->
+  NonEmpty (Term, LogEntry node entry) ->
   RaftT entry node state result m ()
 appendLogEntries entries = do
-  ourTerm <- use term
   s <- self
   impl <- view implementation
   startingLogIndex <- use commandLog <&> Log.lastLogIndex
-  commandLog %= (`Log.extend` ((ourTerm,) <$> Seq.fromList (NonEmpty.toList entries)))
+  commandLog %= (`Log.extend` Seq.fromList (NonEmpty.toList entries))
 
-  let batchToWrite = zip3 [succ startingLogIndex ..] (repeat ourTerm) (NonEmpty.toList entries)
+  let batchToWrite =
+        zipWith
+          (curry (\(ix, (t, entry)) -> (t, ix, entry)))
+          [succ startingLogIndex ..]
+          (NonEmpty.toList entries)
   lift $ impl.persistence.writeLogEntry s batchToWrite
-  for_ batchToWrite $ \(ix, _, entry) ->
-    trace (\ctx -> LogEntryAppended ctx ix entry)
+  for_ batchToWrite $ \(t, ix, entry) ->
+    trace (\ctx -> LogEntryAppended ctx t ix entry)
 
   -- It's important to emit this event because a new leader may have its
   -- log index jump. Without having visibility into this jump,
@@ -692,7 +707,8 @@ proposeClusterMembership ::
   ClusterConfiguration node -> RaftT entry node state result m ()
 proposeClusterMembership clusterConf = do
   use commandLog <&> succ . Log.lastLogIndex >>= assign pendingConfigurationIndex
-  appendLogEntries (NonEmpty.singleton (LogEntryMembershipChange clusterConf))
+  ourTerm <- use term
+  appendLogEntries (NonEmpty.singleton (ourTerm, LogEntryMembershipChange clusterConf))
 
 -- | If the cluster is currently in a joint configuration, unify the
 -- membership to be in a simple configuration. Otherwise, do nothing.
@@ -724,13 +740,14 @@ becomeLeader = do
 
   -- In order to serve read-only queries, there needs to be at least
   -- one entry committed in this term (see Raft paper, section 8)
-  appendLogEntries (NonEmpty.singleton LogEntryLeaderChange)
+  ourTerm <- use term
+  appendLogEntries (NonEmpty.singleton (ourTerm, LogEntryLeaderChange))
 
   -- cluster configuration could be ongoing, started under a different leader
   use clusterConfiguration >>= \case
     Simple _ -> pure ()
     Joint _before after ->
-      appendLogEntries (NonEmpty.singleton (LogEntryMembershipChange (Simple after)))
+      appendLogEntries (NonEmpty.singleton (ourTerm, LogEntryMembershipChange (Simple after)))
 
   sendHeartbeat -- Note that 'sendHeartbeat' will also reset the heartbeat timer
 

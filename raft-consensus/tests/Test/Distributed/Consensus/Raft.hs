@@ -684,18 +684,18 @@ writeLogEntryTest ::
   (MonadSTM m) =>
   IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) ->
   Node ->
-  [(LogIndex, Term, LogEntry Node Command)] ->
+  [(Term, LogIndex, LogEntry Node Command)] ->
   m ()
 writeLogEntryTest storage self batch = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
   Just var -> atomically $ do
     log' <- readTVar var
-    writeTVar var (log' <> Map.fromList [(ix, (term, entry)) | (ix, term, entry) <- batch])
+    writeTVar var (log' <> Map.fromList [(ix, (term, entry)) | (term, ix, entry) <- batch])
 
-readLogEntriesFromTest :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) -> Node -> LogIndex -> m [(Term, LogEntry Node Command)]
+readLogEntriesFromTest :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) -> Node -> LogIndex -> m [(Term, LogIndex, LogEntry Node Command)]
 readLogEntriesFromTest storage self logIndex = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
-  Just var -> readTVarIO var <&> Map.elems . Map.filterWithKey (\ix _ -> ix >= logIndex)
+  Just var -> readTVarIO var <&> fmap (\(ix, (term, entry)) -> (term, ix, entry)) . Map.toAscList . Map.filterWithKey (\ix _ -> ix >= logIndex)
 
 writeVotedForTest :: (MonadSTM m) => IntMap (TVar m (Map Term Node)) -> Node -> Term -> Maybe Node -> m ()
 writeVotedForTest storage self term value = case IntMap.lookup (fromIntegral self) storage of

@@ -40,7 +40,7 @@ newtype RelativeLogIndex = RelativeLogIndex LogIndex
   deriving newtype (Real, Enum, Num, Integral)
 
 data Log node entry = Log
-  { lEntries :: !(Seq (Term, entry)),
+  { lEntries :: !(Seq (Term, LogIndex, entry)),
     lSnapshotMetadata :: !SnapshotMetadata,
     -- Metadata stored for performance reasons
     lLastIndex :: !LogIndex,
@@ -48,7 +48,7 @@ data Log node entry = Log
   }
   deriving (Eq, Show)
 
-buildLog :: Seq (Term, entry) -> Maybe SnapshotMetadata -> Log node entry
+buildLog :: Seq (Term, LogIndex, entry) -> Maybe SnapshotMetadata -> Log node entry
 buildLog entries mMetadata =
   let metadata = fromMaybe (SnapshotMetadata 0 0) mMetadata
    in Log
@@ -57,7 +57,7 @@ buildLog entries mMetadata =
           lLastIndex = smLastIncludedIndex metadata + fromIntegral (length entries),
           lLastTerm = case Seq.viewr entries of
             Seq.EmptyR -> smLastIncludedTerm metadata
-            _ Seq.:> (lastTerm, _) -> lastTerm
+            _ Seq.:> (lastTerm, _, _) -> lastTerm
         }
 
 relativeIndex :: Log node entry -> LogIndex -> RelativeLogIndex
@@ -69,17 +69,18 @@ absoluteIndex (Log _ ((SnapshotMetadata !lastIx _)) _ _) (RelativeLogIndex !ix) 
 {-# INLINEABLE absoluteIndex #-}
 
 append :: Log node entry -> (Term, entry) -> Log node entry
-Log es sn lst _ `append` (!term, !newEntry) = Log (es Seq.|> (term, newEntry)) sn (succ lst) term
+Log es sn lst _ `append` (!term, !newEntry) = Log (es Seq.|> (term, succ lst, newEntry)) sn (succ lst) term
 {-# INLINEABLE append #-}
 
 extend :: Log node entry -> Seq (Term, entry) -> Log node entry
 Log es sn lst lt `extend` !newEntries =
   Log
-    (es Seq.>< newEntries)
+    (es Seq.>< Seq.zipWith (\ix (t, e) -> (t, ix, e)) indices newEntries)
     sn
     (lst + fromIntegral (Seq.length newEntries))
     newLastTerm
   where
+    indices = Seq.fromList $ take (length newEntries) [succ lst ..]
     newLastTerm = case Seq.viewr newEntries of
       Seq.EmptyR -> lt
       (_ Seq.:> (t, _)) -> t
@@ -96,16 +97,16 @@ log'@(Log es sn@((SnapshotMetadata lastIx lastSnapshotTerm)) lst _) `keepEntries
       let kept = Seq.take (fromIntegral $ relativeIndex log' ix) es
           term = case Seq.viewr kept of
             Seq.EmptyR -> lastSnapshotTerm
-            _ Seq.:> (keptLastTerm, _) -> keptLastTerm
+            _ Seq.:> (keptLastTerm, _, _) -> keptLastTerm
        in Log kept sn ix term
 
 data Lookup a
   = LogIndexInSnapshot SnapshotMetadata
-  | Found a
+  | Found !a
   | NotFound
   deriving (Functor)
 
-(!?) :: Log node entry -> LogIndex -> Lookup (Term, entry)
+(!?) :: Log node entry -> LogIndex -> Lookup (Term, LogIndex, entry)
 (!?) log'@(Log es meta@(SnapshotMetadata lst _) _ _) ix
   | ix <= lst = LogIndexInSnapshot meta
   | otherwise =
@@ -114,7 +115,7 @@ data Lookup a
         -- is traditionally one-based indexing, hence the -1 offset
         es Seq.!? (fromIntegral (relativeIndex log' ix) - 1)
 
-logEntries :: Log node entry -> Seq (Term, entry)
+logEntries :: Log node entry -> Seq (Term, LogIndex, entry)
 logEntries = lEntries
 
 newLog :: Log node entry

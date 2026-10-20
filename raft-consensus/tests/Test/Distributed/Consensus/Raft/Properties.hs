@@ -196,7 +196,7 @@ singleConfigurationChangeInFlight = go mempty <?> "A leader appended a configura
             BecameNonMember (EventContext _ node) -> go (Map.delete node leaders)
             Crashed node -> go (Map.delete node leaders)
             MembershipChangeApplied (EventContext _ node) _ -> go (Map.adjust (const False) node leaders)
-            LogEntryAppended (EventContext _ node) _ (LogEntryMembershipChange _) ->
+            LogEntryAppended (EventContext _ node) _ _ (LogEntryMembershipChange _) ->
               case Map.lookup node leaders of
                 Just True -> assert "Expecting at most one unapplied configuration change" False
                 Just False -> go (Map.insert node True leaders)

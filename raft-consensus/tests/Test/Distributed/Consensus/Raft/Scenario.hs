@@ -156,9 +156,9 @@ commitIndexIncreased = predicate $ \case
   (CommitIndexIncreasedTo ctx logIndex) -> Just (ctx, logIndex)
   _ -> Nothing
 
-logEntryApplied :: Predicate (RaftTrace entry result node state) (EventContext node, entry)
+logEntryApplied :: Predicate (RaftTrace entry result node state) (EventContext node, (Term, LogIndex, entry))
 logEntryApplied = predicate $ \case
-  (LogEntryApplied ctx entry) -> Just (ctx, entry)
+  (LogEntryApplied ctx entryTerm entryLog entry) -> Just (ctx, (entryTerm, entryLog, entry))
   _ -> Nothing
 
 crashed :: Predicate (RaftTrace entry result node state) node
