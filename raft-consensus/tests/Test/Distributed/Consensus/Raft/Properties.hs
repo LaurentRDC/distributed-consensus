@@ -21,7 +21,7 @@ import Control.Monitor
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as Text
-import Distributed.Consensus.Raft (CommandResponse (..), EventContext (..), LogEntry (LogEntryMembershipChange), LogIndex, RaftTrace (..))
+import Distributed.Consensus.Raft (CommandResponse (..), EventContext (..), LogEntry (LogEntryMembershipChange), LogIndex, RaftTrace (..), SnapshotMetadata (SnapshotMetadata))
 import Test.Distributed.Consensus.Raft.Scenario
   ( Scenario,
     clusterMembershipChangeCompleted,
@@ -45,11 +45,25 @@ data FaultInjection
 
 -- It's still not clear to me why, but without the explicit forall here,
 -- RaftTrace events don't get picked up.
-allProperties :: forall entry result node state. (Ord node, Show node) => FaultInjection -> Scenario entry result node state
+allProperties ::
+  forall entry result node state.
+  ( Eq entry,
+    Ord node,
+    Show node,
+    Show entry
+  ) =>
+  FaultInjection -> Scenario entry result node state
 allProperties faultInjection =
-  let common =
+  let -- Properties in Figure 3 of the Raft paper
+      coreRaftProperties =
         [ singleLeaderPerTermProperty,
-          singleVoteCastPerTermProperty,
+          -- TODO: leader append-only
+          logMatchingProperty,
+          -- TODO: leader completeness
+          stateMachineSafetyProperty
+        ]
+      otherProperties =
+        [ singleVoteCastPerTermProperty,
           monotonicallyIncreasingTermProperty,
           indexRelationshipProperty,
           monotonicallyIncreasingLastAppliedIndexProperty,
@@ -57,7 +71,7 @@ allProperties faultInjection =
           crashRecoveryProperty,
           singleConfigurationChangeInFlight
         ]
-      extras = case faultInjection of
+      noFaultProperties = case faultInjection of
         NoFaultInjection ->
           [ allAcceptedCommandReceiveResponseProperty,
             allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration,
@@ -66,7 +80,7 @@ allProperties faultInjection =
           ]
         FaultInjection -> []
    in void $
-        allOf (common <> extras)
+        allOf (coreRaftProperties <> otherProperties <> noFaultProperties)
 
 -- | Ensure that in each term where a leader is elected, no other leader
 -- is elected
@@ -305,6 +319,87 @@ indexRelationshipProperty = go mempty <?> "index relationship did not hold"
               checkState node newAcc
               go newAcc
             Crashed node -> go (Map.delete node acc)
+            _ -> go acc
+        )
+
+-- | If two logs contain an entry with the same index and term, then the
+-- logs are identical in all entries up through the given index
+logMatchingProperty :: (Ord node, Eq entry) => Scenario entry result node state
+logMatchingProperty = go mempty mempty <?> "Conflicting entries appended at the same index and term"
+  where
+    go logs seen =
+      step
+        ()
+        ( \case
+            LogEntryAppended (EventContext _ node) term logIndex entry -> do
+              let prefix = Map.takeWhileAntitone (< logIndex) (Map.findWithDefault mempty node logs)
+
+              assert
+                "Expecting a contiguous log"
+                (logIndex == 1 || Map.member (pred logIndex) prefix)
+
+              case Map.lookup (term, logIndex) seen of
+                Nothing -> pure ()
+                Just (entry', prefix') -> do
+                  assert "Different entries for the same term and log index" (entry == entry')
+                  assert
+                    ( "Log prefix before term "
+                        <> Text.show term
+                        <> " and log index "
+                        <> Text.show logIndex
+                        <> " differs"
+                    )
+                    (prefix == prefix')
+
+              go
+                (Map.insert node (Map.insert logIndex term prefix) logs)
+                (Map.insertWith (\_ old -> old) (term, logIndex) (entry, prefix) seen)
+            -- A snapshot is special because it serves as the log prefix
+            SnapshotApplied (EventContext _ node) (SnapshotMetadata lastLogIndex lastTerm) -> do
+              let thisNode = Map.findWithDefault mempty node logs
+              case Map.lookup (lastTerm, lastLogIndex) seen of
+                Nothing -> do
+                  assert
+                    ( "Expecting a snapshot at term "
+                        <> Text.show lastTerm
+                        <> " and log index "
+                        <> Text.show lastLogIndex
+                    )
+                    False
+                  go logs seen
+                Just (_, prefix) ->
+                  let following
+                        | Map.lookup lastLogIndex thisNode == Just lastTerm = snd (Map.split lastLogIndex thisNode)
+                        | otherwise = mempty
+                   in go
+                        (Map.insert node (Map.insert lastLogIndex lastTerm prefix <> following) logs)
+                        seen
+            _ -> go logs seen
+        )
+
+-- | If a node has applied a log entry at a given index to its state machine, no other node
+-- will ever apply a different log entry for the same index.
+stateMachineSafetyProperty :: (Show entry, Eq entry) => Scenario entry result node state
+stateMachineSafetyProperty = go mempty <?> "Conflicting entries applied at the same index"
+  where
+    go acc =
+      step
+        ()
+        ( \case
+            LogEntryApplied _ term logIndex entry -> do
+              case Map.lookup logIndex acc of
+                -- First time this entry has been seen
+                Nothing -> go (Map.insert logIndex (term, entry) acc)
+                Just (term', entry') ->
+                  assert
+                    ( "Expecting the same entry to be applied at index "
+                        <> Text.show logIndex
+                        <> " but saw "
+                        <> Text.show (term', entry')
+                        <> " and "
+                        <> Text.show (term, entry)
+                    )
+                    (term' == term && entry' == entry)
             _ -> go acc
         )
 
