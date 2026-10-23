@@ -401,18 +401,29 @@ handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode respo
 
 -- | How to handle a term provided by another node. If this term
 -- is larger than ours, this means that we must clear some state from
--- the previous term.
+-- the previous term, and possibly transition to a new role.
 --
 -- Returns the comparison between the incoming term and our term before this function ran.
 -- Therefore, a return value of 'GT' means that the term provided as input was larger than
 -- our term.
 handleTermNumber ::
-  (MonadMVar m) =>
+  ( MonadMVar m,
+    MonadDelay m,
+    MonadFork m,
+    MonadMask m,
+    MonadAsync m
+  ) =>
   Term -> RaftT entry node state result m Ordering
 handleTermNumber newTerm = do
   (currTerm, _newTerm) <- updateTerm (const newTerm)
 
-  when (newTerm > currTerm) (voteFor Nothing)
+  when (newTerm > currTerm) $ do
+    voteFor Nothing
+    use role >>= \case
+      Leader -> becomeFollower Nothing
+      Candidate -> becomeFollower Nothing
+      Follower -> pure ()
+      NonMember -> pure ()
 
   pure $ compare newTerm currTerm
 
@@ -506,7 +517,10 @@ handleInstallSnapshot (InstallSnapshot leaderTerm leaderNode snapshot) =
 handleInstallSnapshotResult ::
   ( Ord node,
     MonadMVar m,
-    MonadAsync m
+    MonadAsync m,
+    MonadMask m,
+    MonadFork m,
+    MonadDelay m
   ) =>
   InstallSnapshotResult node -> RaftT entry node state result m ()
 handleInstallSnapshotResult (InstallSnapshotResult responderTerm responderNode (SnapshotMetadata lastIncludedIndex _)) = do

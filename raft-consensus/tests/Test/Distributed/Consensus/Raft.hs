@@ -18,7 +18,7 @@ where
 import Control.Concurrent.Class.MonadMVar (MVar, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.Class.MonadSTM (MonadSTM, TQueue, TVar, atomically, flushTQueue, newTQueueIO, newTVarIO, readTQueue, readTVar, readTVarIO, retry, writeTQueue, writeTVar)
 import Control.Exception (Exception)
-import Control.Monad (replicateM, when)
+import Control.Monad (replicateM, unless, when)
 import Control.Monad.Class.MonadAsync (async, asyncThreadId, concurrently_, forConcurrently_, race_, waitCatch, withAsync)
 import Control.Monad.Class.MonadFork (ThreadId, throwTo)
 import Control.Monad.Class.MonadTest (exploreRaces)
@@ -60,7 +60,7 @@ import qualified Distributed.Consensus.Raft as Raft
 import Distributed.Consensus.Raft.Admin
 import qualified Distributed.Consensus.Raft.Admin as Admin
 import Distributed.Consensus.Raft.Client (ClientImplementation (..), ClientRequest, ClientResponse, RaftClientT, request, withRaftClientT)
-import System.Random (mkStdGen64, uniformR)
+import System.Random (RandomGen, mkStdGen64, randomR, uniformR)
 import Test.Distributed.Consensus.Raft.Options (PrintTrace (..), setNumRacyTests, withExplorationOptions, withPrintTraceOption)
 import Test.Distributed.Consensus.Raft.Properties (FaultInjection (..), allProperties)
 import Test.Distributed.Consensus.Raft.Scenario (checkScenario)
@@ -144,64 +144,63 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
     debug = case printTrace of
       PrintTrace False -> id
       PrintTrace True -> Debug.traceShowId
-    scenario scenarioInputs = do
-      (harness :: Harness s) <- testHarness debug scenarioInputs
+    scenario scenarioInputs =
+      testHarness debug scenarioInputs $ \(harness :: Harness s) -> do
+        -- In order to detect infinite loops, especially in CI,
+        -- we use a *very generous* scenario timeout.
+        let timeStep = max clientRetryTick scenarioInputs.electionTimeoutUpperBound
+            scenarioTimeUpperBound =
+              10 * timeStep -- Baseline
+              -- To ensure all lone nodes have time to join, and then leave
+                + 3
+                  * maybe 0 maximum (nonEmpty $ sum <$> scenarioInputs.loneNodesWait)
+                -- To ensure all client requests have time to be served
+                + 3
+                  * genericLength scenarioInputs.commands
+                  * timeStep
+                -- To ensure membership changes have time to land
+                + 3
+                  * 6 -- 6 attempts
+                  * timeStep
 
-      -- In order to detect infinite loops, especially in CI,
-      -- we use a *very generous* scenario timeout.
-      let timeStep = max clientRetryTick scenarioInputs.electionTimeoutUpperBound
-          scenarioTimeUpperBound =
-            10 * timeStep -- Baseline
-            -- To ensure all lone nodes have time to join, and then leave
-              + 3
-                * maybe 0 maximum (nonEmpty $ sum <$> scenarioInputs.loneNodesWait)
-              -- To ensure all client requests have time to be served
-              + 3
-                * genericLength scenarioInputs.commands
-                * timeStep
-              -- To ensure membership changes have time to land
-              + 3
-                * 6 -- 6 attempts
-                * timeStep
+        race_
+          (threadDelay (fromIntegral scenarioTimeUpperBound) >> fail "Possible infinite loop detected")
+          ( do
+              withRaftAdminT harness.hAdminNode harness.hAdminSpec $ \runAdminAction ->
+                -- Run servers until the clients are done interacting
+                withAsync (runServers harness runAdminAction) $ \_ -> do
+                  -- Likewise, one client session for the whole command sequence,
+                  -- so that request IDs are unique across commands.
+                  withRaftClientT harness.hClientNode harness.hClientSpec $ \runClientAction ->
+                    runClient
+                      runClientAction
+                      -- In principle, there is no upper bound on how long a
+                      -- client can wait to receive a message. I'm putting a generous
+                      -- bound here because I have seen situations where the client never
+                      -- receives a reply (due to a bug)
+                      (10 * scenarioInputs.electionTimeoutUpperBound)
+                      (clientRetryBudget scenarioInputs)
+                      mempty -- initial state
+                      scenarioInputs.commands
 
-      race_
-        (threadDelay (fromIntegral scenarioTimeUpperBound) >> fail "Possible infinite loop detected")
-        ( do
-            withRaftAdminT harness.hAdminNode harness.hAdminSpec $ \runAdminAction ->
-              -- Run servers until the clients are done interacting
-              withAsync (runServers harness runAdminAction) $ \_ -> do
-                -- Likewise, one client session for the whole command sequence,
-                -- so that request IDs are unique across commands.
-                withRaftClientT harness.hClientNode harness.hClientSpec $ \runClientAction ->
-                  runClient
-                    runClientAction
-                    -- In principle, there is no upper bound on how long a
-                    -- client can wait to receive a message. I'm putting a generous
-                    -- bound here because I have seen situations where the client never
-                    -- receives a reply (due to a bug)
-                    (10 * scenarioInputs.electionTimeoutUpperBound)
-                    (clientRetryBudget scenarioInputs)
-                    mempty -- initial state
-                    scenarioInputs.commands
+                  -- We give an opportunity to all lone servers to leave the cluster
+                  -- properly before we shut everyone down.
+                  let shutDownNode node =
+                        let tryShutDown :: Int -> IOSim s ()
+                            tryShutDown 0 = pure ()
+                            tryShutDown attemptsLeft =
+                              timeout
+                                (fromIntegral scenarioInputs.electionTimeoutUpperBound)
+                                (runAdminAction (Admin.shutDown 1_000_000 node))
+                                >>= maybe (tryShutDown (attemptsLeft - 1)) (const (pure ()))
+                         in tryShutDown 3
 
-                -- We give an opportunity to all lone servers to leave the cluster
-                -- properly before we shut everyone down.
-                let shutDownNode node =
-                      let tryShutDown :: Int -> IOSim s ()
-                          tryShutDown 0 = pure ()
-                          tryShutDown attemptsLeft =
-                            timeout
-                              (fromIntegral scenarioInputs.electionTimeoutUpperBound)
-                              (runAdminAction (Admin.shutDown 1_000_000 node))
-                              >>= maybe (tryShutDown (attemptsLeft - 1)) (const (pure ()))
-                       in tryShutDown 3
-
-                forConcurrently_ harness.loneServers $ \(server, isDone, _, _) -> do
-                  takeMVar isDone
-                  shutDownNode server.sConfig.nodeId
-                forConcurrently_ harness.clusterServers $ \server ->
-                  shutDownNode server.sConfig.nodeId
-        )
+                  forConcurrently_ harness.loneServers $ \(server, isDone, _, _) -> do
+                    takeMVar isDone
+                    shutDownNode server.sConfig.nodeId
+                  forConcurrently_ harness.clusterServers $ \server ->
+                    shutDownNode server.sConfig.nodeId
+          )
     runServers ::
       Harness s ->
       (forall a. RaftAdminT Node (IOSim s) a -> IOSim s a) ->
@@ -325,6 +324,8 @@ data ScenarioInputs
     electionTimeoutUpperBound :: Microseconds,
     seeds :: [Word64],
     faultProbabilities :: [Double],
+    partitionSeed :: Word64,
+    partitionProbability :: Double,
     numInitialClusterNodes :: Int,
     numInitialLoneNodes :: Int,
     loneNodesWait :: [(Microseconds, Microseconds)],
@@ -345,6 +346,11 @@ genScenarioInputs faultInjection = do
   faultProb <- case faultInjection of
     FaultInjection -> vectorOf (clusterSize + numLoneNodes) (elements [0.0, 0.001, 0.01])
     NoFaultInjection -> vectorOf (clusterSize + numLoneNodes) (pure 0)
+
+  pSeed <- chooseBoundedIntegral (0, 1_000_000)
+  pProb <- case faultInjection of
+    FaultInjection -> elements [0.0, 0.2]
+    NoFaultInjection -> pure 0
   loneWaits <-
     vectorOf
       numLoneNodes
@@ -361,6 +367,8 @@ genScenarioInputs faultInjection = do
         electionTimeoutUpperBound = etoub,
         seeds = ss,
         faultProbabilities = faultProb,
+        partitionSeed = pSeed,
+        partitionProbability = pProb,
         numInitialClusterNodes = clusterSize,
         numInitialLoneNodes = numLoneNodes,
         loneNodesWait = loneWaits,
@@ -494,6 +502,8 @@ untilMembership direction runAdminAction initialContact requestTimeout betweenAt
 
 type Mailbox s m = IntMap (TQueue (IOSim s) m)
 
+type TopologyConstraints s = TVar (IOSim s) (Map Node (Set Node))
+
 data NetworkFabric s
   = MkNetworkFabric
   { rpcMailbox :: Mailbox s (RPC Node Command State),
@@ -501,7 +511,15 @@ data NetworkFabric s
     requestsMailbox :: Mailbox s (ClientRequest Node Command),
     responsesMailbox :: Mailbox s (ClientResponse Node Result),
     adminMailbox :: Mailbox s (AdminRequest Node),
-    adminResponsesMailbox :: Mailbox s (AdminResponse Node)
+    adminResponsesMailbox :: Mailbox s (AdminResponse Node),
+    -- Simulating a network partition by prevent messages sent
+    -- from given nodes to reach other nodes.
+    --
+    -- This design allows for asymmetric network partisions, since
+    -- Map.fromList [A, Set.fromList [B]] means A can't send messages
+    -- to B, but B  can send messages to A. Not clear if this is representative
+    -- of something that is possible, but it comes for free.
+    topologyConstraints :: TopologyConstraints s
   }
 
 data Environment s
@@ -524,6 +542,7 @@ newEnvironment nodes =
             <*> newMailbox
             <*> newMailbox
             <*> newMailbox
+            <*> newTVarIO mempty -- no contraints at first
         )
     <*> newPersistence mempty
     <*> newPersistence mempty
@@ -567,10 +586,10 @@ mkServer debug resources hbto etolb etoub faultProb seed node =
             stateMachine = step,
             networking =
               Networking
-                { sendRPC = send resources.networkFabric.rpcMailbox,
-                  sendRPCResult = send resources.networkFabric.rpcResultsMailbox,
-                  sendClientResponse = send resources.networkFabric.responsesMailbox,
-                  sendAdminResponse = send resources.networkFabric.adminResponsesMailbox,
+                { sendRPC = send resources.networkFabric.rpcMailbox resources.networkFabric.topologyConstraints node,
+                  sendRPCResult = send resources.networkFabric.rpcResultsMailbox resources.networkFabric.topologyConstraints node,
+                  sendClientResponse = send resources.networkFabric.responsesMailbox resources.networkFabric.topologyConstraints node,
+                  sendAdminResponse = send resources.networkFabric.adminResponsesMailbox resources.networkFabric.topologyConstraints node,
                   receiveRPC = receive resources.networkFabric.rpcMailbox node,
                   receiveRPCResult = receive resources.networkFabric.rpcResultsMailbox node,
                   receiveClientRequests = receiveAll resources.networkFabric.requestsMailbox node,
@@ -614,12 +633,47 @@ testHarness ::
   forall s.
   (forall a. (Show a) => a -> a) ->
   ScenarioInputs ->
-  IOSim s (Harness s)
+  (Harness s -> IOSim s ()) ->
+  IOSim s ()
 testHarness
   debug
-  (ScenarioInputs hb etlb etup s faultProbs numClusterNodes numLoneNodes loneWaits _commands) = do
-    resources <-
-      newEnvironment $
+  (ScenarioInputs hb etlb etup s faultProbs pSeed pProb numClusterNodes numLoneNodes loneWaits _commands)
+  withHarness = do
+    resources <- newEnvironment allNodes
+
+    let mkServer' :: Double -> Word64 -> Node -> Server s
+        mkServer' = mkServer debug resources hb etlb etup
+    isDones <- replicateM numLoneNodes newEmptyMVar
+
+    withAsync (networkPartitioner (networkFabric resources)) $ \_ ->
+      withHarness
+        MkHarness
+          { clusterServers =
+              IntMap.fromList $
+                map (\(faultProb, serverSeed, n) -> (n, mkServer' faultProb serverSeed (fromIntegral n))) serverNodesWithMeta,
+            loneServers =
+              IntMap.fromList $
+                zipWith
+                  ( curry
+                      ( \((faultProb, serverSeed, (waitBeforeJoin, waitBeforeLeave), n), isDone) ->
+                          ( n,
+                            ( mkServer' faultProb serverSeed (fromIntegral n),
+                              isDone,
+                              waitBeforeJoin,
+                              waitBeforeLeave
+                            )
+                          )
+                      )
+                  )
+                  loneNodesWithMeta
+                  isDones,
+            hClientNode = clientNode,
+            hClientSpec = clientSpec (networkFabric resources),
+            hAdminNode = adminNode,
+            hAdminSpec = adminSpec (networkFabric resources)
+          }
+    where
+      allNodes =
         mconcat
           [ Set.fromList (fromIntegral <$> serverNodes),
             Set.fromList (fromIntegral <$> loneNodes),
@@ -627,37 +681,6 @@ testHarness
             Set.singleton adminNode
           ]
 
-    let mkServer' :: Double -> Word64 -> Node -> Server s
-        mkServer' = mkServer debug resources hb etlb etup
-    isDones <- replicateM numLoneNodes newEmptyMVar
-
-    pure $
-      MkHarness
-        { clusterServers =
-            IntMap.fromList $
-              map (\(faultProb, serverSeed, n) -> (n, mkServer' faultProb serverSeed (fromIntegral n))) serverNodesWithMeta,
-          loneServers =
-            IntMap.fromList $
-              zipWith
-                ( curry
-                    ( \((faultProb, serverSeed, (waitBeforeJoin, waitBeforeLeave), n), isDone) ->
-                        ( n,
-                          ( mkServer' faultProb serverSeed (fromIntegral n),
-                            isDone,
-                            waitBeforeJoin,
-                            waitBeforeLeave
-                          )
-                        )
-                    )
-                )
-                loneNodesWithMeta
-                isDones,
-          hClientNode = clientNode,
-          hClientSpec = clientSpec (networkFabric resources),
-          hAdminNode = adminNode,
-          hAdminSpec = adminSpec (networkFabric resources)
-        }
-    where
       adminNode = -1
       clientNode = Node $ numClusterNodes + numLoneNodes + 1
 
@@ -669,16 +692,25 @@ testHarness
 
       clientSpec network =
         ClientImplementation
-          { sendRequest = send network.requestsMailbox,
+          { sendRequest = send network.requestsMailbox network.topologyConstraints clientNode,
             receiveResponse =
               receive network.responsesMailbox clientNode
           }
 
       adminSpec network =
         AdminImplementation
-          { sendAdminRequest = send network.adminMailbox,
+          { sendAdminRequest = send network.adminMailbox network.topologyConstraints adminNode,
             receiveAdminResponse = receive network.adminResponsesMailbox adminNode
           }
+
+      networkPartitioner network = go (mkStdGen64 pSeed)
+        where
+          go gen = do
+            let (wait, newGen) = uniformR (0, fromIntegral $ 10 * hb) gen
+            threadDelay wait
+            let (constraintGraph, newGen') = randomGraph pProb allNodes newGen
+            atomically $ writeTVar (topologyConstraints network) constraintGraph
+            go newGen'
 
 writeLogEntryTest ::
   (MonadSTM m) =>
@@ -690,7 +722,7 @@ writeLogEntryTest storage self batch = case IntMap.lookup (fromIntegral self) st
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
   Just var -> atomically $ do
     log' <- readTVar var
-    writeTVar var (log' <> Map.fromList [(ix, (term, entry)) | (term, ix, entry) <- batch])
+    writeTVar var (Map.fromList [(ix, (term, entry)) | (term, ix, entry) <- batch] <> log')
 
 readLogEntriesFromTest :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) -> Node -> LogIndex -> m [(Term, LogIndex, LogEntry Node Command)]
 readLogEntriesFromTest storage self logIndex = case IntMap.lookup (fromIntegral self) storage of
@@ -719,11 +751,21 @@ readTest storage self = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
   Just var -> readTVarIO var
 
-send :: (MonadSTM m) => IntMap (TQueue m a) -> Node -> a -> m ()
-send mailbox node message =
-  case IntMap.lookup (fromIntegral node) mailbox of
-    Nothing -> error $ "Mailbox badly configured: missing node " <> show node
-    Just queue -> atomically $ writeTQueue queue message
+send ::
+  (MonadSTM m) =>
+  IntMap (TQueue m a) ->
+  TVar m (Map Node (Set Node)) ->
+  Node ->
+  Node ->
+  a ->
+  m ()
+send mailbox networkConstraints sender receipient message =
+  case IntMap.lookup (fromIntegral receipient) mailbox of
+    Nothing -> error $ "Mailbox badly configured: missing node " <> show receipient
+    Just queue -> atomically $ do
+      constraints <- readTVar networkConstraints
+      unless (Set.member receipient $ Map.findWithDefault Set.empty sender constraints) $
+        writeTQueue queue message
 
 receive :: (MonadSTM m) => IntMap (TQueue m a) -> Node -> m a
 receive mailbox node =
@@ -773,3 +815,32 @@ step :: Command -> StateMachineStep State Result
 step (Insert k v) = Transition $ \state -> (Map.insert k v state, Ok)
 step (Delete k) = Transition $ \state -> (Map.delete k state, Ok)
 step (Get k) = Read $ \state -> maybe Err Value (Map.lookup k state)
+
+-- Random utilities
+
+randomGraph ::
+  (RandomGen g) =>
+  -- | Probability of a node being selected in this graph
+  Double ->
+  Set Node ->
+  g ->
+  (Map Node (Set Node), g)
+randomGraph p nodes gen =
+  go gen candidates Map.empty
+  where
+    candidates =
+      [ (src, dst)
+      | src <- Set.toList nodes,
+        dst <- Set.toList nodes,
+        src /= dst
+      ]
+
+    go g [] graph = (graph, g)
+    go g ((src, dst) : rest) graph =
+      let (r, g') = randomR (0.0, 1.0) g
+          graph'
+            | r < p =
+                Map.insertWith Set.union src (Set.singleton dst) graph
+            | otherwise =
+                graph
+       in go g' rest graph'
