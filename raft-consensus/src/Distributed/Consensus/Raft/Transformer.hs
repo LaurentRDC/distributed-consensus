@@ -786,7 +786,7 @@ becomeFollower mLeaderNodeId = do
     trace BecameFollower
     role .= Follower
 
-  traverse_ (\leaderNodeId -> currentLeader .= Just leaderNodeId) mLeaderNodeId
+  currentLeader .= mLeaderNodeId
 
 becomeCandidate ::
   ( Ord node,
@@ -800,6 +800,9 @@ becomeCandidate ::
 becomeCandidate = do
   trace BecameCandidate
   role .= Candidate
+
+  currentLeader .= Nothing
+
   -- The following pieces of state are only useful to leaders
   nextIndex .= mempty
   matchIndex .= mempty
