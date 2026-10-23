@@ -312,27 +312,32 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
         -- TODO: unify the logic below with
         --       appendLogEntries
         impl <- view implementation
-        let firstNewIndex = succ prevLogIndex
-
-        -- The leader decides the log prefix. Doing this wrong has caused subtle
-        -- bugs that I'd rather never see. Hence, we're modifying the log twice
-        -- in this handler to keep things readable.
-        -- TODO: optimize perhaps?
-        commandLog %= (`Log.keepEntriesUpTo` prevLogIndex)
+        (firstNewIndex, entriesToAppend) <- case Log.reconcile entries prevLogIndex newEntries of
+          Log.Coherent appendFrom toAppend -> pure (appendFrom, toAppend)
+          Log.Incoherent truncateFrom toAppend -> do
+            commandLog %= (`Log.keepEntriesUpTo` pred truncateFrom)
+            pure (truncateFrom, toAppend)
 
         -- It's a little awkward to have to determine the log indices
         -- of new entries before they're assigned.
         -- Not clear if there's a better way to do this,
         -- given that persistence must happen first
-        let batchToWrite = zipWith (\ix (t, e) -> (t, ix, e)) [firstNewIndex ..] (toList newEntries)
-        lift $ impl.persistence.writeLogEntry s batchToWrite
+        let batchToWrite = zipWith (\ix (t, e) -> (t, ix, e)) [firstNewIndex ..] (toList entriesToAppend)
+        unless (null batchToWrite) $
+          lift $
+            -- Note that the content of 'batchToWrite' may override
+            -- previously-persisted records. 'writeLogEntry' should
+            -- support that
+            impl.persistence.writeLogEntry s batchToWrite
         for_ batchToWrite $ \(t, ix, entry) ->
           trace (\ctx -> LogEntryAppended ctx t ix entry)
 
-        commandLog %= (`Log.extend` newEntries)
+        commandLog %= (`Log.extend` entriesToAppend)
 
         newLastEntry <- use commandLog <&> Log.lastLogIndex
         trace (`LastLogIndexChangedTo` newLastEntry)
+
+        let lastVerifiedIndex = prevLogIndex + fromIntegral (length newEntries)
 
         runSend $
           Transformer.sendRPCResult
@@ -342,13 +347,13 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
                     { aerCurrentTerm = ourTerm,
                       aerNode = s,
                       aerMatch = True,
-                      aerNewEntryLogIndex = newLastEntry
+                      aerNewEntryLogIndex = lastVerifiedIndex
                     }
                 )
             )
         ourCommitIndex <- use commitIndex
-        when (leaderCommitIndex > ourCommitIndex) $ do
-          let newCommitIndex = min leaderCommitIndex newLastEntry
+        let newCommitIndex = min leaderCommitIndex lastVerifiedIndex
+        when (newCommitIndex > ourCommitIndex) $ do
           setCommitIndex newCommitIndex
           trace (`CommitIndexIncreasedTo` newCommitIndex)
           -- A follower takes the commit index from the leader; it must not

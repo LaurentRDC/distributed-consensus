@@ -3,6 +3,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
+-- I like <&>
+{- HLINT ignore "Functor law" -}
+
 module Server.Persistence (withServerPersistence) where
 
 import Control.Distributed.Process (NodeId, Process)
@@ -16,6 +19,7 @@ import Data.Foldable (traverse_)
 import Data.Functor ((<&>))
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List.NonEmpty (nonEmpty)
+import qualified Data.Map.Strict as Map
 import Distributed.Consensus.Raft (Persistence (..))
 import FileSystem (FileSystem)
 import Server.StateMachine (FileSystemCommand)
@@ -66,19 +70,21 @@ withServerPersistence dir f = do
       -- We assume that we'll never need to read log entries before the
       -- latest snapshot, AND that every WAL file starts with a snapshot,
       -- so we only need to read the last WAL segment
-      ref <- liftIO $ newIORef []
+      ref <- liftIO $ newIORef mempty
       seg <- activeSegment wal
-      -- We prepend entries to the list in the IOref,
-      -- so we need to reverse before returning
+      -- We deliberately use a Map since WAL doesn't support overwriting.
+      -- "Overwriting" the WAL is done by writing the latest record instead.
       replaySegment
         wal
         seg
         ( \case
             Left _ -> pure ()
             Right (term, logIx, entry) ->
-              when (logIx >= minLogIndex) (modifyIORef' ref ((term, logIx, entry) :))
+              when (logIx >= minLogIndex) (modifyIORef' ref (Map.insert (term, logIx) entry))
         )
-      reverse <$> liftIO (readIORef ref)
+      liftIO (readIORef ref)
+        <&> Map.toAscList
+        <&> map (\((t, ix), e) -> (t, ix, e))
 
     termFile = dir </> unsafeEncodeUtf "term"
     voteFile term = dir </> unsafeEncodeUtf "vote" <> OsPath.unsafeEncodeUtf (show (toInteger term))

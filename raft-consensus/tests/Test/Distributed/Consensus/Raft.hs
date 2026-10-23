@@ -722,6 +722,7 @@ writeLogEntryTest storage self batch = case IntMap.lookup (fromIntegral self) st
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
   Just var -> atomically $ do
     log' <- readTVar var
+    -- Overwriting the log with new conflicting entries is important to ensure below
     writeTVar var (Map.fromList [(ix, (term, entry)) | (term, ix, entry) <- batch] <> log')
 
 readLogEntriesFromTest :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) -> Node -> LogIndex -> m [(Term, LogIndex, LogEntry Node Command)]

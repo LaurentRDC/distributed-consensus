@@ -24,6 +24,10 @@ module Distributed.Consensus.Raft.Log
     extend,
     keepEntriesUpTo,
     applySnapshot,
+
+    -- ** Log reconciliation
+    Reconciliation (..),
+    reconcile,
   )
 where
 
@@ -99,6 +103,33 @@ log'@(Log es sn@((SnapshotMetadata lastIx lastSnapshotTerm)) lst _) `keepEntries
             Seq.EmptyR -> lastSnapshotTerm
             _ Seq.:> (keptLastTerm, _, _) -> keptLastTerm
        in Log kept sn ix term
+
+data Reconciliation entry
+  = -- | There is no conflict, although there may be missing entries
+    Coherent
+      -- | Start appending from this index
+      !LogIndex
+      -- | Entries which aren't in the log yet
+      !(Seq (Term, entry))
+  | -- | There is a conflict that needs to be resolved
+    Incoherent
+      -- | Truncate from, and including, this index
+      !LogIndex
+      -- | Entries that aren't in the log yet
+      !(Seq (Term, entry))
+
+-- | Reconcile an existing 'Log' with new entries starting from a previous log index.
+reconcile :: Log nod entry -> LogIndex -> Seq (Term, entry) -> Reconciliation entry
+reconcile log' prevIx = go (succ prevIx)
+  where
+    go !ix remaining = case Seq.viewl remaining of
+      Seq.EmptyL -> Coherent ix Seq.empty
+      (t, _) Seq.:< rest -> case log' !? ix of
+        LogIndexInSnapshot _ -> go (succ ix) rest
+        Found (existingTerm, _, _)
+          | existingTerm == t -> go (succ ix) rest
+          | otherwise -> Incoherent ix remaining
+        NotFound -> Coherent ix remaining
 
 data Lookup a
   = LogIndexInSnapshot SnapshotMetadata

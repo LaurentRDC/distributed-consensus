@@ -93,6 +93,11 @@ data Persistence entry node state m = Persistence
     readLogEntriesFrom :: node -> LogIndex -> m [(Term, LogIndex, LogEntry node entry)],
     -- | Write log entries durably.
     --
+    -- Note that the writes need to support overwriting. In the normal course
+    -- of running a Raft node, the log may need to be updated. This means that
+    -- a previously seen '(Term, LogIndex)' may be written again. Only the most recently
+    -- written entry should be surfaced by 'readLogEntriesFrom'.
+    --
     -- This function also receives the node identification (of type @node@), which
     -- allows to persist data in a shared location for multiple nodes
     -- (e.g. in a remote database)
