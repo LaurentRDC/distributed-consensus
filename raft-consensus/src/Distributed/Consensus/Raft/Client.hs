@@ -102,8 +102,10 @@ data RaftClientEnv entry node result m
 makeLenses ''ClientImplementation
 
 -- | Possible client errors
-data ClientError
+data ClientError node
   = Timeout
+  | -- | The client should make the request to another node
+    Redirect node
   | NoKnownLeader
   | SomeFailure !Text
   deriving (Eq, Show, Ord)
@@ -118,7 +120,7 @@ request ::
   Microseconds ->
   node ->
   entry ->
-  RaftClientT entry node result m (Either ClientError (node, result))
+  RaftClientT entry node result m (Either (ClientError node) (node, result))
 request timeoutValue lastKnownLeader entry = do
   (self, send) <- MkRaftClientT $ asks (node &&& sendRequest . implementation)
   mbox <- MkRaftClientT $ asks mailbox
@@ -150,7 +152,7 @@ request timeoutValue lastKnownLeader entry = do
     )
     >>= \case
       Just (MkResponse _ _ (Failure errmsg)) -> pure $ Left $ SomeFailure errmsg
-      Just (MkResponse _ (Just actualLeaderId) NotLeader) -> request timeoutValue actualLeaderId entry
+      Just (MkResponse _ (Just actualLeaderId) NotLeader) -> pure $ Left $ Redirect actualLeaderId
       Just (MkResponse _ (Just leader) (Success result)) -> pure $ Right (leader, result)
       -- TODO: what if leader is @Nothing@ but response is `Success`??
       Just (MkResponse _ Nothing _) -> pure $ Left NoKnownLeader

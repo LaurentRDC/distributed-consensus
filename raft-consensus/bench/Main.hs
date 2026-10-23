@@ -213,7 +213,7 @@ data Harness
     -- the whole benchmark: see 'withRaftClientT'.
     withClient ::
       forall b.
-      ((Node -> Command -> IO (Either ClientError (Node, Result))) -> IO b) ->
+      ((Node -> Command -> IO (Either (ClientError Node) (Node, Result))) -> IO b) ->
       IO b
   }
 

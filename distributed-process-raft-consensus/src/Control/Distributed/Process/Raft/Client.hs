@@ -64,5 +64,10 @@ request ::
   Microseconds ->
   NodeId ->
   entry ->
-  RaftClientT entry NodeId result Process (Either ClientError (NodeId, result))
+  RaftClientT
+    entry
+    NodeId
+    result
+    Process
+    (Either (ClientError NodeId) (NodeId, result))
 request = Raft.Client.request

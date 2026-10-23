@@ -59,7 +59,7 @@ import Distributed.Consensus.Raft
 import qualified Distributed.Consensus.Raft as Raft
 import Distributed.Consensus.Raft.Admin
 import qualified Distributed.Consensus.Raft.Admin as Admin
-import Distributed.Consensus.Raft.Client (ClientImplementation (..), ClientRequest, ClientResponse, RaftClientT, request, withRaftClientT)
+import Distributed.Consensus.Raft.Client (ClientError (..), ClientImplementation (..), ClientRequest, ClientResponse, RaftClientT, request, withRaftClientT)
 import System.Random (RandomGen, mkStdGen64, randomR, uniformR)
 import Test.Distributed.Consensus.Raft.Options (PrintTrace (..), setNumRacyTests, withExplorationOptions, withPrintTraceOption)
 import Test.Distributed.Consensus.Raft.Properties (FaultInjection (..), allProperties)
@@ -264,18 +264,27 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
     runClient runRequest maxTime retryBudget = go
       where
         go _ [] = pure ()
-        go state (command : rest) = attempt retryBudget
+        go state (command : rest) = attempt retryBudget 0
           where
             (newState, expectedResults) = runStateMachineStep (step command) state
 
-            attempt remaining = do
+            attempt remaining target = do
               threadDelay (fromIntegral clientRetryTick)
-              timeout (fromIntegral maxTime) (runRequest (request maxBound 0 command)) >>= \case
+              timeout (fromIntegral maxTime) (runRequest (request maxBound target command)) >>= \case
                 Nothing ->
                   giveUp $
                     "no response at all within "
                       <> show (toInteger maxTime)
                       <> " microseconds"
+                -- Command needs to be retried but on another target
+                Just (Left err@(Redirect otherNode))
+                  | remaining <= clientRetryTick ->
+                      giveUp $
+                        "retried for "
+                          <> show (toInteger retryBudget)
+                          <> " microseconds, last response was "
+                          <> show err
+                  | otherwise -> attempt (remaining - clientRetryTick) otherNode
                 -- Command needs to be re-tried
                 Just (Left err)
                   | remaining <= clientRetryTick ->
@@ -284,7 +293,7 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
                           <> show (toInteger retryBudget)
                           <> " microseconds, last response was "
                           <> show err
-                  | otherwise -> attempt (remaining - clientRetryTick)
+                  | otherwise -> attempt (remaining - clientRetryTick) target
                 Just (Right (_leaderId, actualResults)) -> do
                   when
                     (actualResults /= expectedResults)
