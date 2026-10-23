@@ -189,10 +189,8 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
                         let tryShutDown :: Int -> IOSim s ()
                             tryShutDown 0 = pure ()
                             tryShutDown attemptsLeft =
-                              timeout
-                                (fromIntegral scenarioInputs.electionTimeoutUpperBound)
-                                (runAdminAction (Admin.shutDown 1_000_000 node))
-                                >>= maybe (tryShutDown (attemptsLeft - 1)) (const (pure ()))
+                              runAdminAction (Admin.shutDown scenarioInputs.electionTimeoutUpperBound node)
+                                >>= either (const (tryShutDown (attemptsLeft - 1))) pure
                          in tryShutDown 3
 
                   forConcurrently_ harness.loneServers $ \(server, isDone, _, _) -> do
