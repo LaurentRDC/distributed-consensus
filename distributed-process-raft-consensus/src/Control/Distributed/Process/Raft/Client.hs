@@ -57,6 +57,20 @@ clientMailboxProcessName = "raft-consensus-client-mailbox"
 
 -- | Send a request to a Raft cluster.
 --
+-- The user must take care to handle the possible 'ClientError's.
+--
+-- First, it is quite likely that the server will redirect requests
+-- via @'Redirect' otherServer@. 'request' does not follow that redirect,
+-- as you may want to control delays and retries.
+--
+-- Second, there is an unlikely, but real, possibility that the server
+-- replies with 'NoKnownLeader'. In this case, you should try two things:
+--
+-- * Retry the request, which may resolve itself
+-- * If retrying doesn't work, you should try to send the request to another server.
+--   It may be beneficial to keep a memory of all servers ever contacted for this
+--   particular purpose.
+--
 -- It is perfectly safe, and encouraged, to send separate requests in
 -- separate threads.
 request ::

@@ -15,6 +15,7 @@ module Test.Distributed.Consensus.Raft
   )
 where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent.Class.MonadMVar (MVar, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.Class.MonadSTM (MonadSTM, TQueue, TVar, atomically, flushTQueue, newTQueueIO, newTVarIO, readTQueue, readTVar, readTVarIO, retry, writeTQueue, writeTVar)
 import Control.Exception (Exception)
@@ -259,14 +260,19 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
       State ->
       [Command] ->
       IOSim s ()
-    runClient runRequest maxTime retryBudget = go
+    runClient runRequest maxTime retryBudget = go (Set.singleton (0 :: Node))
       where
-        go _ [] = pure ()
-        go state (command : rest) = attempt retryBudget 0
+        -- \| Given a node, and a set of known nodes, deterministically pick another
+        -- node from the set.
+        nextCandidate :: Node -> Set Node -> Maybe Node
+        nextCandidate failed known = Set.lookupGT failed known <|> Set.lookupMin known
+
+        go _ _ [] = pure ()
+        go knownNodes state (command : rest) = attempt knownNodes retryBudget 0
           where
             (newState, expectedResults) = runStateMachineStep (step command) state
 
-            attempt remaining target = do
+            attempt nodeSet remaining target = do
               threadDelay (fromIntegral clientRetryTick)
               timeout (fromIntegral maxTime) (runRequest (request target command)) >>= \case
                 Nothing ->
@@ -282,7 +288,17 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
                           <> show (toInteger retryBudget)
                           <> " microseconds, last response was "
                           <> show err
-                  | otherwise -> attempt (remaining - clientRetryTick) otherNode
+                  | otherwise -> attempt (Set.insert otherNode nodeSet) (remaining - clientRetryTick) otherNode
+                Just (Left err@NoKnownLeader)
+                  | remaining <= clientRetryTick ->
+                      giveUp $
+                        "retried for "
+                          <> show (toInteger retryBudget)
+                          <> " microseconds, last response was "
+                          <> show err
+                  | otherwise -> case nextCandidate target nodeSet of
+                      Nothing -> giveUp "No known nodes to query"
+                      Just candidate -> attempt nodeSet (remaining - clientRetryTick) candidate
                 -- Command needs to be re-tried
                 Just (Left err)
                   | remaining <= clientRetryTick ->
@@ -291,7 +307,7 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
                           <> show (toInteger retryBudget)
                           <> " microseconds, last response was "
                           <> show err
-                  | otherwise -> attempt (remaining - clientRetryTick) target
+                  | otherwise -> attempt nodeSet (remaining - clientRetryTick) target
                 Just (Right (_leaderId, actualResults)) -> do
                   when
                     (actualResults /= expectedResults)
@@ -303,7 +319,7 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
                           <> " but got "
                           <> show actualResults
                     )
-                  go newState rest
+                  go knownNodes newState rest
               where
                 giveUp why =
                   case faultInjection of
