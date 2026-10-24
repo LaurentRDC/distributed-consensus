@@ -5,18 +5,17 @@
 
 module Test.Control.Distributed.Process.Raft (tests) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar, takeMVar)
-import Control.Concurrent.STM (atomically, newTVarIO, readTVar, retry, writeTVar)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Distributed.Process (NodeId (NodeId), spawnLocal)
 import Control.Distributed.Process.Node (LocalNode (localNodeId), initRemoteTable, newLocalNode, runProcess)
 import Control.Distributed.Process.Raft (networking)
 import Control.Distributed.Process.Raft.Admin (getClusterConfiguration, joinCluster, leaveCluster, shutDown, withRaftAdmin)
 import Control.Distributed.Process.Raft.Client (request, withRaftClient)
-import Control.Monad (replicateM_, unless, void)
+import Control.Monad (replicateM_, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (for_)
-import Data.List.NonEmpty (NonEmpty ((:|)))
 import Distributed.Consensus.Raft (Networking (..), Request (..), Response (..), requestPayload)
 import Distributed.Consensus.Raft.Admin (AdminCommand (..), AdminCommandResult (..))
 import Network.Transport (EndPointAddress (EndPointAddress), Transport)
@@ -73,43 +72,41 @@ testClientCommands getTransport = testCase "Tests that client commands are commu
   t <- getTransport
   node <- newLocalNode t initRemoteTable
   ready <- newEmptyMVar
-  requestsDone <- newTVarIO (0 :: Int)
   let serverNodeId = localNodeId node
-  requestsVar <- newEmptyMVar
-  withAsync (sendClientCommands ready requestsDone t serverNodeId) $ \_ -> runProcess node $ do
-    serverNetwork <- networking @() @() @()
-    liftIO $ putMVar ready ()
-
-    -- We wait for all client requests to be completed
-    -- to prevent the test from relying on timing
-    liftIO $ atomically $ do
-      n <- readTVar requestsDone
-      unless (n == nRequests) retry
-
-    receiveClientRequests serverNetwork
-      >>= liftIO . putMVar requestsVar
 
   timeout
     1_000_000
-    (readMVar requestsVar)
+    ( withAsync (sendClientCommands ready t serverNodeId) $ \_ -> runProcess node $ do
+        serverNetwork <- networking @() @() @()
+        liftIO $ putMVar ready ()
+
+        let waitForAllRequests n = do
+              if n == nRequests
+                then pure ()
+                else do
+                  liftIO $ threadDelay 10_000
+                  reqs <- receiveClientRequests serverNetwork
+                  waitForAllRequests (n + length reqs)
+
+        -- The test waits for all requests to have arrived.
+        -- If they don't, the test will timeout, counting as a failure
+        waitForAllRequests 0
+    )
     >>= \case
-      Nothing -> assertFailure "Server did not receive expected number of requests"
-      Just requests -> do
-        let strippedRequests = requestPayload <$> requests
-        strippedRequests @?= () :| [(), ()]
+      Just _ -> pure ()
+      Nothing -> liftIO $ assertFailure "Server did not receive expected number of requests"
   where
     nRequests = 3
-    sendClientCommands ready requestsDone transport serverNodeId = do
+    sendClientCommands ready transport serverNodeId = do
       _ <- liftIO $ takeMVar ready
       node <- newLocalNode transport initRemoteTable
       runProcess node $ withRaftClient @() @() $ \runClient -> do
         -- To demonstrate that pipelining works, we send multiple requests from separate clients
         replicateM_ nRequests $
           spawnLocal $ do
-            -- We don't actually care about the timeout, since the message will make it to
-            -- the other side regardless. However, we do need to wait for the transfer
-            -- to happen, hence why a 50ms timeout
-            runClient (void $ request 50_000 serverNodeId ())
-            liftIO $ atomically $ do
-              n <- readTVar requestsDone
-              writeTVar requestsDone (succ n)
+            -- We're re-using the 'request' mechanism even though there's no
+            -- logic in the server to process a request and send a response.
+            --
+            -- We basicaly yeet a message '()' in a separate process, which
+            -- blocks forever, and then await that all requests be done
+            void $ runClient (request serverNodeId ())

@@ -96,7 +96,6 @@ test-suite distributed-process-raft-consensus-test
                     , distributed-process-raft-consensus:admin
                     , distributed-process-raft-consensus:client
                     , raft-consensus
-                    , stm
                     , tasty ^>= 1.5
                     , tasty-hunit ^>= 0.10
                     , network-transport

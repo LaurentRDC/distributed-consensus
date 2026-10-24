@@ -60,8 +60,6 @@ clientMailboxProcessName = "raft-consensus-client-mailbox"
 -- It is perfectly safe, and encouraged, to send separate requests in
 -- separate threads.
 request ::
-  -- | Timeout in microseconds
-  Microseconds ->
   NodeId ->
   entry ->
   RaftClientT

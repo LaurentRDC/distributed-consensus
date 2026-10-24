@@ -268,7 +268,7 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
 
             attempt remaining target = do
               threadDelay (fromIntegral clientRetryTick)
-              timeout (fromIntegral maxTime) (runRequest (request maxBound target command)) >>= \case
+              timeout (fromIntegral maxTime) (runRequest (request target command)) >>= \case
                 Nothing ->
                   giveUp $
                     "no response at all within "

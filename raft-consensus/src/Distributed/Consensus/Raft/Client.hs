@@ -26,7 +26,7 @@ where
 import Control.Arrow ((&&&))
 import Control.Concurrent.Class.MonadSTM (TMVar, TVar, atomically, newEmptyTMVar, newTVarIO, putTMVar, readTMVar, readTVar, writeTVar)
 import Control.Monad.Class.MonadAsync (MonadAsync, withAsync)
-import Control.Monad.Class.MonadTimer (MonadTimer, timeout)
+import Control.Monad.Class.MonadTimer (MonadTimer)
 import Control.Monad.Trans.Class (MonadTrans, lift)
 import Control.Monad.Trans.Reader (ReaderT (runReaderT), asks)
 import Data.Map.Strict (Map)
@@ -116,12 +116,10 @@ data ClientError node
 -- separate threads.
 request ::
   (MonadTimer m) =>
-  -- | Timeout in microseconds.
-  Microseconds ->
   node ->
   entry ->
   RaftClientT entry node result m (Either (ClientError node) (node, result))
-request timeoutValue lastKnownLeader entry = do
+request lastKnownLeader entry = do
   (self, send) <- MkRaftClientT $ asks (node &&& sendRequest . implementation)
   mbox <- MkRaftClientT $ asks mailbox
   reqIdVar <- MkRaftClientT $ asks nextRequestId
@@ -141,19 +139,17 @@ request timeoutValue lastKnownLeader entry = do
           lastKnownLeader
           (MkRequest reqId self entry)
 
-        timeout (fromIntegral timeoutValue) $
-          atomically
-            ( do
-                resp <- readTMVar resultVar
-                mbox' <- readTVar mbox
-                writeTVar mbox (Map.delete reqId mbox')
-                pure resp
-            )
+        atomically
+          ( do
+              resp <- readTMVar resultVar
+              mbox' <- readTVar mbox
+              writeTVar mbox (Map.delete reqId mbox')
+              pure resp
+          )
     )
     >>= \case
-      Just (MkResponse _ _ (Failure errmsg)) -> pure $ Left $ SomeFailure errmsg
-      Just (MkResponse _ (Just actualLeaderId) NotLeader) -> pure $ Left $ Redirect actualLeaderId
-      Just (MkResponse _ (Just leader) (Success result)) -> pure $ Right (leader, result)
+      (MkResponse _ _ (Failure errmsg)) -> pure $ Left $ SomeFailure errmsg
+      (MkResponse _ (Just actualLeaderId) NotLeader) -> pure $ Left $ Redirect actualLeaderId
+      (MkResponse _ (Just leader) (Success result)) -> pure $ Right (leader, result)
       -- TODO: what if leader is @Nothing@ but response is `Success`??
-      Just (MkResponse _ Nothing _) -> pure $ Left NoKnownLeader
-      Nothing -> pure $ Left Timeout
+      (MkResponse _ Nothing _) -> pure $ Left NoKnownLeader
