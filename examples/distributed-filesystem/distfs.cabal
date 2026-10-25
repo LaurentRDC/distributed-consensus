@@ -39,24 +39,20 @@ executable distfs-server
     import:           warnings
     ghc-options:      -rtsopts -threaded -with-rtsopts=-N
     main-is:          Main.hs
-    other-modules:    Server.Persistence
-                      Server.StateMachine
+    other-modules:    Server.StateMachine
     build-depends:    base >= 4.18 && <4.23
-                    , binary
-                    , bytestring
                     , containers
                     , directory
                     , distributed-process ^>=0.7
                     , distributed-process-raft-consensus
                     , distfs
                     , filepath >=1.5 && <1.6
-                    , file-io
                     , network
                     , network-transport-tcp
                     , optparse-applicative ^>=0.19
                     , raft-consensus
+                    , raft-consensus-wal
                     , random
-                    , wal
     hs-source-dirs:   server
     default-language: Haskell2010
 

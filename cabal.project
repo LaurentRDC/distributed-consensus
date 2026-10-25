@@ -1,4 +1,5 @@
 packages: raft-consensus/raft-consensus.cabal
+          raft-consensus-wal/raft-consensus-wal.cabal
           wal/wal.cabal
           distributed-process-raft-consensus/distributed-process-raft-consensus.cabal
           examples/distributed-filesystem/distfs.cabal

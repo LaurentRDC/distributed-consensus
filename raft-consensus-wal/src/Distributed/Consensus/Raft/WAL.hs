@@ -1,17 +1,26 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
 -- I like <&>
 {- HLINT ignore "Functor law" -}
+module Distributed.Consensus.Raft.WAL
+  ( withPersistence,
 
-module Server.Persistence (withServerPersistence) where
+    -- * Codecs
+    WALCodec (..),
 
-import Control.Distributed.Process (NodeId, Process)
+    -- ** Built-in codec
+    binaryWALCodec,
+  )
+where
+
 import Control.Exception (SomeException, try)
 import Control.Monad (void, when)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Catch (MonadMask)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Data.Binary (Binary)
 import qualified Data.Binary as Binary
 import Data.Binary.Get (runGetOrFail)
 import qualified Data.ByteString.Lazy as BSL
@@ -20,21 +29,55 @@ import Data.Functor ((<&>))
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List.NonEmpty (nonEmpty)
 import qualified Data.Map.Strict as Map
-import Distributed.Consensus.Raft (Persistence (..))
-import FileSystem (FileSystem)
-import Server.StateMachine (FileSystemCommand)
+import Distributed.Consensus.Raft (LogEntry, LogIndex, Persistence (..), Snapshot, Term)
+import GHC.Generics (Generic)
 import System.Directory.OsPath (removeFile)
 import System.File.OsPath (withBinaryFile)
 import qualified System.File.OsPath as IO
 import System.IO (IOMode (..))
-import System.IO.WAL (WALConfig (..), activeSegment, append, appendMany, binaryWALCodec, replaySegment, rotate, withWriteAheadLog)
+import System.IO.WAL (WALCodec (..), WALConfig (..), activeSegment, append, appendMany, binaryWALCodec, replaySegment, rotate, withWriteAheadLog)
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import qualified System.OsPath as OsPath
 
-withServerPersistence :: OsPath -> (Persistence FileSystemCommand NodeId FileSystem Process -> Process a) -> Process a
-withServerPersistence dir f = do
+data RaftRecord entry node state
+  = SnapshotRecord (Snapshot node state)
+  | LogRecord (Term, LogIndex, LogEntry node entry)
+  deriving (Generic)
+
+instance (Binary entry, Binary node, Binary state) => Binary (RaftRecord entry node state)
+
+-- | A function to run a Raft cluster with the provided 'Persistence'
+-- instance based on a disk-backed write-ahead log.
+--
+-- This function takes care of all the details related to setting
+-- up the log directory, rotating log files, and persisting
+-- small pieces of data (e.g. terms and votes) separately
+-- from the log files.
+--
+-- Log files are rotated on Raft server snapshot. This means that every
+-- log file is standalone; there is no need to keep any other file
+-- than the most current one, except perhaps for auditing.
+--
+-- If the directory where log files should be stored doesn't exist,
+-- it will be created (including its parents if needed).
+withPersistence ::
+  ( MonadIO m,
+    Binary node,
+    MonadMask m
+  ) =>
+  -- | Directory where files should be stored. This directory need not be empty. The
+  -- Raft server will restore its state based on the contents of the directory.
+  OsPath ->
+  -- | Codec to encode and decode data to/from the log. If you don't want to choose,
+  -- just use 'binaryWALCodec'. If you want to squeeze as much performance as you can,
+  -- you will need to created your own 'WALCodec'.
+  WALCodec (RaftRecord entry node state) ->
+  -- | Continuation
+  (Persistence entry node state m -> m a) ->
+  m a
+withPersistence dir codec f = do
   withWriteAheadLog
-    binaryWALCodec
+    codec
     ( WALConfig
         { maxSegmentBytes = maxBound, -- Rotation happens on snapshot
           directory = dir </> unsafeEncodeUtf "wal"
@@ -54,7 +97,7 @@ withServerPersistence dir f = do
             -- This means that we only ever need to read back the active segment (i.e. latest one)
             Persistence
               { readLogEntriesFrom = \_ -> readLogEntries wal,
-                writeLogEntry = \_processId -> traverse_ (appendMany wal) . nonEmpty . map Right,
+                writeLogEntry = \_processId -> traverse_ (appendMany wal) . nonEmpty . map LogRecord,
                 readTerm = readTermFromFile,
                 writeTerm = writeTermToFile,
                 readVotedFor = readVotedForFromFile,
@@ -78,8 +121,8 @@ withServerPersistence dir f = do
         wal
         seg
         ( \case
-            Left _ -> pure ()
-            Right (term, logIx, entry) ->
+            SnapshotRecord _ -> pure ()
+            LogRecord (term, logIx, entry) ->
               when (logIx >= minLogIndex) (modifyIORef' ref (Map.insert (term, logIx) entry))
         )
       liftIO (readIORef ref)
@@ -124,11 +167,11 @@ withServerPersistence dir f = do
         wal
         seg
         ( \case
-            Left snap -> writeIORef ref (Just snap)
-            Right _ -> pure ()
+            SnapshotRecord snap -> writeIORef ref (Just snap)
+            LogRecord _ -> pure ()
         )
       liftIO (readIORef ref)
 
     writeSnapshotToWAL wal _node snap = do
       _ <- rotate wal
-      append wal (Left snap)
+      append wal (SnapshotRecord snap)

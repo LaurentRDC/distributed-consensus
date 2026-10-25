@@ -10,6 +10,7 @@ import Control.Exception (throwIO)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Set as Set
 import Distributed.Consensus.Raft (ClusterState (..), Config (..), Implementation (..), runRaftServer)
+import Distributed.Consensus.Raft.WAL (binaryWALCodec, withPersistence)
 import FileSystem (FileSystem (..))
 import GHC.IO.Handle (BufferMode (LineBuffering), hSetBuffering)
 import Network.Socket (HostName)
@@ -29,7 +30,6 @@ import Options.Applicative
     progDesc,
     strOption,
   )
-import Server.Persistence (withServerPersistence)
 import Server.StateMachine (runFileSystemCommand)
 import System.Directory.OsPath (getCurrentDirectory)
 import System.IO (stdout)
@@ -78,22 +78,25 @@ main = do
   runProcess node $ do
     network <- Process.networking
     nid <- getSelfNode
-    withServerPersistence (cwd </> unsafeEncodeUtf ".distfs" </> unsafeEncodeUtf (port opts)) $ \persist ->
-      runRaftServer
-        ( MkConfig
-            { nodeId = nid,
-              electionTimeoutRange = (150_000, 300_000),
-              heartBeatTimeout = 50_000,
-              randomSeed = seed,
-              maxLogLength = Just 100
-            }
-        )
-        clusterState
-        (FileSystem mempty)
-        ( Implementation
-            { persistence = persist,
-              stateMachine = runFileSystemCommand,
-              networking = network,
-              tracer = liftIO . print
-            }
-        )
+    withPersistence
+      (cwd </> unsafeEncodeUtf ".distfs" </> unsafeEncodeUtf (port opts))
+      binaryWALCodec
+      $ \persist ->
+        runRaftServer
+          ( MkConfig
+              { nodeId = nid,
+                electionTimeoutRange = (150_000, 300_000),
+                heartBeatTimeout = 50_000,
+                randomSeed = seed,
+                maxLogLength = Just 100
+              }
+          )
+          clusterState
+          (FileSystem mempty)
+          ( Implementation
+              { persistence = persist,
+                stateMachine = runFileSystemCommand,
+                networking = network,
+                tracer = liftIO . print
+              }
+          )

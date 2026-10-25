@@ -42,6 +42,7 @@ where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
 import Control.Monad (forM_, void, when)
+import Control.Monad.Catch (MonadMask, finally)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Attoparsec.ByteString (Parser)
 import qualified Data.Attoparsec.ByteString as Parser
@@ -164,19 +165,23 @@ data WALConfig = WALConfig
 -- If the configuration points to an existing directory, the 'WriteAheadLog'
 -- will pick back up from where it last stopped. To reset a 'WriteAheadLog',
 -- its associated directory must be emptied.
+--
+-- This function is exception-safe, in that the log files will be
+-- properly closed, even if the continuation throws an exception.
 withWriteAheadLog ::
-  (MonadIO m) =>
+  (MonadIO m, MonadMask m) =>
   WALCodec a ->
   WALConfig ->
   (WriteAheadLog a -> m b) ->
   m b
 withWriteAheadLog codec config act = do
   wal <- liftIO (open codec config)
-  r <- act wal
-  liftIO $ close wal
-  pure r
+  act wal `finally` liftIO (close wal)
 
 -- | Open a write-ahead log.
+--
+-- If the directory where log files should be stored doesn't exist,
+-- it will be created (including its parents if needed).
 --
 -- If active log file is torn, the partial log entry will be
 -- removed such that the log is repaired.
