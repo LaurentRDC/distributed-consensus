@@ -44,7 +44,7 @@ executable distfs-server
                     , containers
                     , directory
                     , distributed-process ^>=0.7
-                    , distributed-process-raft-consensus
+                    , raft-consensus-distributed-process
                     , distfs
                     , filepath >=1.5 && <1.6
                     , network
@@ -62,7 +62,7 @@ executable distfs-client
     main-is:          Main.hs
     build-depends:    base >= 4.18 && <4.23
                     , distributed-process ^>=0.7
-                    , distributed-process-raft-consensus:client
+                    , raft-consensus-distributed-process:client
                     , distfs
                     , network
                     , network-transport-tcp

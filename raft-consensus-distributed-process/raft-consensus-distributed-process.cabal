@@ -1,5 +1,5 @@
 cabal-version:      3.4
-name:               distributed-process-raft-consensus
+name:               raft-consensus-distributed-process
 version:            0.1.0.0
 synopsis:           Cloud Haskell facilities to the Raft consensus protocol
 -- description:
@@ -16,7 +16,7 @@ extra-doc-files:    README.md
 source-repository head
     type: git
     location: https://github.com/LaurentRDC/distributed-consensus
-    subdir: distributed-process-raft-consensus
+    subdir: raft-consensus-distributed-process
 
 common warnings
     ghc-options: -Wall
@@ -37,7 +37,7 @@ library
     -- using io-classes
     build-depends:    base >= 4.18 && <4.23
                     , distributed-process ^>=0.7
-                    , distributed-process-raft-consensus:io-classes-instances
+                    , raft-consensus-distributed-process:io-classes-instances
                     , raft-consensus ^>=0.1
                     , stm ^>=2.5
     default-language: GHC2021
@@ -64,7 +64,7 @@ library client
     visibility:       public
     build-depends:    base >= 4.18 && <4.23
                     , distributed-process ^>=0.7
-                    , distributed-process-raft-consensus:io-classes-instances
+                    , raft-consensus-distributed-process:io-classes-instances
                     , raft-consensus ^>=0.1
                     , stm ^>=2.5
     default-language: GHC2021
@@ -76,12 +76,12 @@ library admin
     visibility:       public
     build-depends:    base >= 4.18 && <4.23
                     , distributed-process ^>=0.7
-                    , distributed-process-raft-consensus:io-classes-instances
+                    , raft-consensus-distributed-process:io-classes-instances
                     , raft-consensus ^>=0.1
                     , stm ^>=2.5
     default-language: GHC2021
 
-test-suite distributed-process-raft-consensus-test
+test-suite raft-consensus-distributed-process-test
     import:           warnings
     default-language: Haskell2010
     other-modules:    Test.Control.Distributed.Process.Raft
@@ -92,9 +92,9 @@ test-suite distributed-process-raft-consensus-test
     build-depends:    async
                     , base >= 4.18 && <4.23
                     , distributed-process
-                    , distributed-process-raft-consensus
-                    , distributed-process-raft-consensus:admin
-                    , distributed-process-raft-consensus:client
+                    , raft-consensus-distributed-process
+                    , raft-consensus-distributed-process:admin
+                    , raft-consensus-distributed-process:client
                     , raft-consensus
                     , tasty ^>= 1.5
                     , tasty-hunit ^>= 0.10

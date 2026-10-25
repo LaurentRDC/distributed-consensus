@@ -2,7 +2,7 @@
 
 This directory contains an example implementation of a distributed, in-memory filesystem that uses `raft-consensus`.
 
-For demonstration purposes, the networking is implemented using the Cloud Haskell implementation [`distributed-process`](https://github.com/haskell-distributed/distributed-process) via the `distributed-process-raft-consensus` package. The persistence layer is implemented using the `wal` package.
+For demonstration purposes, the networking is implemented using the Cloud Haskell implementation [`distributed-process`](https://github.com/haskell-distributed/distributed-process) via the `raft-consensus-distributed-process` package. The persistence layer is implemented using the `wal` package.
 
 This implementation contains two executables. `distfs-server` implements the server-side logic, while `distfs-client` implements a small command-line interface to the cluster.
 

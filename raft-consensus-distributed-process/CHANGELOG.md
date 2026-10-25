@@ -1,4 +1,4 @@
-# Revision history for distributed-process-raft-consensus
+# Revision history for raft-consensus-distributed-process
 
 ## 0.1.0.0 -- YYYY-mm-dd
 

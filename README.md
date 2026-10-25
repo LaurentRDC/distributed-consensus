@@ -8,4 +8,4 @@ Currently, three packages are being worked on:
 
 * `raft-consensus`: a Haskell implementation of the Raft consensus protocol, generic over networking and persistence.
 * `wal`: a Haskell implementation of write-ahead logs.
-* `distributed-process-raft-consensus`: an adapter package to use `raft-consensus` in the context of Cloud Haskell's `distributed-process` library.
+* `raft-consensus-distributed-process`: an adapter package to use `raft-consensus` in the context of Cloud Haskell's `distributed-process` library.
