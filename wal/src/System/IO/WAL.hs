@@ -13,8 +13,6 @@
 module System.IO.WAL
   ( -- * Write-ahead log
     withWriteAheadLog,
-    open,
-    close,
     WriteAheadLog,
 
     -- ** Writing
@@ -40,7 +38,20 @@ module System.IO.WAL
   )
 where
 
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
+import Control.Concurrent (forkIOWithUnmask)
+import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, tryPutMVar, withMVar)
+import Control.Concurrent.STM
+  ( TQueue,
+    TVar,
+    atomically,
+    flushTQueue,
+    newTQueueIO,
+    newTVarIO,
+    readTVar,
+    retry,
+    writeTQueue,
+    writeTVar,
+  )
 import Control.Exception
   ( SomeException,
     catch,
@@ -52,11 +63,11 @@ import Control.Exception
     try,
   )
 import Control.Monad (forM_, unless, void, when)
-import Control.Monad.Catch (MonadMask, finally)
+import Control.Monad.Catch (MonadMask, bracket)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Attoparsec.ByteString (Parser)
 import qualified Data.Attoparsec.ByteString as Parser
-import Data.Bifunctor (bimap)
+import Data.Bifunctor (bimap, first)
 import Data.Binary (Binary, decodeOrFail, put)
 import Data.Binary.Put (execPut)
 import Data.Bits (Bits (shiftL, (.|.)))
@@ -67,6 +78,7 @@ import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Unsafe as BSU
 import Data.Digest.CRC32C (crc32c)
+import Data.Foldable (traverse_)
 import Data.Functor ((<&>))
 import Data.IORef
   ( IORef,
@@ -120,7 +132,9 @@ import Text.Read (readMaybe)
 -- You can read back the entire log in sequential order using 'replayAll'.
 -- You can also read back specific segments using 'replaySegment'.
 --
--- Using the same 'WriteAheadLog' from multiple threads is safe.
+-- Using the same 'WriteAheadLog' from multiple threads is safe, and
+-- efficient: throughput increases linearly with the number of writer
+-- threads.
 data WriteAheadLog a = WriteAheadLog
   { walCodec :: !(WALCodec a),
     walConfig :: !WALConfig,
@@ -133,8 +147,18 @@ data WriteAheadLog a = WriteAheadLog
     --
     -- TODO: is there a more elegant way to handle errors in a multi-
     -- threaded environment?
-    walFailure :: !(IORef (Maybe SomeException))
+    walFailure :: !(IORef (Maybe SomeException)),
+    -- | Appends waiting for the writer thread
+    walAppends :: !(TQueue Append),
+    -- | Once set, no more appends are accepted
+    walClosed :: !(TVar Bool),
+    -- | Filled once the writer thread has stopped
+    walWriterDone :: !(MVar ())
   }
+
+-- | Framed entries for the writer thread to write, and where to
+-- report the outcome
+data Append = Append !StrictByteString !(MVar (Either SomeException ()))
 
 -- | How to encode and decode write-ahead log entries.
 --
@@ -186,17 +210,16 @@ data WALConfig = WALConfig
 -- will pick back up from where it last stopped. To reset a 'WriteAheadLog',
 -- its associated directory must be emptied.
 --
--- This function is exception-safe, in that the log files will be
--- properly closed, even if the continuation throws an exception.
+-- The log is closed once the continuation returns, or throws an exception.
+-- All queued appends will be flushed before terminating.
 withWriteAheadLog ::
   (MonadIO m, MonadMask m) =>
   WALCodec a ->
   WALConfig ->
   (WriteAheadLog a -> m b) ->
   m b
-withWriteAheadLog codec config act = do
-  wal <- liftIO (open codec config)
-  act wal `finally` liftIO (close wal)
+withWriteAheadLog codec config =
+  bracket (liftIO (open codec config)) (liftIO . close)
 
 -- | Open a write-ahead log.
 --
@@ -227,16 +250,83 @@ open codec config = do
 
   h <- WALFile.open path
   sz <- WALFile.size h
-  WriteAheadLog
-    codec
-    config
-    <$> newMVar (WALHandle h path)
-    <*> newIORef latest
-    <*> newIORef (fromIntegral sz)
-    <*> newIORef Nothing
+  wal <-
+    WriteAheadLog
+      codec
+      config
+      <$> newMVar (WALHandle h path)
+      <*> newIORef latest
+      <*> newIORef (fromIntegral sz)
+      <*> newIORef Nothing
+      <*> newTQueueIO
+      <*> newTVarIO False
+      <*> newEmptyMVar
+
+  -- 'open' runs with asynchronous exceptions masked, which the writer
+  -- thread would otherwise inherit
+  _ <- forkIOWithUnmask $ \unmask -> do
+    unmask (runWriter wal) `catch` \e -> do
+      -- Nothing will write the appends which are still queued
+      queued <- atomically $ do
+        writeTVar (walClosed wal) True
+        flushTQueue (walAppends wal)
+      traverse_ (\(Append _ done) -> reply done (Left e)) queued
+    putMVar (walWriterDone wal) ()
+  pure wal
+  where
+    reply done = void . tryPutMVar done
+
+    runWriter wal = do
+      appends <- atomically $ do
+        appends <- flushTQueue (walAppends wal)
+        closed <- readTVar (walClosed wal)
+        when (null appends && not closed) retry
+        pure appends
+      unless (null appends) $ do
+        writeAppends wal appends `catch` \e -> do
+          traverse_ (\(Append _ done) -> reply done (Left e)) appends
+          throwIO (e :: SomeException)
+        runWriter wal
+
+    writeAppends _ [] = pure ()
+    writeAppends wal appends@(Append _ firstDone : others) = do
+      rotated <- try $ withActiveSegment wal $ \handle -> do
+        written <- readIORef (walWritten wal)
+        if written >= maxSegmentBytes (walConfig wal)
+          then void <$> rotateLocked wal handle
+          else pure (handle, ())
+
+      case rotated of
+        Left e -> reply firstDone (Left e) >> writeAppends wal others
+        Right () -> do
+          written <- readIORef (walWritten wal)
+          let (batch, rest) = fillSegment (maxSegmentBytes (walConfig wal)) written appends
+              bytes = BS.concat [b | Append b _ <- batch]
+          result <- try $ withActiveSegment wal $ \handle@(WALHandle h _) -> do
+            durably wal $
+              BSU.unsafeUseAsCStringLen bytes $ \(ptr, len) -> do
+                WALFile.writeAll h (castPtr ptr) len
+                WALFile.flush h
+            modifyIORef' (walWritten wal) (+ fromIntegral (BS.length bytes))
+            pure (handle, ())
+          traverse_ (\(Append _ done) -> reply done result) batch
+          writeAppends wal rest
+      where
+        fillSegment maxBytes = go
+          where
+            go _ [] = ([], [])
+            go written (append'@(Append bytes _) : rest)
+              | written' >= maxBytes = ([append'], rest)
+              | otherwise = first (append' :) (go written' rest)
+              where
+                written' = written + fromIntegral (BS.length bytes)
 
 close :: WriteAheadLog a -> IO ()
-close wal = withMVar (walHandle wal) $ \(WALHandle h _) -> WALFile.close h
+close wal = do
+  -- The writer thread writes the appends which are already queued, then stops
+  atomically (writeTVar (walClosed wal) True)
+  readMVar (walWriterDone wal)
+  withMVar (walHandle wal) $ \(WALHandle h _) -> WALFile.close h
 
 createDirectoryDurably :: OsPath -> IO ()
 createDirectoryDurably dir = do
@@ -347,19 +437,16 @@ appendMany :: (MonadIO m) => WriteAheadLog a -> NonEmpty a -> m ()
 appendMany wal xs = liftIO $ do
   bytes <- evaluate (BL.toStrict (BB.toLazyByteString (foldMap (frame . encodeEntry (walCodec wal)) xs)))
 
-  withActiveSegment wal $ \handle -> do
-    written <- readIORef (walWritten wal)
-    if written >= maxSegmentBytes (walConfig wal)
-      then void <$> rotateLocked wal handle
-      else pure (handle, ())
-
-  withActiveSegment wal $ \handle@(WALHandle h _) -> do
-    durably wal $
-      BSU.unsafeUseAsCStringLen bytes $ \(ptr, len) -> do
-        WALFile.writeAll h (castPtr ptr) len
-        WALFile.flush h
-    modifyIORef' (walWritten wal) (+ fromIntegral (BS.length bytes))
-    pure (handle, ())
+  -- TODO: we don't necessarily need to wait! That depends
+  --       on what the user wants. There should be a notion
+  --       of synchronicity-ness
+  done <- newEmptyMVar
+  enqueued <- atomically $ do
+    closed <- readTVar (walClosed wal)
+    unless closed (writeTQueue (walAppends wal) (Append bytes done))
+    pure (not closed)
+  unless enqueued (fail "WAL: the log is closed")
+  takeMVar done >>= either throwIO pure
 
 -- | Close the current segment and open a fresh, empty one.
 rotate :: (MonadIO m) => WriteAheadLog a -> m Segment
