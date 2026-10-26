@@ -81,7 +81,10 @@ library admin
                     , stm ^>=2.5
     default-language: GHC2021
 
-test-suite raft-consensus-distributed-process-test
+-- The test suite name is shortened because otherwise
+-- it can lead to paths that are too long for
+-- Windows to handle
+test-suite rcdp-test
     import:           warnings
     default-language: Haskell2010
     other-modules:    Test.Control.Distributed.Process.Raft
