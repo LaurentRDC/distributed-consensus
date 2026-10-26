@@ -4,6 +4,7 @@
 module Main (main) where
 
 import Control.Concurrent.Async (replicateConcurrently_)
+import Control.Monad (replicateM)
 import Data.Binary (Binary)
 import Data.ByteString (StrictByteString)
 import qualified Data.ByteString as BS
@@ -48,10 +49,13 @@ main =
                 whnfIO (appendMany wal (NonEmpty.fromList (batch batchSize)))
             | batchSize <- [100, 1000, 10_000]
             ],
-          bgroup
-            "concurrent append"
-            [ bench (show numThreads <> " threads") $
-                whnfIO (replicateConcurrently_ numThreads (append wal entry))
-            | numThreads <- [1, 8, 64]
-            ]
+          let threadBlocks = [1, 4, 8, 32, 64, 128]
+              totalNumberOfWrites = maximum threadBlocks
+           in bgroup
+                ("concurrent append (" <> show totalNumberOfWrites <> " total writes)")
+                [ bench (show numThreads <> " threads") $
+                    whnfIO (replicateConcurrently_ numThreads (replicateM numWritesPerThread $ append wal entry))
+                | numThreads <- threadBlocks,
+                  let numWritesPerThread = totalNumberOfWrites `div` numThreads
+                ]
         ]
