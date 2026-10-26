@@ -2,6 +2,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TupleSections #-}
 
 -- I like using <&>, sue me hlint
@@ -91,7 +92,7 @@ import Data.Int (Int64)
 import Data.List (sortOn)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
-import Data.Maybe (catMaybes)
+import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word32, Word64)
@@ -110,7 +111,9 @@ import System.IO
   )
 import System.IO.File.Durable (FHandle)
 import qualified System.IO.File.Durable as WALFile
-import System.OsPath (OsPath, decodeFS, encodeFS, takeDirectory, (</>))
+import System.OsPath (OsPath, osp, takeDirectory, unsafeEncodeUtf, (</>))
+import System.OsString (OsString)
+import qualified System.OsString as OsString
 import Text.Printf (printf)
 import Text.Read (readMaybe)
 
@@ -237,7 +240,7 @@ open codec config = do
         [] -> 0
         ns -> maximum ns
 
-  path <- (directory config </>) <$> segmentPath latest
+  let path = directory config </> segmentPath latest
 
   exists <- doesFileExist path
   if exists
@@ -373,35 +376,27 @@ newtype Segment = MkSegment Word32
   deriving (Show, Eq)
   deriving newtype (Ord, Enum, Integral, Real, Num, Read)
 
-segPrefix :: String
-segPrefix = "wal-"
+segPrefix :: OsString
+segPrefix = [osp|wal-|]
 
-segSuffix :: String
-segSuffix = ".log"
+segSuffix :: OsString
+segSuffix = [osp|.log|]
 
-segmentPath :: Segment -> IO OsPath
-segmentPath (MkSegment n) = encodeFS $ printf "wal-%06d.log" (fromIntegral n :: Int)
-
--- | Parse a segment number out of a file name produced by 'segmentName'.
--- Returns 'Nothing' for anything that isn't one of our segment files, so
--- stray files in the directory are safely ignored.
-parseSegment :: FilePath -> Maybe Segment
-parseSegment f
-  | take (length segPrefix) f == segPrefix,
-    drop (length f - length segSuffix) f == segSuffix =
-      readMaybe (drop (length segPrefix) (take (length f - length segSuffix) f))
-  | otherwise =
-      Nothing
+segmentPath :: Segment -> OsPath
+segmentPath (MkSegment n) = unsafeEncodeUtf $ printf "wal-%06d.log" (fromIntegral n :: Int)
 
 listSegmentsFromDir :: (MonadIO m) => OsPath -> m [(Segment, OsPath)]
 listSegmentsFromDir dir =
   liftIO $
     listDirectory dir
-      >>= traverse decodeFS
-      <&> fmap (\fp -> (,fp) <$> parseSegment fp)
-      <&> catMaybes
+      <&> mapMaybe (\fp -> (,fp) <$> parseSegment fp)
       <&> sortOn fst
-      >>= traverse (\(s, fs') -> (s,) <$> encodeFS fs')
+  where
+    parseSegment f = do
+      OsString.stripPrefix segPrefix f
+        >>= OsString.stripSuffix segSuffix
+        >>= OsString.decodeUtf
+        >>= readMaybe
 
 -- | List all segments relevant to this write-ahead log.
 --
@@ -459,7 +454,7 @@ rotateLocked wal (WALHandle h _) = do
   durably wal (WALFile.flush h)
 
   n' <- (+ 1) <$> readIORef (walActiveSegment wal)
-  path <- (directory (walConfig wal) </>) <$> segmentPath n'
+  let path = directory (walConfig wal) </> segmentPath n'
 
   -- The next segment file is overwritten
   withBinaryFile path WriteMode (const (pure ()))
@@ -533,9 +528,8 @@ replaySegment wal segment onEntry = liftIO $ do
     else replayUnusedSegment
   where
     replayUnusedSegment = do
-      p <- segmentPath segment
       withBinaryFile
-        (directory (walConfig wal) </> p)
+        (directory (walConfig wal) </> segmentPath segment)
         ReadMode
         $ \h -> streamPayloads h $ \payload ->
           either

@@ -96,7 +96,7 @@ testReplayIgnorePartialWrites = testProperty "Reading from a partially-written W
     withWriteAheadLog testCodec (WALConfig maxBound dir) $ \wal -> do
       traverse_ (appendMany wal) (nonEmpty entries)
 
-    fp <- (dir </>) <$> segmentPath 0
+    let fp = dir </> segmentPath 0
     liftIO
       $ withBinaryFile
         fp
@@ -139,7 +139,7 @@ testOpenRepairsPartialWrites = testProperty "Opening a partially-torn WAL result
     withWriteAheadLog testCodec (WALConfig maxBound dir) $ \wal -> do
       traverse_ (appendMany wal) (nonEmpty entries)
 
-    fp <- (dir </>) <$> segmentPath 0
+    let fp = dir </> segmentPath 0
     liftIO
       $ withBinaryFile
         fp
@@ -167,7 +167,7 @@ testOpenRepairsCorruptedRecords = testProperty "Opening a WAL with a corrupted r
     withWriteAheadLog testCodec (WALConfig maxBound dir) $ \wal -> do
       traverse_ (appendMany wal) (nonEmpty entries)
 
-    fp <- (dir </>) <$> segmentPath 0
+    let fp = dir </> segmentPath 0
     withBinaryFile fp ReadWriteMode $ \h -> do
       hSeek h AbsoluteSeek (toInteger checksumOffset)
       byte <- BS.hGet h 1

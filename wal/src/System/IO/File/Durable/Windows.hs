@@ -13,11 +13,11 @@ import Control.Exception (onException)
 import Data.Word (Word32, Word8)
 import Foreign (Ptr)
 import System.IO
-import System.OsPath (OsPath, decodeFS)
+import System.OsPath (OsPath)
+import System.OsString.Internal.Types (getOsString)
 import System.Win32
   ( HANDLE,
     closeHandle,
-    createFile,
     fILE_ATTRIBUTE_NORMAL,
     fILE_END,
     fILE_SHARE_NONE,
@@ -28,13 +28,13 @@ import System.Win32
     win32_WriteFile,
   )
 import System.Win32.File (BY_HANDLE_FILE_INFORMATION (bhfiSize), getFileInformationByHandle)
+import System.Win32.WindowsString.File (createFile)
 
 newtype FHandle = FHandle HANDLE
 
 open :: OsPath -> IO FHandle
 open filename = do
-  fp <- decodeFS filename
-  h <- createFile fp gENERIC_WRITE fILE_SHARE_NONE Nothing oPEN_ALWAYS fILE_ATTRIBUTE_NORMAL Nothing
+  h <- createFile (getOsString filename) gENERIC_WRITE fILE_SHARE_NONE Nothing oPEN_ALWAYS fILE_ATTRIBUTE_NORMAL Nothing
   _ <- setFilePointerEx h 0 fILE_END `onException` closeHandle h
   pure (FHandle h)
 

@@ -23,7 +23,8 @@ import Foreign.C (CInt (..), throwErrnoIfMinus1Retry_)
 #if defined(darwin_HOST_OS)
 import Foreign.C (eINTR, eNOTSUP, getErrno, throwErrno)
 #endif
-import System.OsPath (OsPath, decodeFS)
+import System.OsPath (OsPath)
+import System.OsString.Internal.Types (getOsString)
 import System.Posix
   ( Fd (Fd),
     OpenFileFlags (append, creat),
@@ -31,20 +32,19 @@ import System.Posix
     closeFd,
     defaultFileFlags,
     fdWriteBuf,
-    openFd,
     stdFileMode,
   )
+import System.Posix.IO.PosixString (openFd)
 import System.Posix.Internals (fdFileSize)
 
 newtype FHandle = FHandle Fd
 
 -- should handle opening flags correctly
 open :: OsPath -> IO FHandle
-open filename = do
-  fp <- decodeFS filename
+open filename =
   FHandle
     <$> openFd
-      fp
+      (getOsString filename)
       WriteOnly
       defaultFileFlags
         { creat = Just stdFileMode,
@@ -64,9 +64,8 @@ flush (FHandle (Fd c_fd)) = fullSync c_fd
 -- | Block until the entries of a directory (e.g. newly-created files) have
 -- been persisted.
 syncDirectory :: OsPath -> IO ()
-syncDirectory dirname = do
-  fp <- decodeFS dirname
-  bracket (openFd fp ReadOnly defaultFileFlags) closeFd $
+syncDirectory dirname =
+  bracket (openFd (getOsString dirname) ReadOnly defaultFileFlags) closeFd $
     \(Fd c_fd) -> fullSync c_fd
 
 fullSync :: CInt -> IO ()

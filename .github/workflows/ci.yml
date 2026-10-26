@@ -33,6 +33,9 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    # Windows is allowed to fail without failing the whole workflow, because
+    # I don't have a windows machine to debug things
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -44,16 +47,12 @@ jobs:
           - '9.10'
           - '9.12'
           - '9.14'
-
-        # The tests below are disabled for different reasons:
-        # * MacOS: something wrong with the runners: https://github.com/actions/runner-images/issues/14940
-        # * Windows: Something wrong with 'raft-consensus-distributed-process'. Not clear what's up.
-        # 
-        # include:
-        #   # I only want to check that Windows' and macOS' WAL tests pass,
-        #   # without having too many job variations
-        #   - os: 'windows-latest'
-        #     ghc: '9.14'
+          # I only want to check that Windows' and macOS' WAL tests pass,
+          # without having too many job variations
+        include:
+          - os: 'windows-latest'
+            ghc: '9.14'
+        # Something wrong with the MacOS runners: https://github.com/actions/runner-images/issues/14940
         #   - os: 'macos-latest'
         #     ghc: '9.14'
 

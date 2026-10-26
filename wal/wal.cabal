@@ -43,8 +43,9 @@ library
                     , containers >=0.7 && <0.9
                     , crc32c ^>=0.2
                     , directory >=1.3.8.0 && <1.4
-                    , filepath >=1.4.101.0 && <1.6
+                    , filepath ^>=1.5
                     , file-io ^>=0.2
+                    , os-string ^>=2.0
                     , exceptions
                     , stm ^>=2.5
     hs-source-dirs:   src
