@@ -36,7 +36,6 @@ library
                     , bytestring
                     , binary ^>=0.8
                     , containers
-                    , directory
                     , exceptions
                     , filepath >=1.5 && <1.6
                     , file-io

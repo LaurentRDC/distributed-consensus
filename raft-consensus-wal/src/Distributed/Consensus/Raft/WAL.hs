@@ -1,7 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 
 -- I like <&>
 {- HLINT ignore "Functor law" -}
@@ -17,7 +16,7 @@ module Distributed.Consensus.Raft.WAL
 where
 
 import Control.Exception (SomeException, try)
-import Control.Monad (void, when)
+import Control.Monad (when)
 import Control.Monad.Catch (MonadMask)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Binary (Binary)
@@ -31,10 +30,10 @@ import Data.List.NonEmpty (nonEmpty)
 import qualified Data.Map.Strict as Map
 import Distributed.Consensus.Raft (LogEntry, LogIndex, Persistence (..), Snapshot, Term)
 import GHC.Generics (Generic)
-import System.Directory.OsPath (removeFile)
 import System.File.OsPath (withBinaryFile)
 import qualified System.File.OsPath as IO
 import System.IO (IOMode (..))
+import qualified System.IO.File.Durable as Durable
 import System.IO.WAL (WALCodec (..), WALConfig (..), activeSegment, append, appendMany, binaryWALCodec, replaySegment, rotate, withWriteAheadLog)
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import qualified System.OsPath as OsPath
@@ -71,6 +70,10 @@ withPersistence ::
   -- | Codec to encode and decode data to/from the log. If you don't want to choose,
   -- just use 'binaryWALCodec'. If you want to squeeze as much performance as you can,
   -- you will need to created your own 'WALCodec'.
+  --
+  -- This codec is only relevant for data in the write-ahead log. Smaller pieces of data
+  -- (e.g. a server's current term or commit index) is serialized to small files
+  -- using the 'Binary' instance.
   WALCodec (RaftRecord entry node state) ->
   -- | Continuation
   (Persistence entry node state m -> m a) ->
@@ -134,10 +137,11 @@ withPersistence dir codec f = do
     commitIndexFile = dir </> unsafeEncodeUtf "commit_index"
 
     readTermFromFile _node = liftIO $ try (IO.readFile termFile) >>= either (\(_ :: SomeException) -> pure 0) (pure . Binary.decode)
-    writeTermToFile _node = liftIO . IO.writeFile termFile . Binary.encode
+
+    writeTermToFile _node = writeDurably termFile
 
     readCommitIndexFromFile _node = liftIO $ try (IO.readFile commitIndexFile) >>= either (\(_ :: SomeException) -> pure 0) (pure . Binary.decode)
-    writeCommitIndexToFile _node = liftIO . IO.writeFile commitIndexFile . Binary.encode
+    writeCommitIndexToFile _node = writeDurably commitIndexFile
 
     readVotedForFromFile _node term =
       liftIO $
@@ -151,14 +155,8 @@ withPersistence dir codec f = do
           )
           >>= either (\(_ :: SomeException) -> pure Nothing) (pure . Just)
 
-    writeVotedForToFile _node term Nothing = liftIO $ void $ try @SomeException $ removeFile (voteFile term)
-    writeVotedForToFile _node term (Just v) =
-      liftIO
-        $ void
-        $ withBinaryFile
-          (voteFile term)
-          WriteMode
-        $ \h -> BSL.hPut h (Binary.encode v)
+    writeVotedForToFile _node term Nothing = liftIO $ Durable.removeFileDurable (voteFile term)
+    writeVotedForToFile _node term (Just v) = writeDurably (voteFile term) v
 
     readSnapshotFromWAL wal _node = do
       ref <- liftIO $ newIORef Nothing
@@ -175,3 +173,10 @@ withPersistence dir codec f = do
     writeSnapshotToWAL wal _node snap = do
       _ <- rotate wal
       append wal (SnapshotRecord snap)
+
+writeDurably :: (MonadIO m, Binary a) => OsPath -> a -> m ()
+writeDurably file =
+  liftIO
+    . Durable.writeFileAtomic file
+    . BSL.toStrict
+    . Binary.encode
