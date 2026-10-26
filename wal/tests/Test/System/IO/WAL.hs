@@ -1,25 +1,33 @@
 {-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE TupleSections #-}
 
 module Test.System.IO.WAL (tests) where
 
+import Control.Exception (SomeException, try)
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
+import Data.Bits (complement)
 import Data.ByteString (StrictByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
-import Data.Foldable (for_, traverse_)
+import qualified Data.ByteString.Char8 as BS8
+import Data.Either (isLeft)
+import Data.Foldable (for_, toList, traverse_)
 import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.Int (Int64)
 import Data.List (isPrefixOf)
 import Data.List.NonEmpty (nonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
+import Data.Traversable (for)
 import Hedgehog (annotate, assert, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import System.File.OsPath (withBinaryFile)
-import System.IO (IOMode (..), hFileSize, hSetFileSize)
+import System.IO (IOMode (..), SeekMode (..), hFileSize, hSeek, hSetFileSize)
 import System.IO.Temp (withSystemTempDirectory)
 import System.IO.WAL
 import System.OsPath (encodeFS, (</>))
+import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.Hedgehog (testProperty)
 
@@ -30,7 +38,10 @@ tests =
     [ testTripping,
       testReplayIgnorePartialWrites,
       testOpenRepairsPartialWrites,
-      testSingleVsManyAppend
+      testOpenRepairsCorruptedRecords,
+      testReplayFailsOnUndecodableRecords,
+      testSingleVsManyAppend,
+      testAutomaticRotation
     ]
 
 testTripping :: TestTree
@@ -138,6 +149,61 @@ testOpenRepairsPartialWrites = testProperty "Opening a partially-torn WAL result
 
   fromIntegral size === sum (toFramedSize <$> expectedPrefix)
 
+testOpenRepairsCorruptedRecords :: TestTree
+testOpenRepairsCorruptedRecords = testProperty "Opening a WAL with a corrupted record truncates the log at that record" $ property $ do
+  entries <- forAll $ Gen.list (Range.linear 1 1024) (Gen.bytes (Range.linear 0 107))
+  corrupted <- forAll $ Gen.int (Range.linear 0 (length entries - 1))
+
+  let toFramedSize bytes = 4 + 4 + BS.length bytes
+      expectedPrefix = take corrupted entries
+      checksumOffset = sum (toFramedSize <$> expectedPrefix) + 4
+
+  (replayed, size) <- liftIO $ withSystemTempDirectory "wal-testing-corrupted" $ \tmpDir -> do
+    dir <- encodeFS tmpDir
+    withWriteAheadLog testCodec (WALConfig maxBound dir) $ \wal -> do
+      traverse_ (appendMany wal) (nonEmpty entries)
+
+    fp <- (dir </>) <$> segmentPath 0
+    withBinaryFile fp ReadWriteMode $ \h -> do
+      hSeek h AbsoluteSeek (toInteger checksumOffset)
+      byte <- BS.hGet h 1
+      hSeek h AbsoluteSeek (toInteger checksumOffset)
+      BS.hPut h (BS.map complement byte)
+
+    replayed <- timeout 10_000_000 $ withWriteAheadLog testCodec (WALConfig maxBound dir) $ \wal -> do
+      replayedRef <- newIORef []
+      replayAll wal (\e -> modifyIORef' replayedRef (e :))
+      reverse <$> readIORef replayedRef
+
+    (replayed,) <$> withBinaryFile fp ReadMode hFileSize
+
+  replayed === Just expectedPrefix
+  fromIntegral size === sum (toFramedSize <$> expectedPrefix)
+
+testReplayFailsOnUndecodableRecords :: TestTree
+testReplayFailsOnUndecodableRecords = testProperty "Replaying a record which can't be decoded is an error" $ property $ do
+  before <- forAll $ Gen.list (Range.linear 0 100) (Gen.bytes (Range.linear 0 24))
+  after <- forAll $ Gen.list (Range.linear 0 100) (Gen.bytes (Range.linear 0 24))
+
+  let undecodable = BS8.pack "undecodable"
+      pickyCodec =
+        testCodec
+          { decodeEntry = \bytes ->
+              if bytes == undecodable
+                then Left "undecodable entry"
+                else Right bytes
+          }
+
+  result <- liftIO $ withSystemTempDirectory "wal-testing-undecodable" $ \tmpDir -> do
+    dir <- encodeFS tmpDir
+    withWriteAheadLog testCodec (WALConfig maxBound dir) $ \wal ->
+      for_ (before <> [undecodable] <> after) (append wal)
+
+    timeout 10_000_000 $ withWriteAheadLog pickyCodec (WALConfig maxBound dir) $ \wal ->
+      try (replayAll wal (const (pure ())))
+
+  fmap isLeft (result :: Maybe (Either SomeException ())) === Just True
+
 testSingleVsManyAppend :: TestTree
 testSingleVsManyAppend = testProperty "append and appendMany give the same result" $ property $ do
   entriesBatched <-
@@ -174,6 +240,34 @@ testSingleVsManyAppend = testProperty "append and appendMany give the same resul
       reverse <$> readIORef replayedRef
 
   replayedMany === entries
+
+testAutomaticRotation :: TestTree
+testAutomaticRotation = testProperty "Segments rotate automatically once they are full" $ property $ do
+  entries <- forAll $ Gen.list (Range.linear 1 100) (Gen.bytes (Range.linear 0 24))
+  maxBytes <- forAll $ Gen.int64 (Range.linear 8 256)
+
+  replayed <- liftIO $ withSystemTempDirectory "wal-testing-rotation" $ \tmpDir -> do
+    dir <- encodeFS tmpDir
+    timeout 10_000_000 $ withWriteAheadLog testCodec (WALConfig maxBytes dir) $ \wal -> do
+      for_ entries (append wal)
+
+      segs <- toList <$> segments wal
+      for segs $ \seg -> do
+        replayedRef <- newIORef []
+        replaySegment wal seg (\e -> modifyIORef' replayedRef (e :))
+        reverse <$> readIORef replayedRef
+
+  replayed === Just (expectedSegments maxBytes entries)
+  where
+    expectedSegments :: Int64 -> [StrictByteString] -> [[StrictByteString]]
+    expectedSegments maxBytes = go 0 []
+      where
+        go _ current [] = [reverse current]
+        go written current (e : es)
+          | written >= maxBytes = reverse current : go (framedSize e) [e] es
+          | otherwise = go (written + framedSize e) (e : current) es
+
+        framedSize e = fromIntegral (4 + 4 + BS.length e)
 
 testCodec :: WALCodec StrictByteString
 testCodec = WALCodec Builder.byteString pure
