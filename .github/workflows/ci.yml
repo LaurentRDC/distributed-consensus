@@ -38,16 +38,24 @@ jobs:
       matrix:
         os:
           - 'ubuntu-latest'
-          # TODO: windows tests, especially for the 'wal' library.
-          #       Unfortunately, I don't have a Windows machine handy,
-          #       so I can't replicate test failures
-          # - 'windows-latest'
         ghc:
           - '9.6'
           - '9.8'
           - '9.10'
           - '9.12'
           - '9.14'
+
+        # The tests below are disabled for different reasons:
+        # * MacOS: something wrong with the runners: https://github.com/actions/runner-images/issues/14940
+        # * Windows: Something wrong with 'raft-consensus-distributed-process'. Not clear what's up.
+        # 
+        # include:
+        #   # I only want to check that Windows' and macOS' WAL tests pass,
+        #   # without having too many job variations
+        #   - os: 'windows-latest'
+        #     ghc: '9.14'
+        #   - os: 'macos-latest'
+        #     ghc: '9.14'
 
     steps:
       - uses: actions/checkout@v4
