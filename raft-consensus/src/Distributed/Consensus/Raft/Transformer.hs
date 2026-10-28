@@ -81,7 +81,6 @@ import Data.Traversable (for)
 import Distributed.Consensus.Raft.Domain
   ( ClusterConfiguration (..),
     LogIndex,
-    RequestId (clientRequestId),
     Role (..),
     Snapshot (..),
     SnapshotMetadata (..),
@@ -89,10 +88,9 @@ import Distributed.Consensus.Raft.Domain
     Term,
     allNodes,
     hasQuorum,
-    mkRequestId,
   )
 import Distributed.Consensus.Raft.Domain.Admin (AdminResponse)
-import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientResponse, ClientResult (..))
+import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientRequestId, ClientResponse, ClientResult (..))
 import Distributed.Consensus.Raft.Implementation hiding (sendAdminResponse, sendClientResponse, sendRPC, sendRPCResult)
 import qualified Distributed.Consensus.Raft.Implementation as Impl
 import Distributed.Consensus.Raft.Log (Lookup (..), absoluteIndex, logEntries)
@@ -108,7 +106,6 @@ import Lens.Micro.Platform
     (%=),
     (+=),
     (.=),
-    (<%=),
     (^.),
     _1,
     _3,
@@ -396,7 +393,7 @@ applyCommittedEntries = do
             Nothing -> pure () -- TODO: isn't this unexpected?
             Just requester -> do
               for_ responses $ \response -> do
-                runSend $ sendClientResponse requester (MkResponse (clientRequestId reqId) (Just leaderId) (Success response))
+                runSend $ sendClientResponse requester (MkResponse reqId (Just leaderId) (Success response))
                 trace (`CommandResultResponded` MkCommandResponse (Success response) reqId)
               currentClientRequests %= Map.delete reqId
 
@@ -455,7 +452,7 @@ acceptClientRequests ::
   (MonadMVar m) =>
   -- | Client node
   NonEmpty (ClientRequest node entry) ->
-  RaftT entry node state result m (NonEmpty RequestId)
+  RaftT entry node state result m (NonEmpty ClientRequestId)
 acceptClientRequests requests = do
   -- The term is part of the request ID. Our internal counter is volatile and
   -- restarts from zero whenever we boot, so without the term an entry stamped
@@ -466,15 +463,13 @@ acceptClientRequests requests = do
   sm <- view implementation <&> stateMachine
   s <- self
   for requests $ \(MkRequest clientReqId clientId entry) -> do
-    internalReqId <- nextRequestId <%= succ
-    let reqId = mkRequestId ourTerm internalReqId clientReqId
     case sm entry of
       -- Read-only requests don't go to the log, and so
       -- we need to persist more information about them.
       Read runRead -> do
         pendingReadRequests
           %= Map.insert
-            reqId
+            clientReqId
             ( MkPendingRead
                 { _pendingReadTerm = ourTerm,
                   _pendingReadLogIndex = ci,
@@ -484,8 +479,8 @@ acceptClientRequests requests = do
                 }
             )
         trace (\ctx -> ReadOnlyQueryQueued ctx ci entry)
-      Transition _ -> currentClientRequests %= Map.insert reqId clientId
-    pure reqId
+      Transition _ -> currentClientRequests %= Map.insert clientReqId clientId
+    pure clientReqId
 
 currentSnapshot :: (Monad m) => RaftT entry node state result m (Snapshot node state)
 currentSnapshot = do
@@ -557,7 +552,7 @@ serveReadOnlyQueries = whenRole Leader $ do
     runSend $
       sendClientResponse
         (request ^. pendingReadClient)
-        (MkResponse (clientRequestId reqId) (Just leaderId) (Success result))
+        (MkResponse reqId (Just leaderId) (Success result))
 
     trace (`CommandResultResponded` MkCommandResponse (Success result) reqId)
 
@@ -757,7 +752,7 @@ leaderStepDown :: (MonadAsync m) => Maybe node -> RaftT entry node state result 
 leaderStepDown mNewLeader = whenRole Leader $ do
   clientReqs <- use currentClientRequests
   for_ (Map.toList clientReqs) $ \(reqId, requester) -> do
-    runSend $ sendClientResponse requester (MkResponse (clientRequestId reqId) mNewLeader NotLeader)
+    runSend $ sendClientResponse requester (MkResponse reqId mNewLeader NotLeader)
     trace (`CommandResultResponded` MkCommandResponse NotLeader reqId)
 
   currentClientRequests .= mempty
@@ -767,7 +762,7 @@ leaderStepDown mNewLeader = whenRole Leader $ do
     runSend $
       sendClientResponse
         (request ^. pendingReadClient)
-        (MkResponse (clientRequestId reqId) mNewLeader NotLeader)
+        (MkResponse reqId mNewLeader NotLeader)
     trace (`CommandResultResponded` MkCommandResponse NotLeader reqId)
 
   pendingReadRequests .= mempty

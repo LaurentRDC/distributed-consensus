@@ -31,9 +31,9 @@ where
 import Data.Binary (Binary)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Sequence (Seq)
-import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, RequestId, Snapshot, SnapshotMetadata, StateMachineStep, Term)
+import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, Snapshot, SnapshotMetadata, StateMachineStep, Term)
 import Distributed.Consensus.Raft.Domain.Admin (AdminRequest, AdminResponse)
-import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientResponse, ClientResult)
+import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientRequestId, ClientResponse, ClientResult)
 import Distributed.Consensus.Raft.Log (Log)
 import GHC.Generics (Generic)
 
@@ -137,10 +137,7 @@ data Persistence entry node state m = Persistence
 -- | A 'Command' comes from clients
 data Command entry
   = Command
-      -- | A 'RequestId' allows a leader to wait for a message
-      --      before answering the client. This allows a leader to
-      --      allow connections from multiple clients.
-      !RequestId
+      !ClientRequestId
       !entry
   deriving (Eq, Show, Ord, Generic)
 
@@ -161,7 +158,7 @@ instance (Binary node, Binary entry) => Binary (LogEntry node entry)
 data CommandResponse node result
   = MkCommandResponse
       !result
-      !RequestId
+      !ClientRequestId
   deriving (Eq, Show, Ord, Generic)
 
 instance (Binary node, Binary result) => Binary (CommandResponse node result)
@@ -293,7 +290,7 @@ data RaftTrace entry result node state
   | -- | Command received by the leader node. If the command needs to be redirected
     --    to another node, this event is not emitted
     -- All Commands should have the same request ID
-    CommandReceived (EventContext node) !RequestId entry
+    CommandReceived (EventContext node) !ClientRequestId entry
   | CommandResultResponded (EventContext node) (CommandResponse node (ClientResult result))
   | -- TODO: better traching of new joining/leaving cluster
     MembershipChangeInitiated (EventContext node)

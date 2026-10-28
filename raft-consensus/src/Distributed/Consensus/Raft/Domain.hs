@@ -4,16 +4,16 @@
 
 module Distributed.Consensus.Raft.Domain
   ( Term,
-    InternalRequestId,
-    RequestId,
-    mkRequestId,
-    requestTerm,
-    clientRequestId,
     Role (..),
     ClusterConfiguration (..),
     allNodes,
     hasQuorum,
     LogIndex,
+
+    -- * Sessions and sequences
+    SessionId,
+    sessionId,
+    SequenceNum,
 
     -- * Snapshots
     Snapshot (..),
@@ -30,35 +30,13 @@ import Data.Int (Int64)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word64)
-import Distributed.Consensus.Raft.Domain.Client (ClientRequestId)
 import GHC.Generics (Generic)
+import System.Random (Uniform)
 
 -- | Election term
 newtype Term = Term Int64
   deriving stock (Generic, Eq, Ord, Show, Read)
   deriving newtype (Real, Binary, Enum, Num, Integral)
-
-newtype InternalRequestId = InternalRequestId Word64
-  deriving stock (Generic, Eq, Ord, Show)
-  deriving newtype (Real, Binary, Enum, Num, Integral)
-
--- | A 'RequestId' identifies a request from a client, uniquely across the
--- whole history of a cluster.
---
--- In order to support multiple concurrent clients, we mix the client-provided
--- ID with a monotonic internal ID. However, the monotonic internal ID is lost
--- on crash, so we include the term as well.
-data RequestId = RequestId
-  { requestTerm :: !Term,
-    internalRequestId :: !InternalRequestId,
-    clientRequestId :: !ClientRequestId
-  }
-  deriving stock (Generic, Eq, Ord, Show)
-
-instance Binary RequestId
-
-mkRequestId :: Term -> InternalRequestId -> ClientRequestId -> RequestId
-mkRequestId = RequestId
 
 data Role
   = Leader
@@ -83,6 +61,24 @@ data ClusterConfiguration node
   deriving (Eq, Ord, Generic, Show)
 
 instance (Binary node) => Binary (ClusterConfiguration node)
+
+-- | Uniquely identifies a session between a cluster and a client or admin, globally. This
+-- value should be generated at random.
+data SessionId = MkSessionId Word64 Word64
+  deriving (Eq, Show, Ord, Generic)
+
+instance Binary SessionId
+
+instance Uniform SessionId
+
+sessionId :: Word64 -> Word64 -> SessionId
+sessionId = MkSessionId
+
+-- | Incrementing sequence number for every client or admin request
+-- in the same session.
+newtype SequenceNum = MkSequenceNum Word64
+  deriving stock (Eq, Ord)
+  deriving newtype (Show, Real, Num, Enum, Integral, Binary)
 
 allNodes :: (Ord node) => ClusterConfiguration node -> Set node
 allNodes (Simple nodes) = nodes

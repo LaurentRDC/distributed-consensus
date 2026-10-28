@@ -9,11 +9,17 @@ module Distributed.Consensus.Raft.Client
   ( RaftClientT,
     ClientImplementation (..),
     withRaftClientT,
-    request,
+    sendClientRequest,
     ClientError (..),
     Microseconds,
 
+    -- ** Request payloads
+    newRequest,
+
     -- * Communications between clients and clusters
+    SessionId,
+    sessionId,
+    SequenceNum,
     ClientRequestId (..),
     ClientRequest,
     Request (..),
@@ -23,16 +29,21 @@ module Distributed.Consensus.Raft.Client
   )
 where
 
-import Control.Arrow ((&&&))
-import Control.Concurrent.Class.MonadSTM (TMVar, TVar, atomically, newEmptyTMVar, newTVarIO, putTMVar, readTMVar, readTVar, writeTVar)
+import Control.Concurrent.Class.MonadSTM (MonadSTM, TMVar, TVar, atomically, newEmptyTMVar, newTVarIO, putTMVar, readTMVar, readTVar, writeTVar)
 import Control.Monad.Class.MonadAsync (MonadAsync, withAsync)
-import Control.Monad.Class.MonadTimer (MonadTimer)
 import Control.Monad.Trans.Class (MonadTrans, lift)
 import Control.Monad.Trans.Reader (ReaderT (runReaderT), asks)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Text (Text)
-import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientRequestId (..), ClientResponse, ClientResult (..))
+import Distributed.Consensus.Raft.Domain.Client
+  ( ClientRequest,
+    ClientRequestId (..),
+    ClientResponse,
+    ClientResult (..),
+    SequenceNum,
+    SessionId,
+    sessionId,
+  )
 import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import Distributed.Consensus.Raft.Timer (Microseconds)
 import Lens.Micro.Platform (makeLenses)
@@ -55,7 +66,9 @@ instance MonadTrans (RaftClientT entry node result) where
 
 data ClientImplementation entry node result m = ClientImplementation
   { sendRequest :: node -> ClientRequest node entry -> m (),
-    receiveResponse :: m (ClientResponse node result)
+    receiveResponse :: m (ClientResponse node result),
+    -- | Generate a globally-unique session ID.
+    generateSessionId :: node -> m SessionId
   }
 
 -- | Open a client session, and run an action with a runner for that session.
@@ -71,9 +84,11 @@ withRaftClientT ::
 withRaftClientT self impl withSession = do
   nRId <- newTVarIO 0
   mbox <- newTVarIO mempty
+  sessId <- generateSessionId impl self
   let env =
         MkRaftClientEnv
           { node = self,
+            currentSessionId = sessId,
             nextRequestId = nRId,
             implementation = impl,
             mailbox = mbox
@@ -94,7 +109,8 @@ withRaftClientT self impl withSession = do
 data RaftClientEnv entry node result m
   = MkRaftClientEnv
   { node :: !node,
-    nextRequestId :: !(TVar m ClientRequestId),
+    currentSessionId :: !SessionId,
+    nextRequestId :: !(TVar m SequenceNum),
     implementation :: ClientImplementation entry node result m,
     mailbox :: TVar m (Map ClientRequestId (TMVar m (ClientResponse node result)))
   }
@@ -102,17 +118,26 @@ data RaftClientEnv entry node result m
 makeLenses ''ClientImplementation
 
 -- | Possible client errors
-data ClientError node
-  = Timeout
-  | -- | The client should make the request to another node
+data ClientError entry node
+  = -- | The client should make the request to another node
     Redirect node
   | NoKnownLeader
-  | SomeFailure !Text
   deriving (Eq, Show, Ord)
+
+newRequest :: (MonadSTM m) => entry -> RaftClientT entry node result m (ClientRequest node entry)
+newRequest entry = do
+  (seqNumVar, sessId, self) <- MkRaftClientT $ asks ((,,) <$> nextRequestId <*> currentSessionId <*> node)
+  reqId <- lift $ atomically $ do
+    nextSeqNum <- readTVar seqNumVar
+    writeTVar seqNumVar (succ nextSeqNum)
+    pure $ MkClientRequestId sessId nextSeqNum
+
+  pure $ MkRequest reqId self entry
 
 -- | Send a request to a Raft cluster.
 --
--- The user must take care to handle the possible 'ClientError's.
+-- The user must take care to handle the possible 'ClientError's, and be
+-- ready to retry.
 --
 -- First, it is quite likely that the server will redirect requests
 -- via @'Redirect' otherServer@. 'request' does not follow that redirect,
@@ -127,32 +152,37 @@ data ClientError node
 --   particular purpose.
 --
 -- It is perfectly safe, and encouraged, to send separate requests in
--- separate threads.
-request ::
-  (MonadTimer m) =>
+-- separate threads. However, you should call 'withRaftClientT' only once.
+sendClientRequest ::
+  (MonadSTM m) =>
   node ->
-  entry ->
-  RaftClientT entry node result m (Either (ClientError node) (node, result))
-request lastKnownLeader entry = do
-  (self, send) <- MkRaftClientT $ asks (node &&& sendRequest . implementation)
+  ClientRequest node entry ->
+  RaftClientT
+    entry
+    node
+    result
+    m
+    ( Either
+        (ClientError entry node)
+        (node, result)
+    )
+sendClientRequest lastKnownLeader req@(MkRequest reqId _ _) = do
+  send <- MkRaftClientT $ asks (sendRequest . implementation)
   mbox <- MkRaftClientT $ asks mailbox
-  reqIdVar <- MkRaftClientT $ asks nextRequestId
   lift
     ( do
-        (reqId, resultVar) <- atomically $ do
-          r <- readTVar reqIdVar
-          writeTVar reqIdVar (succ r)
-
+        resultVar <- atomically $ do
           mbox' <- readTVar mbox
           resultVar <- newEmptyTMVar
-          writeTVar mbox (Map.insert r resultVar mbox')
+          -- TODO: bracket to deregister
+          writeTVar mbox (Map.insert reqId resultVar mbox')
 
-          pure (r, resultVar)
+          pure resultVar
 
-        send
-          lastKnownLeader
-          (MkRequest reqId self entry)
+        send lastKnownLeader req
 
+        -- TODO: clean up mailbox entry for req ID
+        --       regardless of success (possibly using 'bracket')
         atomically
           ( do
               resp <- readTMVar resultVar
@@ -162,7 +192,6 @@ request lastKnownLeader entry = do
           )
     )
     >>= \case
-      (MkResponse _ _ (Failure errmsg)) -> pure $ Left $ SomeFailure errmsg
       (MkResponse _ (Just actualLeaderId) NotLeader) -> pure $ Left $ Redirect actualLeaderId
       (MkResponse _ (Just leader) (Success result)) -> pure $ Right (leader, result)
       -- TODO: what if leader is @Nothing@ but response is `Success`??

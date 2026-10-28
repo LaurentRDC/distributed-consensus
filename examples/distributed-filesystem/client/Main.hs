@@ -4,7 +4,7 @@
 
 import Control.Distributed.Process (NodeId (NodeId))
 import Control.Distributed.Process.Node (initRemoteTable, newLocalNode, runProcess)
-import Control.Distributed.Process.Raft.Client (ClientError (Redirect), request, withRaftClient)
+import Control.Distributed.Process.Raft.Client (ClientError (Redirect), newRequest, sendClientRequest, withRaftClient)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text.IO
@@ -56,19 +56,21 @@ main = do
   let serverNodeId = NodeId (encodeEndPointAddress "127.0.0.1" (rcServer opts) 0)
 
   runProcess node $
-    withRaftClient $ \runAction ->
+    withRaftClient $ \runAction -> do
+      req <- runAction $ newRequest (rcCommand opts)
       let makeRequest server =
-            runAction (request server (rcCommand opts)) >>= \case
-              Left (Redirect otherServerNode) -> do
-                liftIO $ Text.IO.putStrLn $ "Redirected to " <> Text.show otherServerNode
-                makeRequest otherServerNode
-              Left errmsg -> liftIO $ do
-                Text.IO.putStrLn $ Text.show errmsg
-                exitFailure
-              Right (_, FileSystemError err) -> liftIO $ do
-                Text.IO.putStrLn $ Text.show err
-                exitFailure
-              Right (_, FilesFound files) -> liftIO $ mapM_ print files
-              Right (_, FileTouched file) -> liftIO $ print file
-              Right (_, FileDeleted _) -> pure ()
+            runAction (sendClientRequest server req)
+              >>= \case
+                Left (Redirect otherServerNode) -> do
+                  liftIO $ Text.IO.putStrLn $ "Redirected to " <> Text.show otherServerNode
+                  makeRequest otherServerNode
+                Left errmsg -> liftIO $ do
+                  Text.IO.putStrLn $ Text.show errmsg
+                  exitFailure
+                Right (_, FileSystemError err) -> liftIO $ do
+                  Text.IO.putStrLn $ Text.show err
+                  exitFailure
+                Right (_, FilesFound files) -> liftIO $ mapM_ print files
+                Right (_, FileTouched file) -> liftIO $ print file
+                Right (_, FileDeleted _) -> pure ()
        in makeRequest serverNodeId

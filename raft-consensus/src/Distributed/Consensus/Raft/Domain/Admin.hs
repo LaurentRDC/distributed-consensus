@@ -1,6 +1,5 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module Distributed.Consensus.Raft.Domain.Admin
   ( AdminRequestId (..),
@@ -12,9 +11,7 @@ module Distributed.Consensus.Raft.Domain.Admin
 where
 
 import Data.Binary (Binary)
-import Data.Text (Text)
-import Data.Word (Word64)
-import Distributed.Consensus.Raft.Domain (ClusterConfiguration)
+import Distributed.Consensus.Raft.Domain (ClusterConfiguration, SequenceNum, SessionId)
 import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import GHC.Generics (Generic)
 
@@ -30,9 +27,13 @@ data AdminCommand node
 
 instance (Binary node) => Binary (AdminCommand node)
 
-newtype AdminRequestId = AdminRequestId Word64
+data AdminRequestId
+  = MkAdminRequestId
+      SessionId
+      SequenceNum
   deriving stock (Generic, Eq, Ord, Show)
-  deriving newtype (Real, Binary, Enum, Num, Integral)
+
+instance Binary AdminRequestId
 
 type AdminRequest node = Request AdminRequestId node (AdminCommand node)
 
@@ -41,8 +42,6 @@ data AdminCommandResult node
   | LeaveInitiated
   | ShutdownInitiated
   | ClusterConfigurationIs !(ClusterConfiguration node)
-  | -- | The command could not be completed.
-    AdminFailure !Text
   | -- | The contacted node isn't the leader. The 'Maybe' contains the
     -- | node believed to be the current leader, if known.
     NotLeader !(Maybe node)

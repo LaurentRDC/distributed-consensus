@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -14,12 +15,18 @@ module Distributed.Consensus.Raft.Admin
     Microseconds,
 
     -- * Available commands
-    joinCluster,
+    sendAdminCommand,
+
+    -- ** Building commands
     leaveCluster,
+    joinCluster,
     getClusterConfiguration,
     shutDown,
 
     -- * Communications between admins and clusters
+    SessionId,
+    sessionId,
+    SequenceNum,
     AdminRequest,
     Request (..),
     AdminResponse,
@@ -29,17 +36,15 @@ module Distributed.Consensus.Raft.Admin
   )
 where
 
-import Control.Concurrent.Class.MonadSTM (TMVar, TVar, atomically, newEmptyTMVar, newTVarIO, putTMVar, readTMVar, readTVar, writeTVar)
+import Control.Concurrent.Class.MonadSTM (MonadSTM, TMVar, TVar, atomically, newEmptyTMVar, newTVarIO, putTMVar, readTMVar, readTVar, writeTVar)
 import Control.Monad.Class.MonadAsync (MonadAsync, withAsync)
-import Control.Monad.Class.MonadTimer (MonadTimer, timeout)
 import Control.Monad.Trans.Class (MonadTrans (lift))
 import Control.Monad.Trans.Reader (ReaderT (runReaderT))
 import qualified Control.Monad.Trans.Reader as Reader
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
-import Data.Text (Text)
-import Distributed.Consensus.Raft.Domain (ClusterConfiguration)
-import Distributed.Consensus.Raft.Domain.Admin (AdminCommand (..), AdminCommandResult (..), AdminRequest, AdminRequestId, AdminResponse)
+import Distributed.Consensus.Raft.Domain (SequenceNum, SessionId, sessionId)
+import Distributed.Consensus.Raft.Domain.Admin (AdminCommand (..), AdminCommandResult (..), AdminRequest, AdminRequestId (MkAdminRequestId), AdminResponse)
 import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import Distributed.Consensus.Raft.Timer (Microseconds)
 import Lens.Micro.Platform (makeLenses)
@@ -56,13 +61,11 @@ asks = MkRaftAdminT . Reader.asks
 
 data AdminImplementation node m = AdminImplementation
   { -- | Send an admin request to a node.
-    sendAdminRequest ::
-      node ->
-      AdminRequest node ->
-      m (),
+    sendAdminRequest :: node -> AdminRequest node -> m (),
     -- | Receive the next admin response.
-    receiveAdminResponse ::
-      m (AdminResponse node)
+    receiveAdminResponse :: m (AdminResponse node),
+    -- | Generate a globally-unique session ID.
+    generateSessionId :: node -> m SessionId
   }
 
 -- | Open an admin session, and run an action with a runner for that session.
@@ -78,7 +81,7 @@ withRaftAdminT ::
 withRaftAdminT self impl withSession = do
   nRId <- newTVarIO 0
   mbox <- newTVarIO mempty
-
+  sessId <- generateSessionId impl self
   let recvLoop = do
         receiveAdminResponse impl >>= \resp -> do
           let adminReqId = responseRequestId resp
@@ -90,150 +93,101 @@ withRaftAdminT self impl withSession = do
           recvLoop
 
   withAsync recvLoop $ \_ ->
-    withSession (\(MkRaftAdminT f) -> runReaderT f (MkRaftAdminEnv self impl nRId mbox))
+    withSession
+      ( \(MkRaftAdminT f) ->
+          runReaderT
+            f
+            (MkRaftAdminEnv self sessId impl nRId mbox)
+      )
 
 data RaftAdminEnv node m
   = MkRaftAdminEnv
   { node :: !node,
+    currentSessionId :: !SessionId,
     implementation :: AdminImplementation node m,
-    nextRequestId :: TVar m AdminRequestId,
+    nextRequestId :: TVar m SequenceNum,
     mailbox :: TVar m (Map AdminRequestId (TMVar m (AdminCommandResult node)))
   }
 
 makeLenses ''AdminImplementation
 
 data AdminError node
-  = AdminFailed !Text
-  | AdminNotLeader !(Maybe node)
-  | Timeout
+  = AdminNotLeader !(Maybe node)
   | UnexpectedAdminResponse
   deriving (Eq, Show)
 
-sendAdminCommand ::
-  (MonadTimer m) =>
-  node ->
+newCommand ::
+  (MonadSTM m) =>
   AdminCommand node ->
-  -- | Timeout in microseconds
-  Microseconds ->
-  RaftAdminT node m (Maybe (AdminCommandResult node))
-sendAdminCommand contact command timeoutValue = do
-  send <- asks (sendAdminRequest . implementation)
-  admin <- asks node
-  mbox <- asks mailbox
-  reqIdVar <- asks nextRequestId
-  lift $ do
-    (rid, resultVar) <- atomically $ do
-      r <- readTVar reqIdVar
-      writeTVar reqIdVar (succ r)
+  RaftAdminT node m (AdminRequest node)
+newCommand entry = do
+  (seqNumVar, sessId, self) <- asks ((,,) <$> nextRequestId <*> currentSessionId <*> node)
+  reqId <- lift $ atomically $ do
+    nextSeqNum <- readTVar seqNumVar
+    writeTVar seqNumVar (succ nextSeqNum)
+    pure $ MkAdminRequestId sessId nextSeqNum
 
-      mbox' <- readTVar mbox
-      resultVar <- newEmptyTMVar
-      writeTVar mbox (Map.insert r resultVar mbox')
-
-      pure (r, resultVar)
-
-    send
-      contact
-      MkRequest
-        { requestId = rid,
-          requestOriginator = admin,
-          requestPayload = command
-        }
-    timeout (fromIntegral timeoutValue) $
-      atomically
-        ( do
-            resp <- readTMVar resultVar
-            mbox' <- readTVar mbox
-            writeTVar mbox (Map.delete rid mbox')
-            pure resp
-        )
+  pure $ MkRequest reqId self entry
 
 joinCluster ::
-  (MonadTimer m) =>
-  -- | Timeout in microseconds
-  Microseconds ->
-  -- | Node to command
+  (MonadSTM m) =>
+  -- | Leader of the cluster to join
   node ->
-  -- \| Node to join
-  node ->
-  RaftAdminT node m (Either (AdminError node) ())
-joinCluster timeoutValue contact target = do
-  sendAdminCommand contact (JoinCluster target) timeoutValue
-    >>= \case
-      Just JoinInitiated ->
-        pure (Right ())
-      Just (AdminFailure err) ->
-        pure (Left (AdminFailed err))
-      Just (NotLeader leader) ->
-        pure (Left (AdminNotLeader leader))
-      Just _ ->
-        pure (Left UnexpectedAdminResponse)
-      Nothing ->
-        pure (Left Timeout)
+  RaftAdminT node m (AdminRequest node)
+joinCluster = newCommand . JoinCluster
 
-leaveCluster ::
-  (MonadTimer m) =>
-  -- | Timeout in microseconds
-  Microseconds ->
-  -- | Node to command
-  node ->
-  RaftAdminT node m (Either (AdminError node) ())
-leaveCluster timeoutValue contact = do
-  sendAdminCommand contact LeaveCluster timeoutValue
-    >>= \case
-      Just LeaveInitiated ->
-        pure (Right ())
-      Just (AdminFailure err) ->
-        pure (Left (AdminFailed err))
-      Just (NotLeader leader) ->
-        pure (Left (AdminNotLeader leader))
-      Just _ ->
-        pure (Left UnexpectedAdminResponse)
-      Nothing ->
-        pure (Left Timeout)
+leaveCluster :: (MonadSTM m) => RaftAdminT node m (AdminRequest node)
+leaveCluster = newCommand LeaveCluster
 
 -- | Ask a node for the cluster configuration it has committed.
 --
 -- This is the only way for an admin to tell whether a 'joinCluster' or
 -- 'leaveCluster' has actually taken effect.
-getClusterConfiguration ::
-  (MonadTimer m) =>
-  -- | Timeout in microseconds
-  Microseconds ->
-  -- | Node to ask.
-  node ->
-  RaftAdminT node m (Either (AdminError node) (ClusterConfiguration node))
-getClusterConfiguration timeoutValue contact = do
-  sendAdminCommand contact GetClusterConfiguration timeoutValue
-    >>= \case
-      Just (ClusterConfigurationIs conf) ->
-        pure (Right conf)
-      Just (AdminFailure err) ->
-        pure (Left (AdminFailed err))
-      Just (NotLeader leader) ->
-        pure (Left (AdminNotLeader leader))
-      Just _ ->
-        pure (Left UnexpectedAdminResponse)
-      Nothing ->
-        pure (Left Timeout)
+getClusterConfiguration :: (MonadSTM m) => RaftAdminT node m (AdminRequest node)
+getClusterConfiguration = newCommand GetClusterConfiguration
 
-shutDown ::
-  (MonadTimer m) =>
-  -- | Timeout in microseconds
-  Microseconds ->
-  -- | Node to command
+shutDown :: (MonadSTM m) => RaftAdminT node m (AdminRequest node)
+shutDown = newCommand ShutDown
+
+sendAdminCommand ::
+  (MonadSTM m) =>
   node ->
-  RaftAdminT node m (Either (AdminError node) ())
-shutDown timeoutValue contact = do
-  sendAdminCommand contact ShutDown timeoutValue
-    >>= \case
-      Just ShutdownInitiated ->
-        pure (Right ())
-      Just (AdminFailure err) ->
-        pure (Left (AdminFailed err))
-      Just (NotLeader leader) ->
-        pure (Left (AdminNotLeader leader))
-      Just _ ->
-        pure (Left UnexpectedAdminResponse)
-      Nothing ->
-        pure (Left Timeout)
+  AdminRequest node ->
+  RaftAdminT
+    node
+    m
+    ( Either
+        (AdminError node)
+        (AdminCommandResult node)
+    )
+sendAdminCommand contact req@(MkRequest reqId _ command) = do
+  send <- asks (sendAdminRequest . implementation)
+  mbox <- asks mailbox
+  lift $ do
+    resultVar <- atomically $ do
+      mbox' <- readTVar mbox
+      resultVar <- newEmptyTMVar
+      writeTVar mbox (Map.insert reqId resultVar mbox')
+
+      pure resultVar
+
+    send contact req
+
+    -- TODO: clean up mailbox entry for req ID
+    --       regardless of success (possibly using 'bracket')
+    atomically
+      ( do
+          resp <- readTMVar resultVar
+          mbox' <- readTVar mbox
+          writeTVar mbox (Map.delete reqId mbox')
+          pure (expectedResponse command resp)
+      )
+
+-- TODO: is there a better way to associate valid responses based on the request?
+expectedResponse :: AdminCommand node -> AdminCommandResult node -> Either (AdminError node) (AdminCommandResult node)
+expectedResponse _ (NotLeader leader) = Left (AdminNotLeader leader)
+expectedResponse (JoinCluster {}) JoinInitiated = Right JoinInitiated
+expectedResponse (LeaveCluster {}) LeaveInitiated = Right LeaveInitiated
+expectedResponse GetClusterConfiguration resp@(ClusterConfigurationIs {}) = Right resp
+expectedResponse ShutDown ShutdownInitiated = Right ShutdownInitiated
+expectedResponse _ _ = Left UnexpectedAdminResponse

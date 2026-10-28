@@ -34,7 +34,6 @@ module Distributed.Consensus.Raft.Transformer.Definition
     matchIndex,
     pendingConfigurationIndex,
     yesVotes,
-    nextRequestId,
     currentClientRequests,
     pendingReadRequests,
     randomGen,
@@ -71,7 +70,8 @@ import Data.Map.Strict (Map)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word64)
-import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), InternalRequestId, LogIndex, RequestId, Role (..), Term)
+import Distributed.Consensus.Raft.Client (ClientRequestId)
+import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, Role (..), Term)
 import Distributed.Consensus.Raft.Implementation (Event (..), Implementation, LogEntry)
 import Distributed.Consensus.Raft.Log (Log, newLog)
 import Distributed.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
@@ -129,9 +129,8 @@ data RaftState node entry state result = MkRaftState
     _pendingConfigurationIndex :: !LogIndex,
     -- | Set of votes received in the current term
     _yesVotes :: !(Set node),
-    _nextRequestId :: !InternalRequestId,
-    _currentClientRequests :: !(Map RequestId node),
-    _pendingReadRequests :: !(Map RequestId (PendingRead node state result)),
+    _currentClientRequests :: !(Map ClientRequestId node),
+    _pendingReadRequests :: !(Map ClientRequestId (PendingRead node state result)),
     _randomGen :: !StdGen
   }
 
@@ -176,7 +175,6 @@ initialRaftState initRole seed clusterConf initialState =
       _matchIndex = mempty,
       _pendingConfigurationIndex = 0,
       _yesVotes = mempty,
-      _nextRequestId = 0,
       _currentClientRequests = mempty,
       _pendingReadRequests = mempty,
       -- We use mkStdGen64 for reproducibility across 32-bit and 64-bit architectures

@@ -32,7 +32,9 @@ import Distributed.Consensus.Raft.Client
     ClientImplementation (..),
     ClientRequest,
     ClientResponse,
-    request,
+    newRequest,
+    sendClientRequest,
+    sessionId,
     withRaftClientT,
   )
 import GHC.Generics (Generic)
@@ -213,7 +215,7 @@ data Harness
     -- the whole benchmark: see 'withRaftClientT'.
     withClient ::
       forall b.
-      ((Node -> Command -> IO (Either (ClientError Node) (Node, Result))) -> IO b) ->
+      ((Node -> Command -> IO (Either (ClientError Command Node) (Node, Result))) -> IO b) ->
       IO b
   }
 
@@ -240,7 +242,7 @@ benchHarness
               map (\(serverSeed, n) -> (n, mkServer' serverSeed (fromIntegral n))) serverNodesWithSeeds,
           withClient = \useClient ->
             withRaftClientT clientNode (clientSpec networkFabric) $ \runSession ->
-              useClient (\leader comm -> runSession (request leader comm))
+              useClient (\leader comm -> runSession (newRequest comm >>= sendClientRequest leader))
         }
     where
       adminNode = -1
@@ -253,7 +255,10 @@ benchHarness
         ClientImplementation
           { sendRequest = send network.requestsMailbox,
             receiveResponse =
-              receive network.responsesMailbox clientNode
+              receive network.responsesMailbox clientNode,
+            -- We should generate a random session ID in normal circumstances,
+            -- but for a benchmark this doesn't matter
+            generateSessionId = pure . sessionId 0 . fromIntegral
           }
 
 simulatedNetworkLatency :: IO ()

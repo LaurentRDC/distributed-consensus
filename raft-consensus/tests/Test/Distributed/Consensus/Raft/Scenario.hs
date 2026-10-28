@@ -33,7 +33,8 @@ import Data.Dynamic (Typeable, fromDynamic)
 import Data.Set (Set)
 import qualified Data.Text as Text
 import Distributed.Consensus.Raft
-  ( ClusterConfiguration (..),
+  ( ClientRequestId,
+    ClusterConfiguration (..),
     CommandResponse,
     Event (..),
     EventContext,
@@ -44,7 +45,6 @@ import Distributed.Consensus.Raft
     RPCResult,
     RaftTrace (..),
     Request (..),
-    RequestId,
     Term,
   )
 import Distributed.Consensus.Raft.Admin (AdminCommand (..))
@@ -101,7 +101,7 @@ votedFor = predicate $ \case
   VotedFor ctx candidateTerm candidateNode -> Just (ctx, candidateTerm, candidateNode)
   _ -> Nothing
 
-commandReceived :: Predicate (RaftTrace entry result node state) (EventContext node, RequestId, entry)
+commandReceived :: Predicate (RaftTrace entry result node state) (EventContext node, ClientRequestId, entry)
 commandReceived = predicate $ \case
   (CommandReceived ctx reqId entry) -> Just (ctx, reqId, entry)
   _ -> Nothing

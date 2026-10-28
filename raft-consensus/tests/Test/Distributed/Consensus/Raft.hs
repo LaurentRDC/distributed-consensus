@@ -19,7 +19,7 @@ import Control.Applicative ((<|>))
 import Control.Concurrent.Class.MonadMVar (MVar, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.Class.MonadSTM (MonadSTM, TQueue, TVar, atomically, flushTQueue, newTQueueIO, newTVarIO, readTQueue, readTVar, readTVarIO, retry, writeTQueue, writeTVar)
 import Control.Exception (Exception)
-import Control.Monad (replicateM, unless, when)
+import Control.Monad (replicateM, unless, void, when)
 import Control.Monad.Class.MonadAsync (async, asyncThreadId, concurrently_, forConcurrently_, race_, waitCatch, withAsync)
 import Control.Monad.Class.MonadFork (ThreadId, throwTo)
 import Control.Monad.Class.MonadTest (exploreRaces)
@@ -59,8 +59,32 @@ import Distributed.Consensus.Raft
   )
 import qualified Distributed.Consensus.Raft as Raft
 import Distributed.Consensus.Raft.Admin
+  ( AdminCommandResult (ClusterConfigurationIs),
+    AdminError (AdminNotLeader),
+    AdminImplementation
+      ( AdminImplementation,
+        receiveAdminResponse,
+        sendAdminRequest
+      ),
+    AdminRequest,
+    AdminResponse,
+    Microseconds,
+    RaftAdminT,
+    sessionId,
+    withRaftAdminT,
+  )
 import qualified Distributed.Consensus.Raft.Admin as Admin
-import Distributed.Consensus.Raft.Client (ClientError (..), ClientImplementation (..), ClientRequest, ClientResponse, RaftClientT, request, withRaftClientT)
+import Distributed.Consensus.Raft.Client
+  ( ClientError (..),
+    ClientImplementation (..),
+    ClientRequest,
+    ClientResponse,
+    RaftClientT,
+    newRequest,
+    sendClientRequest,
+    withRaftClientT,
+  )
+import qualified Distributed.Consensus.Raft.Client as Client
 import System.Random (RandomGen, mkStdGen64, randomR, uniformR)
 import Test.Distributed.Consensus.Raft.Options (PrintTrace (..), setNumRacyTests, withExplorationOptions, withPrintTraceOption)
 import Test.Distributed.Consensus.Raft.Properties (FaultInjection (..), allProperties)
@@ -190,8 +214,12 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
                         let tryShutDown :: Int -> IOSim s ()
                             tryShutDown 0 = pure ()
                             tryShutDown attemptsLeft =
-                              runAdminAction (Admin.shutDown scenarioInputs.electionTimeoutUpperBound node)
-                                >>= either (const (tryShutDown (attemptsLeft - 1))) pure
+                              timeout
+                                (fromIntegral scenarioInputs.electionTimeoutUpperBound)
+                                (runAdminAction (Admin.shutDown >>= Admin.sendAdminCommand node <&> void))
+                                >>= maybe
+                                  (tryShutDown (attemptsLeft - 1))
+                                  (either (const (tryShutDown (attemptsLeft - 1))) pure)
                          in tryShutDown 3
 
                   forConcurrently_ harness.loneServers $ \(server, isDone, _, _) -> do
@@ -240,11 +268,11 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
 
                   threadDelay (fromIntegral waitToJoin)
                   untilJoined runAdminAction contact requestTimeout betweenAttempts node $
-                    Admin.joinCluster requestTimeout node contact
+                    Admin.joinCluster contact >>= Admin.sendAdminCommand node
 
                   threadDelay (fromIntegral waitToLeave)
                   untilLeft runAdminAction contact requestTimeout betweenAttempts node $
-                    Admin.leaveCluster requestTimeout node
+                    Admin.leaveCluster >>= Admin.sendAdminCommand node
 
                   putMVar isDone ()
               )
@@ -268,58 +296,52 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
         nextCandidate failed known = Set.lookupGT failed known <|> Set.lookupMin known
 
         go _ _ [] = pure ()
-        go knownNodes state (command : rest) = attempt knownNodes retryBudget 0
+        go knownNodes state (command : rest) = do
+          req <- runRequest (newRequest command)
+          attempt req knownNodes retryBudget 0
           where
             (newState, expectedResults) = runStateMachineStep (step command) state
 
-            attempt nodeSet remaining target = do
+            attempt payload nodeSet remaining target = do
               threadDelay (fromIntegral clientRetryTick)
-              timeout (fromIntegral maxTime) (runRequest (request target command)) >>= \case
-                Nothing ->
-                  giveUp $
-                    "no response at all within "
-                      <> show (toInteger maxTime)
-                      <> " microseconds"
-                -- Command needs to be retried but on another target
-                Just (Left err@(Redirect otherNode))
-                  | remaining <= clientRetryTick ->
-                      giveUp $
-                        "retried for "
-                          <> show (toInteger retryBudget)
-                          <> " microseconds, last response was "
-                          <> show err
-                  | otherwise -> attempt (Set.insert otherNode nodeSet) (remaining - clientRetryTick) otherNode
-                Just (Left err@NoKnownLeader)
-                  | remaining <= clientRetryTick ->
-                      giveUp $
-                        "retried for "
-                          <> show (toInteger retryBudget)
-                          <> " microseconds, last response was "
-                          <> show err
-                  | otherwise -> case nextCandidate target nodeSet of
-                      Nothing -> giveUp "No known nodes to query"
-                      Just candidate -> attempt nodeSet (remaining - clientRetryTick) candidate
-                -- Command needs to be re-tried
-                Just (Left err)
-                  | remaining <= clientRetryTick ->
-                      giveUp $
-                        "retried for "
-                          <> show (toInteger retryBudget)
-                          <> " microseconds, last response was "
-                          <> show err
-                  | otherwise -> attempt nodeSet (remaining - clientRetryTick) target
-                Just (Right (_leaderId, actualResults)) -> do
-                  when
-                    (actualResults /= expectedResults)
-                    ( fail $
-                        "Unexpected state: following command "
-                          <> show command
-                          <> ", expecting "
-                          <> show expectedResults
-                          <> " but got "
-                          <> show actualResults
-                    )
-                  go knownNodes newState rest
+              timeout (fromIntegral maxTime) (runRequest (sendClientRequest target payload))
+                >>= \case
+                  Nothing ->
+                    giveUp $
+                      "no response at all within "
+                        <> show (toInteger maxTime)
+                        <> " microseconds"
+                  -- Command needs to be retried but on another target
+                  Just (Left err@(Redirect otherNode))
+                    | remaining <= clientRetryTick ->
+                        giveUp $
+                          "retried for "
+                            <> show (toInteger retryBudget)
+                            <> " microseconds, last response was "
+                            <> show err
+                    | otherwise -> attempt payload (Set.insert otherNode nodeSet) (remaining - clientRetryTick) otherNode
+                  Just (Left err@NoKnownLeader)
+                    | remaining <= clientRetryTick ->
+                        giveUp $
+                          "retried for "
+                            <> show (toInteger retryBudget)
+                            <> " microseconds, last response was "
+                            <> show err
+                    | otherwise -> case nextCandidate target nodeSet of
+                        Nothing -> giveUp "No known nodes to query"
+                        Just candidate -> attempt payload nodeSet (remaining - clientRetryTick) candidate
+                  Just (Right (_leaderId, actualResults)) -> do
+                    when
+                      (actualResults /= expectedResults)
+                      ( fail $
+                          "Unexpected state: following command "
+                            <> show command
+                            <> ", expecting "
+                            <> show expectedResults
+                            <> " but got "
+                            <> show actualResults
+                      )
+                    go knownNodes newState rest
               where
                 giveUp why =
                   case faultInjection of
@@ -484,7 +506,7 @@ untilMembership ::
   -- | The command that requests the change
   RaftAdminT Node (IOSim s) r ->
   IOSim s ()
-untilMembership direction runAdminAction initialContact requestTimeout betweenAttempts node command =
+untilMembership direction runAdminAction initialContact requestTimeout betweenAttempts node command = do
   go 4 initialContact
   where
     -- An admin action blocks until it gets a response, and the node being
@@ -500,13 +522,13 @@ untilMembership direction runAdminAction initialContact requestTimeout betweenAt
     go attemptsLeft contact
       | attemptsLeft <= 0 = pure ()
       | otherwise =
-          attempt (Admin.getClusterConfiguration 1_000_000 contact) >>= \case
+          attempt (Admin.getClusterConfiguration >>= Admin.sendAdminCommand contact) >>= \case
             -- Settled: the configuration says what we wanted it to say.
-            Just (Right (Simple cluster))
+            Just (Right (ClusterConfigurationIs (Simple cluster)))
               | isDone cluster -> pure ()
             -- A settled configuration that is not the one we want. This is the
             -- only state in which asking for the change is the right move.
-            Just (Right (Simple _)) -> attempt command >> waitAndRetry contact
+            Just (Right (ClusterConfigurationIs (Simple _))) -> attempt command >> waitAndRetry contact
             -- Only the leader answers a configuration read, so follow the
             -- redirect. This still costs an attempt, so a pair of nodes that
             -- disagree about who leads cannot keep us here forever.
@@ -717,13 +739,15 @@ testHarness
         ClientImplementation
           { sendRequest = send network.requestsMailbox network.topologyConstraints clientNode,
             receiveResponse =
-              receive network.responsesMailbox clientNode
+              receive network.responsesMailbox clientNode,
+            Client.generateSessionId = pure . sessionId 0 . fromIntegral
           }
 
       adminSpec network =
         AdminImplementation
           { sendAdminRequest = send network.adminMailbox network.topologyConstraints adminNode,
-            receiveAdminResponse = receive network.adminResponsesMailbox adminNode
+            receiveAdminResponse = receive network.adminResponsesMailbox adminNode,
+            Admin.generateSessionId = pure . sessionId maxBound . fromIntegral
           }
 
       networkPartitioner network = go (mkStdGen64 pSeed)

@@ -1,8 +1,11 @@
+{-# LANGUAGE ImportQualifiedPost #-}
+
 module Control.Distributed.Process.Raft.Client
   ( withRaftClient,
-    request,
+    sendClientRequest,
     Microseconds,
     ClientError (..),
+    newRequest,
   )
 where
 
@@ -12,8 +15,9 @@ import Control.Distributed.Process.Raft.Instances ()
 import Control.Distributed.Process.Serializable (Serializable)
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
-import Distributed.Consensus.Raft.Client (ClientError, ClientImplementation (..), Microseconds, RaftClientT, withRaftClientT)
+import Distributed.Consensus.Raft.Client (ClientError, ClientImplementation (..), ClientRequest, Microseconds, RaftClientT, newRequest, sessionId, withRaftClientT)
 import Distributed.Consensus.Raft.Client qualified as Raft.Client
+import System.Random.Stateful (randomIO)
 
 -- | Send a request to a Raft cluster.
 --
@@ -47,7 +51,11 @@ withRaftClient f = do
     impl recvQueue =
       ClientImplementation
         { sendRequest = (`nsendRemote` clientMailboxProcessName),
-          receiveResponse = liftIO $ atomically $ readTQueue recvQueue
+          receiveResponse = liftIO $ atomically $ readTQueue recvQueue,
+          generateSessionId =
+            const $
+              liftIO $
+                sessionId <$> randomIO <*> randomIO
         }
 
 -- | This value needs to be kept in sync with 'Control.Distributed.Process.Raft'.
@@ -72,14 +80,14 @@ clientMailboxProcessName = "raft-consensus-client-mailbox"
 --   particular purpose.
 --
 -- It is perfectly safe, and encouraged, to send separate requests in
--- separate threads.
-request ::
+-- separate threads. However, you should call 'withRaftClientT' only once.
+sendClientRequest ::
   NodeId ->
-  entry ->
+  ClientRequest NodeId entry ->
   RaftClientT
     entry
     NodeId
     result
     Process
-    (Either (ClientError NodeId) (NodeId, result))
-request = Raft.Client.request
+    (Either (ClientError entry NodeId) (NodeId, result))
+sendClientRequest = Raft.Client.sendClientRequest

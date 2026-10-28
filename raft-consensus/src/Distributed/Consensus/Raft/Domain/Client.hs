@@ -1,9 +1,11 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module Distributed.Consensus.Raft.Domain.Client
-  ( ClientRequestId (..),
+  ( SessionId,
+    sessionId,
+    SequenceNum,
+    ClientRequestId (..),
     ClientRequest,
     ClientResponse,
     ClientResult (..),
@@ -11,24 +13,24 @@ module Distributed.Consensus.Raft.Domain.Client
 where
 
 import Data.Binary (Binary)
-import Data.Text (Text)
-import Data.Word (Word64)
+import Distributed.Consensus.Raft.Domain (SequenceNum, SessionId, sessionId)
 import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import GHC.Generics (Generic)
 
--- Alphabet for communicating with clients
-
 -- | Client-sourced request ID. This allows to correlate multiple client
 -- side-responses.
-newtype ClientRequestId = ClientRequestId Word64
+data ClientRequestId
+  = MkClientRequestId
+      SessionId
+      SequenceNum
   deriving stock (Generic, Eq, Ord, Show)
-  deriving newtype (Real, Binary, Enum, Num, Integral)
+
+instance Binary ClientRequestId
 
 type ClientRequest node entry = Request ClientRequestId node entry
 
 data ClientResult result
   = Success !result
-  | Failure !Text
   | NotLeader
   deriving (Eq, Show, Generic)
 

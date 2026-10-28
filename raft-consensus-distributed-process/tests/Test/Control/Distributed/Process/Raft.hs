@@ -12,12 +12,12 @@ import Control.Distributed.Process (NodeId (NodeId), spawnLocal)
 import Control.Distributed.Process.Node (LocalNode (localNodeId), initRemoteTable, newLocalNode, runProcess)
 import Control.Distributed.Process.Raft (networking)
 import Control.Distributed.Process.Raft.Admin (getClusterConfiguration, joinCluster, leaveCluster, shutDown, withRaftAdmin)
-import Control.Distributed.Process.Raft.Client (request, withRaftClient)
+import Control.Distributed.Process.Raft.Client (newRequest, sendClientRequest, withRaftClient)
 import Control.Monad (replicateM_, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (for_)
 import Distributed.Consensus.Raft (Networking (..), Request (..), Response (..), requestPayload)
-import Distributed.Consensus.Raft.Admin (AdminCommand (..), AdminCommandResult (..))
+import Distributed.Consensus.Raft.Admin (AdminCommand (..), AdminCommandResult (..), sendAdminCommand)
 import Network.Transport (EndPointAddress (EndPointAddress), Transport)
 import qualified Network.Transport.InMemory as InMemory
 import System.Timeout (timeout)
@@ -45,7 +45,7 @@ testAdminCommands getTransport = testCase "Tests that admin commands are communi
     let expectations =
           [ (JoinCluster arbitraryOtherNodeId, JoinInitiated),
             (LeaveCluster, LeaveInitiated),
-            (GetClusterConfiguration, AdminFailure "testing"),
+            (GetClusterConfiguration, ShutdownInitiated), -- mismatch
             (ShutDown, ShutdownInitiated)
           ]
     for_ expectations $ \(expectation, response) -> do
@@ -62,10 +62,10 @@ testAdminCommands getTransport = testCase "Tests that admin commands are communi
       runProcess node $ withRaftAdmin $ \runAdmin -> runAdmin $ do
         -- Since the helper functions e.g. 'joinCluster' automatically wait for a response,
         -- we spin up a new thread for each of them
-        void $ joinCluster 1_000_000 serverNodeId arbitraryOtherNodeId
-        void $ leaveCluster 1_000_000 serverNodeId
-        void $ getClusterConfiguration 1_000_000 serverNodeId
-        void $ shutDown 1_000_000 serverNodeId
+        void $ joinCluster arbitraryOtherNodeId >>= sendAdminCommand serverNodeId
+        void $ leaveCluster >>= sendAdminCommand serverNodeId
+        void $ getClusterConfiguration >>= sendAdminCommand serverNodeId
+        void $ shutDown >>= sendAdminCommand serverNodeId
 
 testClientCommands :: IO Transport -> TestTree
 testClientCommands getTransport = testCase "Tests that client commands are communicated" $ do
@@ -109,4 +109,4 @@ testClientCommands getTransport = testCase "Tests that client commands are commu
             --
             -- We basicaly yeet a message '()' in a separate process, which
             -- blocks forever, and then await that all requests be done
-            void $ runClient (request serverNodeId ())
+            void $ runClient (newRequest () >>= sendClientRequest serverNodeId)

@@ -18,6 +18,7 @@ module Distributed.Consensus.Raft
     LogEntry (..),
     Term,
     Role,
+    ClientRequestId,
     ClusterConfiguration (..),
     LogIndex,
     Snapshot (..),
@@ -44,7 +45,6 @@ module Distributed.Consensus.Raft
     Event (..),
     EventContext (..),
     RaftTrace (..),
-    RequestId,
     Log,
   )
 where
@@ -55,10 +55,10 @@ import Control.Monad.Class.MonadFork (MonadFork)
 import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay)
 import Distributed.Consensus.Raft.Algorithm (server)
+import Distributed.Consensus.Raft.Client (ClientRequestId)
 import Distributed.Consensus.Raft.Domain
   ( ClusterConfiguration (..),
     LogIndex,
-    RequestId,
     Role,
     Snapshot (..),
     SnapshotMetadata (..),
