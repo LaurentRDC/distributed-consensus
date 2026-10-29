@@ -363,11 +363,6 @@ applyCommittedEntries = do
             & logEntries
             & Seq.drop (fromIntegral (Log.relativeIndex entries lastAppliedIndex))
 
-    -- Claim the range before applying any of it. 'applyEntry' can re-enter this
-    -- function -- a committed joint configuration makes the leader append the
-    -- continuation, and appending applies -- and if 'lastApplied' were still
-    -- pointing at the start of the range, that nested call would apply the same
-    -- entries over again, append again, and never stop.
     lastApplied .= currentCommitIndex
     trace (`LastAppliedIndexIncreasedTo` currentCommitIndex)
 

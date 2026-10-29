@@ -316,6 +316,7 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
           Log.Coherent appendFrom toAppend -> pure (appendFrom, toAppend)
           Log.Incoherent truncateFrom toAppend -> do
             commandLog %= (`Log.keepEntriesUpTo` pred truncateFrom)
+            lift $ impl.persistence.truncateLogEntriesFrom s truncateFrom
             pure (truncateFrom, toAppend)
 
         -- It's a little awkward to have to determine the log indices

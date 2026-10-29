@@ -183,6 +183,7 @@ mkServer network hbto etolb etoub seed node =
               Persistence
                 { readLogEntriesFrom = \_ _ -> pure [],
                   writeLogEntry = \_ _ -> pure (),
+                  truncateLogEntriesFrom = \_ _ -> pure (),
                   readTerm = \_ -> pure 0,
                   writeTerm = \_ _ -> pure (),
                   readVotedFor = \_ _ -> pure Nothing,

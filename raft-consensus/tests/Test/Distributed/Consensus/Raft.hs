@@ -619,6 +619,7 @@ mkServer debug resources hbto etolb etoub faultProb seed node =
               Persistence
                 { readLogEntriesFrom = readLogEntriesFromTest resources.logPersistence,
                   writeLogEntry = writeLogEntryTest resources.logPersistence,
+                  truncateLogEntriesFrom = truncateLogEntriesTest resources.logPersistence,
                   readTerm = readTest resources.termPersistence,
                   writeTerm = writeTest resources.termPersistence,
                   readVotedFor = readVotedForTest resources.votePersistence,
@@ -771,6 +772,18 @@ writeLogEntryTest storage self batch = case IntMap.lookup (fromIntegral self) st
     log' <- readTVar var
     -- Overwriting the log with new conflicting entries is important to ensure below
     writeTVar var (Map.fromList [(ix, (term, entry)) | (term, ix, entry) <- batch] <> log')
+
+truncateLogEntriesTest ::
+  (MonadSTM m) =>
+  IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) ->
+  Node ->
+  LogIndex ->
+  m ()
+truncateLogEntriesTest storage self truncateFrom = case IntMap.lookup (fromIntegral self) storage of
+  Nothing -> error $ "Persistence badly configured: missing node " <> show self
+  Just var -> atomically $ do
+    log' <- readTVar var
+    writeTVar var (log' `Map.restrictKeys` Set.fromAscList [0 .. pred truncateFrom])
 
 readLogEntriesFromTest :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) -> Node -> LogIndex -> m [(Term, LogIndex, LogEntry Node Command)]
 readLogEntriesFromTest storage self logIndex = case IntMap.lookup (fromIntegral self) storage of

@@ -41,6 +41,9 @@ import qualified System.OsPath as OsPath
 data RaftRecord entry node state
   = SnapshotRecord (Snapshot node state)
   | LogRecord (Term, LogIndex, LogEntry node entry)
+  | -- | Truncating the write-ahead log is done by changing
+    -- how the read-back is done
+    TruncateFrom LogIndex
   deriving (Generic)
 
 instance (Binary entry, Binary node, Binary state) => Binary (RaftRecord entry node state)
@@ -101,6 +104,7 @@ withPersistence dir codec f = do
             Persistence
               { readLogEntriesFrom = \_ -> readLogEntries wal,
                 writeLogEntry = \_processId -> traverse_ (appendMany wal) . nonEmpty . map LogRecord,
+                truncateLogEntriesFrom = \_processId -> append wal . TruncateFrom,
                 readTerm = readTermFromFile,
                 writeTerm = writeTermToFile,
                 readVotedFor = readVotedForFromFile,
@@ -127,6 +131,8 @@ withPersistence dir codec f = do
             SnapshotRecord _ -> pure ()
             LogRecord (term, logIx, entry) ->
               when (logIx >= minLogIndex) (modifyIORef' ref (Map.insert (term, logIx) entry))
+            TruncateFrom logIndex ->
+              modifyIORef' ref (Map.filterWithKey (\(_term, ix) _entry -> ix < logIndex))
         )
       liftIO (readIORef ref)
         <&> Map.toAscList
@@ -166,7 +172,8 @@ withPersistence dir codec f = do
         seg
         ( \case
             SnapshotRecord snap -> writeIORef ref (Just snap)
-            LogRecord _ -> pure ()
+            LogRecord {} -> pure ()
+            TruncateFrom {} -> pure ()
         )
       liftIO (readIORef ref)
 

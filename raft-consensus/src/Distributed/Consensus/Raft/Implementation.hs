@@ -102,6 +102,13 @@ data Persistence entry node state m = Persistence
     -- allows to persist data in a shared location for multiple nodes
     -- (e.g. in a remote database)
     writeLogEntry :: node -> [(Term, LogIndex, LogEntry node entry)] -> m (),
+    -- Truncate log entries starting, and including, the provided log index.
+    --
+    -- Note that not all storage technologies support truncation. For example,
+    -- write-ahead logs cannot implement truncation. However, the goal is that
+    -- any "truncation" results in entries with this 'LogIndex' and later ones
+    -- to not be returned by 'readLogEntriesFrom'.
+    truncateLogEntriesFrom :: node -> LogIndex -> m (),
     -- | Read the last persisted term. In case this is not known (for example, on a
     -- first boot), then the term should be @0@.
     readTerm :: node -> m Term,
