@@ -557,10 +557,15 @@ serveReadOnlyQueries = whenRole Leader $ do
 --
 -- This can be used by any node on itself, or
 -- as part of the 'InstallSnapshot' remote procedure call.
-applySnapshot :: (Monad m) => Snapshot node state -> RaftT entry node state result m ()
+applySnapshot ::
+  (Monad m) =>
+  Snapshot node state ->
+  RaftT entry node state result m ()
 applySnapshot snapshot = do
   let snapshotIndex = snapshot.sMetadata.smLastIncludedIndex
   alreadyApplied <- use lastApplied <&> (>= snapshotIndex)
+  -- Log.applySnapshot is a no-op if the incoming snapshot doesn't
+  -- advance the log
   commandLog %= Log.applySnapshot snapshot.sMetadata
 
   unless alreadyApplied $ do

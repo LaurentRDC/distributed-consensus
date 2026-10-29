@@ -160,11 +160,15 @@ lastLogInfo :: Log node entry -> (Term, LogIndex)
 lastLogInfo (Log _ _ lix lt) = (lt, lix)
 {-# INLINE lastLogInfo #-}
 
+-- | Apply a snapshot to the log if it advances the log index only.
+-- Otherwise, this function does nothing.
 applySnapshot :: SnapshotMetadata -> Log node entry -> Log node entry
-applySnapshot newSnapshot@((SnapshotMetadata absoluteLastIndex lastSnapshotTerm)) log' =
-  let relativeLastIndex = relativeIndex log' absoluteLastIndex
-   in Log
-        (Seq.drop (fromIntegral relativeLastIndex) (lEntries log'))
-        newSnapshot
-        (max absoluteLastIndex (lLastIndex log'))
-        (max lastSnapshotTerm (lLastTerm log'))
+applySnapshot newSnapshot@((SnapshotMetadata absoluteLastIndex lastSnapshotTerm)) log'
+  | smLastIncludedIndex newSnapshot <= smLastIncludedIndex (lSnapshotMetadata log') = log'
+  | otherwise =
+      let relativeLastIndex = relativeIndex log' absoluteLastIndex
+       in Log
+            (Seq.drop (fromIntegral relativeLastIndex) (lEntries log'))
+            newSnapshot
+            (max absoluteLastIndex (lLastIndex log'))
+            (max lastSnapshotTerm (lLastTerm log'))
