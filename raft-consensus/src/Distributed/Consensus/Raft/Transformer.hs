@@ -812,7 +812,7 @@ becomeCandidate = do
   r <- use role
   when (r == Candidate) $ do
     currentTerm <- use term
-    (lastLogIx, lastLogTerm) <- use commandLog <&> Log.lastLogInfo
+    (lastLogTerm, lastLogIx) <- use commandLog <&> Log.lastLogInfo
     let rpc = RequestVote currentTerm s lastLogIx lastLogTerm
     peers >>= (runSend . (`sendRPCConcurrently` rpc))
 

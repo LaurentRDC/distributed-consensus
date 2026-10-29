@@ -156,8 +156,8 @@ lastLogIndex :: Log node entry -> LogIndex
 lastLogIndex = lLastIndex
 {-# INLINE lastLogIndex #-}
 
-lastLogInfo :: Log node entry -> (LogIndex, Term)
-lastLogInfo (Log _ _ lix lt) = (lix, lt)
+lastLogInfo :: Log node entry -> (Term, LogIndex)
+lastLogInfo (Log _ _ lix lt) = (lt, lix)
 {-# INLINE lastLogInfo #-}
 
 applySnapshot :: SnapshotMetadata -> Log node entry -> Log node entry

@@ -459,7 +459,7 @@ handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLas
   case mAlreadyVoted of
     -- We haven't voted yet
     Nothing ->
-      if (candidateLastLogIndex, candidateLastLogIndexTerm) >= Log.lastLogInfo entries
+      if (candidateLastLogIndexTerm, candidateLastLogIndex) >= Log.lastLogInfo entries
         then do
           voteFor (Just candidateNode)
           grantVote ourTerm
