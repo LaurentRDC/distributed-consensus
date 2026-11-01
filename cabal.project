@@ -3,6 +3,7 @@ packages: raft-consensus/raft-consensus.cabal
           wal/wal.cabal
           raft-consensus-distributed-process/raft-consensus-distributed-process.cabal
           examples/distributed-filesystem/distfs.cabal
+          linearizable/linearizable.cabal
 
 program-options
     ghc-options: +RTS -A64m -RTS
