@@ -15,11 +15,11 @@ import qualified Data.ByteString.Char8 as BS8
 import Data.Either (isLeft)
 import Data.Foldable (for_, toList, traverse_)
 import Data.IORef (modifyIORef', newIORef, readIORef)
-import Data.Int (Int64)
 import Data.List (isPrefixOf, sort)
 import Data.List.NonEmpty (nonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Traversable (for)
+import Data.Word (Word64)
 import Hedgehog (Gen, annotate, assert, failure, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
@@ -219,7 +219,7 @@ testSingleVsManyAppend = testProperty "append and appendMany give the same resul
             (Gen.bytes (Range.linear 0 24))
         )
 
-  walBound <- forAll $ Gen.int64 (Range.linear 5 200_000_000)
+  walBound <- forAll $ Gen.word64 (Range.linear 5 200_000_000)
 
   let entries = foldMap NonEmpty.toList entriesBatched
 
@@ -248,7 +248,7 @@ testSingleVsManyAppend = testProperty "append and appendMany give the same resul
 testAutomaticRotation :: TestTree
 testAutomaticRotation = testProperty "Segments rotate automatically once they are full" $ property $ do
   entries <- forAll $ Gen.list (Range.linear 1 100) (Gen.bytes (Range.linear 0 24))
-  maxBytes <- forAll $ Gen.int64 (Range.linear 8 256)
+  maxBytes <- forAll $ Gen.word64 (Range.linear 8 256)
 
   replayed <- liftIO $ withSystemTempDirectory "wal-testing-rotation" $ \tmpDir -> do
     dir <- encodeFS tmpDir
@@ -263,7 +263,7 @@ testAutomaticRotation = testProperty "Segments rotate automatically once they ar
 
   replayed === Just (expectedSegments maxBytes entries)
 
-expectedSegments :: Int64 -> [StrictByteString] -> [[StrictByteString]]
+expectedSegments :: Word64 -> [StrictByteString] -> [[StrictByteString]]
 expectedSegments maxBytes = go 0 []
   where
     go _ current [] = [reverse current]
@@ -276,7 +276,7 @@ expectedSegments maxBytes = go 0 []
 testConcurrentAppends :: TestTree
 testConcurrentAppends = testProperty "Concurrent appends are all written, in order for each thread" $ property $ do
   entries <- forAll genThreadEntries
-  maxBytes <- forAll $ Gen.choice [Gen.int64 (Range.linear 8 256), pure maxBound]
+  maxBytes <- forAll $ Gen.choice [Gen.word64 (Range.linear 8 256), pure maxBound]
 
   replayed <- liftIO $ withSystemTempDirectory "wal-testing-concurrent" $ \tmpDir -> do
     dir <- encodeFS tmpDir

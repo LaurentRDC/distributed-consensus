@@ -88,7 +88,6 @@ import Data.IORef
     readIORef,
     writeIORef,
   )
-import Data.Int (Int64)
 import Data.List (sortOn)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
@@ -144,7 +143,7 @@ data WriteAheadLog a = WriteAheadLog
     walHandle :: !(MVar WALHandle),
     walActiveSegment :: !(IORef Segment),
     -- | bytes written to current segment
-    walWritten :: !(IORef Int64),
+    walWritten :: !(IORef Word64),
     -- | In case an error has happened when trying to append, we must
     -- be able to share this with other threads.
     --
@@ -200,7 +199,7 @@ rawWALCodec =
 data WALConfig = WALConfig
   { -- | Once the active segment reaches this size, the next append
     -- goes to a new segment.
-    maxSegmentBytes :: !Int64,
+    maxSegmentBytes :: !Word64,
     -- | Directory where to write write-ahead log files. This directory need
     -- not be empty.
     directory :: !OsPath
