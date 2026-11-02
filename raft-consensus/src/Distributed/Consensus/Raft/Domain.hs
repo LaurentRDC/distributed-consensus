@@ -26,7 +26,6 @@ module Distributed.Consensus.Raft.Domain
 where
 
 import Data.Binary (Binary)
-import Data.Int (Int64)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word64)
@@ -34,7 +33,7 @@ import GHC.Generics (Generic)
 import System.Random (Uniform)
 
 -- | Election term
-newtype Term = Term Int64
+newtype Term = Term Word64
   deriving stock (Generic, Eq, Ord, Show, Read)
   deriving newtype (Real, Binary, Enum, Num, Integral)
 
@@ -78,7 +77,7 @@ sessionId = MkSessionId
 -- in the same session.
 newtype SequenceNum = MkSequenceNum Word64
   deriving stock (Eq, Ord)
-  deriving newtype (Show, Real, Num, Enum, Integral, Binary)
+  deriving newtype (Show, Real, Num, Enum, Bounded, Integral, Binary)
 
 allNodes :: (Ord node) => ClusterConfiguration node -> Set node
 allNodes (Simple nodes) = nodes
@@ -109,7 +108,7 @@ hasQuorum (Joint members1 members2) votes =
 --
 -- Note that the 'Log' may not have the elements associated with a given
 -- 'LogIndex' due to compaction.
-newtype LogIndex = LogIndex Int64
+newtype LogIndex = LogIndex Word64
   deriving stock (Generic, Eq, Ord, Show)
   deriving newtype (Real, Enum, Num, Binary, Integral)
 
@@ -137,10 +136,10 @@ instance (Binary state, Binary node) => Binary (Snapshot node state)
 -- differently than a mutation.
 --
 -- >>> data CounterOp = ReadCounter | Increment | Decrement
--- >>> :{ let stateMachine = \op -> case op of
+-- >>> :{ let stateMachine = \case
 --    ReadCounter -> Read id
---    Increment -> Write $ \st -> (succ st, succ st)
---    Decrement -> Write $ \st -> (pred st, pred st)
+--    Increment -> Transition $ \st -> (succ st, succ st)
+--    Decrement -> Transition $ \st -> (pred st, pred st)
 -- :}
 data StateMachineStep state result
   = Read (state -> result)

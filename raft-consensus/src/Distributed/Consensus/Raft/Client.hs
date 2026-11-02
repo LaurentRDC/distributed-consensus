@@ -35,6 +35,7 @@ import Control.Monad.Trans.Class (MonadTrans, lift)
 import Control.Monad.Trans.Reader (ReaderT (runReaderT), asks)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Semigroup (Max (..))
 import Distributed.Consensus.Raft.Domain.Client
   ( ClientRequest,
     ClientRequestId (..),
@@ -83,6 +84,7 @@ withRaftClientT ::
   m b
 withRaftClientT self impl withSession = do
   nRId <- newTVarIO 0
+  lAck <- newTVarIO Nothing
   mbox <- newTVarIO mempty
   sessId <- generateSessionId impl self
   let env =
@@ -90,6 +92,7 @@ withRaftClientT self impl withSession = do
           { node = self,
             currentSessionId = sessId,
             nextRequestId = nRId,
+            latestAcknowledgement = lAck,
             implementation = impl,
             mailbox = mbox
           }
@@ -111,6 +114,7 @@ data RaftClientEnv entry node result m
   { node :: !node,
     currentSessionId :: !SessionId,
     nextRequestId :: !(TVar m SequenceNum),
+    latestAcknowledgement :: !(TVar m (Maybe (Max SequenceNum))),
     implementation :: ClientImplementation entry node result m,
     mailbox :: TVar m (Map ClientRequestId (TMVar m (ClientResponse node result)))
   }
@@ -169,6 +173,7 @@ sendClientRequest ::
 sendClientRequest lastKnownLeader req@(MkRequest reqId _ _) = do
   send <- MkRaftClientT $ asks (sendRequest . implementation)
   mbox <- MkRaftClientT $ asks mailbox
+  ackVar <- MkRaftClientT $ asks latestAcknowledgement
   lift
     ( do
         resultVar <- atomically $ do
@@ -187,7 +192,19 @@ sendClientRequest lastKnownLeader req@(MkRequest reqId _ _) = do
           ( do
               resp <- readTMVar resultVar
               mbox' <- readTVar mbox
+              lAck <- readTVar ackVar
               writeTVar mbox (Map.delete reqId mbox')
+
+              let MkClientRequestId _ respSeqNum = responseRequestId resp
+                  watermark = Max respSeqNum
+              writeTVar
+                ackVar
+                ( maybe
+                    (Just watermark)
+                    (Just . mappend watermark)
+                    lAck
+                )
+
               pure resp
           )
     )
