@@ -35,7 +35,7 @@ import Distributed.Consensus.Raft.Client
     newRequest,
     sendClientRequest,
     sessionId,
-    withRaftClientT,
+    withClientSession,
   )
 import GHC.Generics (Generic)
 import Test.Tasty (withResource)
@@ -213,7 +213,7 @@ data Harness
   = MkHarness
   { clusterServers :: IntMap Server,
     -- | Open a client session and run an action with it. One session serves
-    -- the whole benchmark: see 'withRaftClientT'.
+    -- the whole benchmark: see 'withClientSession'.
     withClient ::
       forall b.
       ((Node -> Command -> IO (Either (ClientError Command Node) (Node, Result))) -> IO b) ->
@@ -242,7 +242,7 @@ benchHarness
             IntMap.fromList $
               map (\(serverSeed, n) -> (n, mkServer' serverSeed (fromIntegral n))) serverNodesWithSeeds,
           withClient = \useClient ->
-            withRaftClientT clientNode (clientSpec networkFabric) $ \runSession ->
+            withClientSession clientNode (clientSpec networkFabric) $ \runSession ->
               useClient (\leader comm -> runSession (newRequest comm >>= sendClientRequest leader))
         }
     where

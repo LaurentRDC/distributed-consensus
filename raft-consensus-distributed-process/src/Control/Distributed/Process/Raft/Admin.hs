@@ -17,7 +17,7 @@ import Control.Distributed.Process (NodeId, Process, exit, getSelfNode, link, ma
 import Control.Distributed.Process.Raft.Instances ()
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
-import Distributed.Consensus.Raft.Admin (AdminCommandResult, AdminError, AdminImplementation (..), AdminRequest, Microseconds, RaftAdminT, sessionId, withRaftAdminT)
+import Distributed.Consensus.Raft.Admin (AdminCommandResult, AdminError, AdminImplementation (..), AdminRequest, Microseconds, RaftAdminT, sessionId, withAdminSession)
 import Distributed.Consensus.Raft.Admin qualified as Raft.Admin
 import System.Random (randomIO)
 
@@ -45,7 +45,7 @@ withRaftAdmin f = do
 
   thisNodeId <- getSelfNode
 
-  withRaftAdminT thisNodeId (impl recvQueue) f <* exit mailPid "Completed"
+  withAdminSession thisNodeId (impl recvQueue) f <* exit mailPid "Completed"
   where
     impl recvQueue =
       AdminImplementation

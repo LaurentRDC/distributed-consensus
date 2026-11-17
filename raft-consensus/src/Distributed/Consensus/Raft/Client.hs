@@ -8,7 +8,7 @@
 module Distributed.Consensus.Raft.Client
   ( RaftClientT,
     ClientImplementation (..),
-    withRaftClientT,
+    withClientSession,
     sendClientRequest,
     ClientError (..),
     Microseconds,
@@ -52,7 +52,7 @@ import Lens.Micro.Platform (makeLenses)
 -- | Client monad to make requests to a Raft cluster.
 --
 -- The only way to execute an action of type 'RaftClientT' is with
--- 'withRaftClientT'.
+-- 'withClientSession'.
 --
 -- The only way to construct an action of type 'RaftClientT' is to use
 -- 'request'.
@@ -75,14 +75,14 @@ data ClientImplementation entry node result m = ClientImplementation
 -- | Open a client session, and run an action with a runner for that session.
 --
 -- It is safe to use the runner from several threads concurrently.
-withRaftClientT ::
+withClientSession ::
   (MonadAsync m) =>
   -- | self identification
   node ->
   ClientImplementation entry node result m ->
   ((forall a. RaftClientT entry node result m a -> m a) -> m b) ->
   m b
-withRaftClientT self impl withSession = do
+withClientSession self impl withSession = do
   nRId <- newTVarIO 0
   lAck <- newTVarIO Nothing
   mbox <- newTVarIO mempty
@@ -156,7 +156,7 @@ newRequest entry = do
 --   particular purpose.
 --
 -- It is perfectly safe, and encouraged, to send separate requests in
--- separate threads. However, you should call 'withRaftClientT' only once.
+-- separate threads. However, you should call 'withClientSession' only once.
 sendClientRequest ::
   (MonadSTM m) =>
   node ->

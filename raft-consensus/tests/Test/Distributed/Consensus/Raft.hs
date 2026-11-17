@@ -71,7 +71,7 @@ import Distributed.Consensus.Raft.Admin
     Microseconds,
     RaftAdminT,
     sessionId,
-    withRaftAdminT,
+    withAdminSession,
   )
 import qualified Distributed.Consensus.Raft.Admin as Admin
 import Distributed.Consensus.Raft.Client
@@ -82,7 +82,7 @@ import Distributed.Consensus.Raft.Client
     RaftClientT,
     newRequest,
     sendClientRequest,
-    withRaftClientT,
+    withClientSession,
   )
 import qualified Distributed.Consensus.Raft.Client as Client
 import System.Random (RandomGen, mkStdGen64, randomR, uniformR)
@@ -191,12 +191,12 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
         race_
           (threadDelay (fromIntegral scenarioTimeUpperBound) >> fail "Possible infinite loop detected")
           ( do
-              withRaftAdminT harness.hAdminNode harness.hAdminSpec $ \runAdminAction ->
+              withAdminSession harness.hAdminNode harness.hAdminSpec $ \runAdminAction ->
                 -- Run servers until the clients are done interacting
                 withAsync (runServers harness runAdminAction) $ \_ -> do
                   -- Likewise, one client session for the whole command sequence,
                   -- so that request IDs are unique across commands.
-                  withRaftClientT harness.hClientNode harness.hClientSpec $ \runClientAction ->
+                  withClientSession harness.hClientNode harness.hClientSpec $ \runClientAction ->
                     runClient
                       runClientAction
                       -- In principle, there is no upper bound on how long a

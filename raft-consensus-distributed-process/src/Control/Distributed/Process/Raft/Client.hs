@@ -15,7 +15,7 @@ import Control.Distributed.Process.Raft.Instances ()
 import Control.Distributed.Process.Serializable (Serializable)
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
-import Distributed.Consensus.Raft.Client (ClientError, ClientImplementation (..), ClientRequest, Microseconds, RaftClientT, newRequest, sessionId, withRaftClientT)
+import Distributed.Consensus.Raft.Client (ClientError, ClientImplementation (..), ClientRequest, Microseconds, RaftClientT, newRequest, sessionId, withClientSession)
 import Distributed.Consensus.Raft.Client qualified as Raft.Client
 import System.Random.Stateful (randomIO)
 
@@ -46,7 +46,7 @@ withRaftClient f = do
 
   thisNodeId <- getSelfNode
 
-  withRaftClientT thisNodeId (impl recvQueue) f <* exit mailPid "Completed"
+  withClientSession thisNodeId (impl recvQueue) f <* exit mailPid "Completed"
   where
     impl recvQueue =
       ClientImplementation
@@ -80,7 +80,7 @@ clientMailboxProcessName = "raft-consensus-client-mailbox"
 --   particular purpose.
 --
 -- It is perfectly safe, and encouraged, to send separate requests in
--- separate threads. However, you should call 'withRaftClientT' only once.
+-- separate threads. However, you should call 'withClientSession' only once.
 sendClientRequest ::
   NodeId ->
   ClientRequest NodeId entry ->

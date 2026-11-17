@@ -10,7 +10,7 @@
 module Distributed.Consensus.Raft.Admin
   ( RaftAdminT,
     AdminImplementation (..),
-    withRaftAdminT,
+    withAdminSession,
     AdminError (..),
     Microseconds,
 
@@ -71,14 +71,14 @@ data AdminImplementation node m = AdminImplementation
 -- | Open an admin session, and run an action with a runner for that session.
 --
 -- It is safe to use the runner from several threads concurrently.
-withRaftAdminT ::
+withAdminSession ::
   (MonadAsync m) =>
   -- | self identification
   node ->
   AdminImplementation node m ->
   ((forall a. RaftAdminT node m a -> m a) -> m b) ->
   m b
-withRaftAdminT self impl withSession = do
+withAdminSession self impl withSession = do
   nRId <- newTVarIO 0
   mbox <- newTVarIO mempty
   sessId <- generateSessionId impl self
