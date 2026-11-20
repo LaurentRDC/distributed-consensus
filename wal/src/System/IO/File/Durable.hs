@@ -8,7 +8,9 @@ module System.IO.File.Durable
   ( -- * Low-level handles
     FHandle,
     open,
+    openRead,
     size,
+    readSome,
     writeAll,
     flush,
     syncDirectory,
@@ -23,6 +25,7 @@ where
 import Control.Exception (bracket)
 import Data.ByteString (StrictByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
 import Data.Word (Word8)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import System.Directory.OsPath (removeFile, renameFile)
@@ -31,11 +34,15 @@ import System.OsPath (OsPath, osp, takeDirectory)
 import qualified System.OsString as OsString
 #ifdef mingw32_HOST_OS
 import System.IO.File.Durable.Windows as X
-    ( FHandle, open, size, write, flush, syncDirectory, close )
+    ( FHandle, open, openRead, size, write, readBuf, flush, syncDirectory, close )
 #else
 import System.IO.File.Durable.Unix as X
-    ( FHandle, open, size, write, flush, syncDirectory, close )
+    ( FHandle, open, openRead, size, write, readBuf, flush, syncDirectory, close )
 #endif
+
+-- | Read up to the given number of bytes
+readSome :: FHandle -> Int -> IO StrictByteString
+readSome h n = BSI.createUptoN n $ \ptr -> fromIntegral <$> readBuf h ptr (fromIntegral n)
 
 -- | Write a whole buffer
 writeAll :: FHandle -> Ptr Word8 -> Int -> IO ()

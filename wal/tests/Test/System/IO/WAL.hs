@@ -3,7 +3,8 @@
 
 module Test.System.IO.WAL (tests) where
 
-import Control.Concurrent.Async (async, forConcurrently, wait)
+import Control.Concurrent.Async (async, forConcurrently, wait, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar, takeMVar, tryPutMVar)
 import Control.Exception (SomeException, try)
 import Control.Monad (replicateM, unless)
 import Control.Monad.IO.Class (liftIO)
@@ -45,7 +46,8 @@ tests =
       testAutomaticRotation,
       testConcurrentAppends,
       testCloseWhileAppending,
-      testReplayWhileAppending
+      testReplayWhileAppending,
+      testAppendWhileReplaying
     ]
 
 testTripping :: TestTree
@@ -335,28 +337,55 @@ testCloseWhileAppending = testProperty "Closing a log while appending to it keep
         Right () -> (e :) <$> appendUntilClosed wal es
 
 testReplayWhileAppending :: TestTree
-testReplayWhileAppending = testProperty "Replaying the active segment while appending to it sees a prefix of the log" $ property $ do
+testReplayWhileAppending = testProperty "Replaying the active segment while appending to it sees a prefix of that segment" $ property $ do
   entries <- forAll genThreadEntries
-  numReplays <- forAll $ Gen.int (Range.linear 1 5)
+  numReplays <- forAll $ Gen.int (Range.linear 1 20)
+  maxBytes <- forAll $ Gen.choice [Gen.word64 (Range.linear 8 256), pure maxBound]
 
   result <- liftIO $ withSystemTempDirectory "wal-testing-replay" $ \tmpDir -> do
     dir <- encodeFS tmpDir
-    timeout 30_000_000 $ withWriteAheadLog testCodec (WALConfig maxBound dir) $ \wal -> do
-      let replayActive = do
+    timeout 30_000_000 $ withWriteAheadLog testCodec (WALConfig maxBytes dir) $ \wal -> do
+      let replay seg = do
             replayedRef <- newIORef []
-            seg <- activeSegment wal
             replaySegment wal seg (\e -> modifyIORef' replayedRef (e :))
-            reverse <$> readIORef replayedRef
+            (seg,) . reverse <$> readIORef replayedRef
+          replayActive = activeSegment wal >>= replay
       snapshots <-
         forConcurrently (Left numReplays : map Right entries) $
           either (`replicateM` replayActive) (\es -> [] <$ traverse_ (append wal) es)
-      (concat snapshots,) <$> replayActive
+      finals <- segments wal >>= traverse replay . toList
+      pure (concat snapshots, finals)
 
   case result of
     Nothing -> annotate "Timed out" >> failure
-    Just (snapshots, final) -> do
-      sort final === sort (concat entries)
-      for_ snapshots $ \snapshot -> assert (snapshot `isPrefixOf` final)
+    Just (snapshots, finals) -> do
+      sort (concatMap snd finals) === sort (concat entries)
+      for_ snapshots $ \(seg, snapshot) -> assert (any (\(s, final) -> s == seg && snapshot `isPrefixOf` final) finals)
+
+testAppendWhileReplaying :: TestTree
+testAppendWhileReplaying = testProperty "Appending while replaying the active segment doesn't block" $ property $ do
+  before <- forAll $ Gen.list (Range.linear 1 10) (Gen.bytes (Range.linear 0 24))
+  after <- forAll $ Gen.list (Range.linear 1 10) (Gen.bytes (Range.linear 0 24))
+
+  result <- liftIO $ withSystemTempDirectory "wal-testing-append-replay" $ \tmpDir -> do
+    dir <- encodeFS tmpDir
+    timeout 10_000_000 $ withWriteAheadLog testCodec (WALConfig maxBound dir) $ \wal -> do
+      for_ before (append wal)
+      started <- newEmptyMVar
+      proceed <- newEmptyMVar
+      let replay onEntry = do
+            replayedRef <- newIORef []
+            seg <- activeSegment wal
+            replaySegment wal seg (\e -> onEntry >> modifyIORef' replayedRef (e :))
+            reverse <$> readIORef replayedRef
+      -- The replay is held up mid-way, while this thread appends
+      withAsync (replay (tryPutMVar started () >> readMVar proceed)) $ \replaying -> do
+        takeMVar started
+        for_ after (append wal)
+        putMVar proceed ()
+        (,) <$> wait replaying <*> replay (pure ())
+
+  result === Just (before, before <> after)
 
 genThreadEntries :: Gen [[StrictByteString]]
 genThreadEntries = do

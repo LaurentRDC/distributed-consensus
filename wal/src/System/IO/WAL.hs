@@ -58,7 +58,6 @@ import Control.Exception
     catch,
     displayException,
     evaluate,
-    mask,
     mask_,
     throwIO,
     try,
@@ -132,7 +131,8 @@ import Text.Read (readMaybe)
 -- existing segments using 'segments'.
 --
 -- You can read back the entire log in sequential order using 'replayAll'.
--- You can also read back specific segments using 'replaySegment'.
+-- You can also read back specific segments using 'replaySegment'. You
+-- can read and write to the log concurrently.
 --
 -- Using the same 'WriteAheadLog' from multiple threads is safe, and
 -- efficient: throughput increases linearly with the number of writer
@@ -141,9 +141,8 @@ data WriteAheadLog a = WriteAheadLog
   { walCodec :: !(WALCodec a),
     walConfig :: !WALConfig,
     walHandle :: !(MVar WALHandle),
-    walActiveSegment :: !(IORef Segment),
-    -- | bytes written to current segment
-    walWritten :: !(IORef Word64),
+    -- | The active segment, and the number of bytes persisted.
+    walActive :: !(IORef (Segment, Word64)),
     -- | In case an error has happened when trying to append, we must
     -- be able to share this with other threads.
     --
@@ -257,8 +256,7 @@ open codec config = do
       codec
       config
       <$> newMVar (WALHandle h path)
-      <*> newIORef latest
-      <*> newIORef (fromIntegral sz)
+      <*> newIORef (latest, fromIntegral sz)
       <*> newIORef Nothing
       <*> newTQueueIO
       <*> newTVarIO False
@@ -293,7 +291,7 @@ open codec config = do
     writeAppends _ [] = pure ()
     writeAppends wal appends@(Append _ firstDone : others) = do
       rotated <- try $ withActiveSegment wal $ \handle -> do
-        written <- readIORef (walWritten wal)
+        written <- snd <$> readIORef (walActive wal)
         if written >= maxSegmentBytes (walConfig wal)
           then void <$> rotateLocked wal handle
           else pure (handle, ())
@@ -301,7 +299,7 @@ open codec config = do
       case rotated of
         Left e -> reply firstDone (Left e) >> writeAppends wal others
         Right () -> do
-          written <- readIORef (walWritten wal)
+          written <- snd <$> readIORef (walActive wal)
           let (batch, rest) = fillSegment (maxSegmentBytes (walConfig wal)) written appends
               bytes = BS.concat [b | Append b _ <- batch]
           result <- try $ withActiveSegment wal $ \handle@(WALHandle h _) -> do
@@ -309,7 +307,8 @@ open codec config = do
               BSU.unsafeUseAsCStringLen bytes $ \(ptr, len) -> do
                 WALFile.writeAll h (castPtr ptr) len
                 WALFile.flush h
-            modifyIORef' (walWritten wal) (+ fromIntegral (BS.length bytes))
+            modifyIORef' (walActive wal) $ \(seg, total) ->
+              let !total' = total + fromIntegral (BS.length bytes) in (seg, total')
             pure (handle, ())
           traverse_ (\(Append _ done) -> reply done result) batch
           writeAppends wal rest
@@ -409,7 +408,7 @@ segments wal =
 
 -- | Return the active segment of the write-ahead log
 activeSegment :: (MonadIO m) => WriteAheadLog a -> m Segment
-activeSegment = liftIO . readIORef . walActiveSegment
+activeSegment = liftIO . fmap fst . readIORef . walActive
 
 -- | Append a single entry to the log. Once 'append' returns,
 -- the entry is durably stored on disk.
@@ -452,7 +451,7 @@ rotateLocked :: WriteAheadLog a -> WALHandle -> IO (WALHandle, Segment)
 rotateLocked wal (WALHandle h _) = do
   durably wal (WALFile.flush h)
 
-  n' <- (+ 1) <$> readIORef (walActiveSegment wal)
+  n' <- (+ 1) . fst <$> readIORef (walActive wal)
   let path = directory (walConfig wal) </> segmentPath n'
 
   -- The next segment file is overwritten
@@ -462,8 +461,7 @@ rotateLocked wal (WALHandle h _) = do
   h' <- WALFile.open path
   WALFile.close h
 
-  writeIORef (walActiveSegment wal) n'
-  writeIORef (walWritten wal) 0
+  writeIORef (walActive wal) (n', 0)
 
   pure (WALHandle h' path, n')
 
@@ -496,9 +494,9 @@ durably wal act = do
 -- checksum, as happens when a crash interrupts a write. An entry which
 -- passes its checksum, but can't be decoded, is an error.
 --
--- It is safe to replay the segment to which we are currently writing;
--- however, 'replaySegment' will block until everything has been replayed,
--- such that one cannot read-and-write simultaneously.
+-- It is safe to replay the segment to which we are currently writing, and
+-- doing so doesn't block appends. Only the entries which were durably
+-- written when replaying started are replayed.
 replaySegment ::
   (MonadIO m) =>
   WriteAheadLog a ->
@@ -506,35 +504,14 @@ replaySegment ::
   (a -> IO ()) ->
   m ()
 replaySegment wal segment onEntry = liftIO $ do
-  active <- activeSegment wal
-  -- If we're trying to naively replay the current active segment,
-  -- then we'll get a 'resource busy' error since the file is
-  -- open for appending.
-  --
-  -- In this case, we close the handle, replay, then re-open the handle.
-  --
-  -- Note that this is safe since 'replaySegment' locks access to the
-  -- WALHandle while replaying
-  if active == segment
-    then do
-      result <- mask $ \restore ->
-        modifyMVar (walHandle wal) $ \(WALHandle h fp) -> do
-          WALFile.close h
-          replayed <- try (restore replayUnusedSegment)
-          h' <- WALFile.open fp
-          pure (WALHandle h' fp, replayed)
-      either throwIO pure (result :: Either SomeException ())
-    else replayUnusedSegment
-  where
-    replayUnusedSegment = do
-      withBinaryFile
-        (directory (walConfig wal) </> segmentPath segment)
-        ReadMode
-        $ \h -> streamPayloads h $ \payload ->
-          either
-            (\e -> fail ("WAL: decode error: " <> e))
-            onEntry
-            (decodeEntry (walCodec wal) payload)
+  (active, durable) <- readIORef (walActive wal)
+  let limit = if active == segment then durable else maxBound
+  bracket (WALFile.openRead (directory (walConfig wal) </> segmentPath segment)) WALFile.close $ \h ->
+    streamPayloads (WALFile.readSome h) limit $ \payload ->
+      either
+        (\e -> fail ("WAL: decode error: " <> e))
+        onEntry
+        (decodeEntry (walCodec wal) payload)
 
 -- | Replay every segment in the log directory, oldest first, feeding each
 -- decoded entry to the given callback in order.
@@ -546,15 +523,17 @@ replayAll wal onEntry = do
 -- | Stream the payloads of a segment's entries, in order.
 --
 -- Streaming stops at the first entry which is incomplete or fails
--- its checksum.
-streamPayloads :: Handle -> (StrictByteString -> IO ()) -> IO ()
-streamPayloads h onPayload = go (Parser.parse payloadP BS.empty)
+-- its checksum, or after reading the given number of bytes.
+streamPayloads :: (Int -> IO StrictByteString) -> Word64 -> (StrictByteString -> IO ()) -> IO ()
+streamPayloads readChunk limit onPayload = go limit (Parser.parse payloadP BS.empty)
   where
-    go (Parser.Done rest payload) = onPayload payload >> go (Parser.parse payloadP rest)
-    go (Parser.Partial continue) = BS.hGet h (64 * 1024) >>= go . continue
+    go remaining (Parser.Done rest payload) = onPayload payload >> go remaining (Parser.parse payloadP rest)
+    go remaining (Parser.Partial continue) = do
+      chunk <- readChunk (fromIntegral (min remaining (64 * 1024)))
+      go (remaining - fromIntegral (BS.length chunk)) (continue chunk)
     -- Either we've reached the end of the segment, or the next entry
     -- is torn or corrupted; both mark the end of the valid entries.
-    go Parser.Fail {} = pure ()
+    go _ Parser.Fail {} = pure ()
 
 -- | Returns the size of the data that only includes valid
 -- write-ahead log entries.
@@ -565,6 +544,6 @@ validSize :: Handle -> IO Word64
 validSize h = do
   validSizeRef <- newIORef (0 :: Word64)
 
-  streamPayloads h $ \payload ->
+  streamPayloads (BS.hGet h) maxBound $ \payload ->
     modifyIORef' validSizeRef (\v -> v + 4 + 4 + fromIntegral (BS.length payload))
   readIORef validSizeRef

@@ -5,8 +5,10 @@
 module System.IO.File.Durable.Unix
   ( FHandle,
     open,
+    openRead,
     size,
     write,
+    readBuf,
     flush,
     syncDirectory,
     close,
@@ -31,6 +33,7 @@ import System.Posix
     OpenMode (ReadOnly, WriteOnly),
     closeFd,
     defaultFileFlags,
+    fdReadBuf,
     fdWriteBuf,
     stdFileMode,
   )
@@ -51,11 +54,17 @@ open filename =
           append = True
         }
 
+openRead :: OsPath -> IO FHandle
+openRead filename = FHandle <$> openFd (getOsString filename) ReadOnly defaultFileFlags
+
 size :: FHandle -> IO Integer
 size (FHandle (Fd h)) = fdFileSize h
 
 write :: FHandle -> Ptr Word8 -> Word32 -> IO Word32
 write (FHandle fd) data' length' = fmap fromIntegral $ fdWriteBuf fd data' $ fromIntegral length'
+
+readBuf :: FHandle -> Ptr Word8 -> Word32 -> IO Word32
+readBuf (FHandle fd) data' length' = fmap fromIntegral $ fdReadBuf fd data' $ fromIntegral length'
 
 -- | Block until everything written to the file has reached stable storage.
 flush :: FHandle -> IO ()

@@ -1,13 +1,15 @@
 module Test.System.IO.File.Durable (tests) where
 
+import Control.Exception (bracket)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
+import Foreign.Ptr (castPtr)
 import Hedgehog (annotate, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import System.Directory.OsPath (doesFileExist, listDirectory)
 import System.File.OsPath (readFile')
-import System.IO.File.Durable (removeFileDurable, writeFileAtomic)
+import System.IO.File.Durable (close, open, openRead, readSome, removeFileDurable, writeAll, writeFileAtomic)
 import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (encodeFS, unsafeEncodeUtf, (</>))
 import Test.Tasty (TestTree, testGroup)
@@ -19,7 +21,8 @@ tests =
     "System.IO.File.Durable"
     [ testWriteFileAtomic,
       testWriteFileAtomicIgnoresStaleTemporary,
-      testRemoveFileDurable
+      testRemoveFileDurable,
+      testReadWhileWriting
     ]
 
 testWriteFileAtomic :: TestTree
@@ -49,7 +52,7 @@ testWriteFileAtomicIgnoresStaleTemporary = testProperty "writeFileAtomic discard
   contents === new
 
 testRemoveFileDurable :: TestTree
-testRemoveFileDurable = testProperty "removeFileDurable removes a file, and is a no-op if it is missing" $ property $ do
+testRemoveFileDurable = testProperty "removeFileDurable removes a file if it exists" $ property $ do
   bytes <- forAll $ Gen.bytes (Range.linear 0 64)
   (existsBefore, existsAfter) <- liftIO $ withSystemTempDirectory "durable-testing" $ \tmpDir -> do
     dir <- encodeFS tmpDir
@@ -61,3 +64,20 @@ testRemoveFileDurable = testProperty "removeFileDurable removes a file, and is a
     after <- doesFileExist path
     pure (before, after)
   (existsBefore, existsAfter) === (True, False)
+
+testReadWhileWriting :: TestTree
+testReadWhileWriting = testProperty "A file can be read while it is open for writing" $ property $ do
+  before <- forAll $ Gen.bytes (Range.linear 1 64)
+  after <- forAll $ Gen.bytes (Range.linear 1 64)
+  seen <- liftIO $ withSystemTempDirectory "durable-testing" $ \tmpDir -> do
+    dir <- encodeFS tmpDir
+    let path = dir </> unsafeEncodeUtf "file"
+        write h bytes = BS.useAsCStringLen bytes $ \(ptr, len) -> writeAll h (castPtr ptr) len
+    bracket (open path) close $
+      \w -> bracket (openRead path) close $ \r -> do
+        write w before
+        seenBefore <- readSome r 128
+        write w after
+        seenAfter <- readSome r 128
+        pure (seenBefore, seenAfter)
+  seen === (before, after)
