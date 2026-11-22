@@ -71,15 +71,18 @@ test-suite raft-consensus-test
                       Control.Monitor.Predicate
                       Control.Monitor.Reason
                       Test.Distributed.Consensus.Raft
+                      Test.Distributed.Consensus.Raft.Client
                       Test.Distributed.Consensus.Raft.Options
                       Test.Distributed.Consensus.Raft.Properties
                       Test.Distributed.Consensus.Raft.Scenario
+                      Test.StateMachine
     ghc-options:      -rtsopts -threaded -with-rtsopts=-N
     build-depends:    base >= 4.18 && <4.23
                     , containers
                     , raft-consensus
                     , io-classes
                     , io-sim ^>=1.11
+                    , linearizable ^>=0.1
                     , pretty-simple ^>=4.1
                     , random
                     , tagged ^>=0.8

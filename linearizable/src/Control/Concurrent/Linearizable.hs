@@ -35,7 +35,7 @@ data Event timestamp operation
     timestampAck :: timestamp,
     operation :: operation
   }
-  deriving (Eq, Ord)
+  deriving (Show, Eq, Ord)
 
 data Model state operation
   = MkModel
