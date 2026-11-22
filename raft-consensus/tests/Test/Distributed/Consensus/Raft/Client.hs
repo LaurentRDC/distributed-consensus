@@ -14,14 +14,12 @@ import Control.Monad.IOSim (SimEvent, SimEventType (EventLog), SimResult, Trace,
 import Data.Dynamic (Typeable, fromDynamic)
 import Data.Function ((&))
 import Data.List (foldl', sortOn)
-import Data.List.NonEmpty (nonEmpty)
-import qualified Data.Set as Set
 import Data.Word (Word64)
 import Distributed.Consensus.Raft
   ( runStateMachineStep,
   )
 import Test.StateMachine (Command (..), Key, Node (..), Result, State, step)
-import Test.Tasty.QuickCheck (Property, counterexample, property, (.&&.))
+import Test.Tasty.QuickCheck (Property, counterexample, (.&&.))
 
 checkLinearizability :: Trace (SimResult a) SimEvent -> Property
 checkLinearizability trace' =
@@ -57,21 +55,12 @@ checkLinearizability trace' =
                     Nothing -> (node, Just ix)
             ]
               & sortOn (timestampReq . snd)
-          nodes =
-            foldMap (Set.singleton . fst) history
-              & Set.toList
-              & nonEmpty
-       in case nodes of
-            -- event history for this key is empty
-            Nothing -> property True
-            Just nodes' ->
-              counterexample
-                ("Client history for key " <> show key <> " not linearizable: " <> show history)
-                ( linearizable
-                    model
-                    nodes'
-                    history
-                )
+       in counterexample
+            ("Client history for key " <> show key <> " not linearizable: " <> show history)
+            ( linearizable
+                model
+                history
+            )
       where
         commandKey (Insert k _) = k
         commandKey (Delete k) = k

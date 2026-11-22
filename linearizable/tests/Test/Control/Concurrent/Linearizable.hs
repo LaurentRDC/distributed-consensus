@@ -3,7 +3,6 @@
 module Test.Control.Concurrent.Linearizable (tests) where
 
 import Control.Concurrent.Linearizable (Event (..), Model (..), linearizable)
-import Data.List.NonEmpty (NonEmpty (..))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase)
 
@@ -26,7 +25,7 @@ testEmptyHistoryLinearizable =
     let emptyHistory = [] :: [(Int, Event Timestamp Op)]
      in assertBool
           "Trivial history should be linearizable"
-          (linearizable model (0 :| [1, 2]) emptyHistory)
+          (linearizable model emptyHistory)
 
 testLinearizableExample :: TestTree
 testLinearizableExample = testCase "Linearizable example" $ do
@@ -40,7 +39,7 @@ testLinearizableExample = testCase "Linearizable example" $ do
           (0, get (Just 8) 111 117),
           (1, put 9 114 118)
         ]
-  assertBool "History should be linearizable" (linearizable @Int model (0 :| [1, 2]) history)
+  assertBool "History should be linearizable" (linearizable @Int model history)
 
 testNonLinearizableExample :: TestTree
 testNonLinearizableExample = testCase "Non-linearizable example" $ do
@@ -50,7 +49,7 @@ testNonLinearizableExample = testCase "Non-linearizable example" $ do
           (2, put 9 107 110),
           (0, get (Just 7) 111 113)
         ]
-  assertBool "History should not be linearizable" (not $ linearizable @Int model (0 :| [1, 2]) history)
+  assertBool "History should not be linearizable" (not $ linearizable @Int model history)
 
 testLinearizableExampleWithFail :: TestTree
 testLinearizableExampleWithFail = testCase "Linearizable example with failures" $ do
@@ -63,7 +62,7 @@ testLinearizableExampleWithFail = testCase "Linearizable example with failures" 
           (1, put 10 115 117),
           (0, get (Just 10) 118 119)
         ]
-  assertBool "History should be linearizable" (linearizable @Int model (0 :| [1]) history)
+  assertBool "History should be linearizable" (linearizable @Int model history)
 
 testIdleNode :: TestTree
 testIdleNode = testCase "Idle node in the node list" $ do
@@ -74,7 +73,7 @@ testIdleNode = testCase "Idle node in the node list" $ do
           (0, put 2 5 6),
           (1, get (Just 2) 7 8)
         ]
-  assertBool "History should be linearizable" (linearizable @Int model (0 :| [1, 2]) history)
+  assertBool "History should be linearizable" (linearizable @Int model history)
 
 testIdleNodeNonLinearizable :: TestTree
 testIdleNodeNonLinearizable = testCase "Idle node, non-linearizable history" $ do
@@ -84,7 +83,7 @@ testIdleNodeNonLinearizable = testCase "Idle node, non-linearizable history" $ d
         [ (0, put 1 0 2),
           (1, get (Just 2) 3 4)
         ]
-  assertBool "History should not be linearizable" (not $ linearizable @Int model (0 :| [1, 2]) history)
+  assertBool "History should not be linearizable" (not $ linearizable @Int model history)
 
 testEarlyFinisher :: TestTree
 testEarlyFinisher = testCase "Client finishing early" $ do
@@ -96,7 +95,7 @@ testEarlyFinisher = testCase "Client finishing early" $ do
           (1, get (Just 5) 6 7),
           (2, get (Just 5) 8 9)
         ]
-  assertBool "History should be linearizable" (linearizable @Int model (0 :| [1, 2]) history)
+  assertBool "History should be linearizable" (linearizable @Int model history)
 
 data State
   = Unknown

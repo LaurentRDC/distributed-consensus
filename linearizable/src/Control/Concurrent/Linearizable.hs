@@ -19,8 +19,6 @@ where
 
 import Data.Foldable (foldlM)
 import Data.List (sortOn)
-import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
@@ -60,20 +58,29 @@ data Checker node state timestamp operation
 -- history of events. Events will be sorted appropriately before
 -- linearizability is checked.
 --
--- Returns 'True' if there exists a sequential ordering of the events that
--- respects real-time precedence and, is accepted by the 'Model'.
+-- Returns 'True' if it's possible to place events in linear order
+-- that is accepted by the 'Model'.
+--
+-- Note that checking linearizbility is NP-complete; this means that
+-- 'linearizable' may take a long time, and/or require lots of resources.
+-- If you can, try to break down the 'Model' into individual components.
+-- For example, if you were testing the linearizability of operations
+-- on a key-value store, you might want to check the
+-- linearizability of events related to each key individually.
 linearizable ::
   (Ord node, Ord state, Ord timestamp, Ord operation) =>
   Model state operation ->
-  NonEmpty node ->
   [(node, Event timestamp operation)] ->
   Bool
-linearizable m nodes events =
+linearizable _ [] = True
+linearizable m events =
   maybe
     False
     (any (canDrain m) . possibilities)
     (foldlM feed (checker nodes) (zip sortedEvents stillActive))
   where
+    nodes = foldMap (Set.singleton . fst) events
+
     sortedEvents = sortOn (timestampAck . snd) events
     -- stillActive !! i is the set of nodes that have at least one event
     -- /after/ the i-th event, i.e. the nodes we must still wait for
@@ -87,7 +94,7 @@ linearizable m nodes events =
               queues =
                 Map.fromList
                   [ (n, mempty)
-                  | n <- NonEmpty.toList ns
+                  | n <- Set.toList ns
                   ]
             }
 
