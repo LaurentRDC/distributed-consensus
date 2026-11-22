@@ -222,26 +222,6 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
                       shutDownNode server.sConfig.nodeId
           )
 
-    runClients ::
-      Harness s ->
-      ScenarioInputs ->
-      IOSim s ()
-    runClients harness scenarioInputs =
-      forConcurrently_ (IntMap.toList harness.hClients) $ \(clientNode, clientImplementation) ->
-        withClientSession (fromIntegral clientNode) clientImplementation $ \runClientAction ->
-          runClient
-            (fromIntegral clientNode)
-            runClientAction
-            -- In principle, there is no upper bound on how long a
-            -- client can wait to receive a message. I'm putting a generous
-            -- bound here because I have seen situations where the client never
-            -- receives a reply (due to a bug)
-            (clientRequestTimeout scenarioInputs)
-            (clientRetryBudget scenarioInputs)
-            (scenarioInputs.commands IntMap.! (clientNode - minClientNode))
-      where
-        minClientNode = IntSet.findMin $ IntMap.keysSet harness.hClients
-
     runServers ::
       Harness s ->
       (forall a. RaftAdminT Node (IOSim s) a -> IOSim s a) ->
@@ -293,82 +273,102 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
               (runServerWithFaults server Raft.LoneNode)
         )
 
-    runClient ::
-      Node ->
-      (forall a. RaftClientT Command Node Result (IOSim s) a -> IOSim s a) ->
-      -- \| Single request timeout
-      Microseconds ->
-      -- \| Timeout for retries
-      Microseconds ->
-      [Command] ->
+    runClients ::
+      Harness s ->
+      ScenarioInputs ->
       IOSim s ()
-    runClient clientNode runRequest maxTime retryBudget = go (Set.singleton (0 :: Node))
+    runClients harness scenarioInputs =
+      forConcurrently_ (IntMap.toList harness.hClients) $ \(clientNode, clientImplementation) ->
+        withClientSession (fromIntegral clientNode) clientImplementation $ \runClientAction ->
+          runClient
+            (fromIntegral clientNode)
+            runClientAction
+            -- In principle, there is no upper bound on how long a
+            -- client can wait to receive a message. I'm putting a generous
+            -- bound here because I have seen situations where the client never
+            -- receives a reply (due to a bug)
+            (clientRequestTimeout scenarioInputs)
+            (clientRetryBudget scenarioInputs)
+            (scenarioInputs.commands IntMap.! (clientNode - minClientNode))
       where
-        -- \| Given a node, and a set of known nodes, deterministically pick another
-        -- node from the set.
-        nextCandidate :: Node -> Set Node -> Maybe Node
-        nextCandidate failed known = Set.lookupGT failed known <|> Set.lookupMin known
+        minClientNode = IntSet.findMin $ IntMap.keysSet harness.hClients
 
-        go _ [] = pure ()
-        go knownNodes (command : rest) = do
-          req <- runRequest (newRequest command)
-          start <- getMonotonicTimeNSec
-          attempt req knownNodes retryBudget 0 >>= \case
-            Just result -> do
-              end <- getMonotonicTimeNSec
-              traceM (MkRaftClientTrace clientNode (Linearizable.MkEvent start end (command, Just result)))
-            Nothing ->
-              traceM (MkRaftClientTrace clientNode (Linearizable.MkEvent start maxBound (command, Nothing @Result)))
-          go knownNodes rest
+        runClient ::
+          Node ->
+          (forall a. RaftClientT Command Node Result (IOSim s) a -> IOSim s a) ->
+          -- \| Single request timeout
+          Microseconds ->
+          -- \| Timeout for retries
+          Microseconds ->
+          [Command] ->
+          IOSim s ()
+        runClient clientNode runRequest maxTime retryBudget = go (Set.singleton (0 :: Node))
           where
-            attempt payload nodeSet remaining target = do
-              threadDelay (fromIntegral clientRetryTick)
-              timeout (fromIntegral maxTime) (runRequest (sendClientRequest target payload))
-                >>= \case
-                  Nothing ->
-                    giveUp $
-                      "no response at all within "
-                        <> show (toInteger maxTime)
-                        <> " microseconds"
-                  -- Command needs to be retried but on another target
-                  Just (Left err@(Redirect otherNode))
-                    | remaining <= clientRetryTick ->
-                        giveUp $
-                          "retried for "
-                            <> show (toInteger retryBudget)
-                            <> " microseconds, last response was "
-                            <> show err
-                    | otherwise -> attempt payload (Set.insert otherNode nodeSet) (remaining - clientRetryTick) otherNode
-                  Just (Left err@NoKnownLeader)
-                    | remaining <= clientRetryTick ->
-                        giveUp $
-                          "retried for "
-                            <> show (toInteger retryBudget)
-                            <> " microseconds, last response was "
-                            <> show err
-                    | otherwise -> case nextCandidate target nodeSet of
-                        Nothing -> giveUp "No known nodes to query"
-                        Just candidate -> attempt payload nodeSet (remaining - clientRetryTick) candidate
-                  Just (Right (_, result)) -> pure (Just result)
+            -- \| Given a node, and a set of known nodes, deterministically pick another
+            -- node from the set.
+            nextCandidate :: Node -> Set Node -> Maybe Node
+            nextCandidate failed known = Set.lookupGT failed known <|> Set.lookupMin known
+
+            go _ [] = pure ()
+            go knownNodes (command : rest) = do
+              req <- runRequest (newRequest command)
+              start <- getMonotonicTimeNSec
+              attempt req knownNodes retryBudget 0 >>= \case
+                Just result -> do
+                  end <- getMonotonicTimeNSec
+                  traceM (MkRaftClientTrace clientNode (Linearizable.MkEvent start end (command, Just result)))
+                Nothing ->
+                  traceM (MkRaftClientTrace clientNode (Linearizable.MkEvent start maxBound (command, Nothing @Result)))
+              go knownNodes rest
               where
-                giveUp why =
-                  case faultInjection of
-                    -- In a real Raft cluster (i.e. subject to faults), there's no guarantee of liveness.
-                    -- That's the price to pay for strong consistency.
-                    --
-                    -- This means we can be stuck in a situation where a cluster is so faulty, that it
-                    -- literally cannot serve any requests -- think of an election + crash loop. Thus,
-                    -- giving up in this context means letting go.
-                    --
-                    -- A Raft cluster that is NOT subject to faults has no excuse for not eventually
-                    -- service client requests, hence the use of 'fail'
-                    FaultInjection -> pure Nothing
-                    NoFaultInjection ->
-                      fail $
-                        "Client could not get "
-                          <> show command
-                          <> " served, and no node in this scenario can crash: "
-                          <> why
+                attempt payload nodeSet remaining target = do
+                  threadDelay (fromIntegral clientRetryTick)
+                  timeout (fromIntegral maxTime) (runRequest (sendClientRequest target payload))
+                    >>= \case
+                      Nothing ->
+                        giveUp $
+                          "no response at all within "
+                            <> show (toInteger maxTime)
+                            <> " microseconds"
+                      -- Command needs to be retried but on another target
+                      Just (Left err@(Redirect otherNode))
+                        | remaining <= clientRetryTick ->
+                            giveUp $
+                              "retried for "
+                                <> show (toInteger retryBudget)
+                                <> " microseconds, last response was "
+                                <> show err
+                        | otherwise -> attempt payload (Set.insert otherNode nodeSet) (remaining - clientRetryTick) otherNode
+                      Just (Left err@NoKnownLeader)
+                        | remaining <= clientRetryTick ->
+                            giveUp $
+                              "retried for "
+                                <> show (toInteger retryBudget)
+                                <> " microseconds, last response was "
+                                <> show err
+                        | otherwise -> case nextCandidate target nodeSet of
+                            Nothing -> giveUp "No known nodes to query"
+                            Just candidate -> attempt payload nodeSet (remaining - clientRetryTick) candidate
+                      Just (Right (_, result)) -> pure (Just result)
+                  where
+                    giveUp why =
+                      case faultInjection of
+                        -- In a real Raft cluster (i.e. subject to faults), there's no guarantee of liveness.
+                        -- That's the price to pay for strong consistency.
+                        --
+                        -- This means we can be stuck in a situation where a cluster is so faulty, that it
+                        -- literally cannot serve any requests -- think of an election + crash loop. Thus,
+                        -- giving up in this context means letting go.
+                        --
+                        -- A Raft cluster that is NOT subject to faults has no excuse for not eventually
+                        -- service client requests, hence the use of 'fail'
+                        FaultInjection -> pure Nothing
+                        NoFaultInjection ->
+                          fail $
+                            "Client could not get "
+                              <> show command
+                              <> " served, and no node in this scenario can crash: "
+                              <> why
 
 data ScenarioInputs
   = ScenarioInputs
@@ -415,7 +415,7 @@ genScenarioInputs faultInjection = do
           <*> chooseBoundedIntegral (etoub, 3 * etoub)
       )
 
-  cmds <- replicateM numClients $ flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 10)
+  cmds <- replicateM numClients $ flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 20)
   pure $
     ScenarioInputs
       { heartbeatTimeout = hb,
