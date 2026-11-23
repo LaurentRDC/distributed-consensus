@@ -31,9 +31,9 @@ $ cabal test
 
 ### Deterministic simulation testing
 
-Cluster properties are tested under two modes: with, and without, schedule exploration.
+Cluster properties and client request linearizability are tested under two modes: with, and without, schedule exploration.
 
-In both cases, the cluster's initial conditions are generated at random by QuickCheck: timeouts, cluster configuration, fault schedules, etc.
+In both cases, the cluster's and clients' initial conditions are generated at random by QuickCheck: timeouts, cluster configuration, fault schedules, etc.
 
 Without schedule exploration, a simulated trace is run from these initial conditions. This is relatively fast, and allows to explore the behavior of the system under many initial conditions. You can tweak the number of tests run in this mode using the `quichcheck-tests` option. For example:
 

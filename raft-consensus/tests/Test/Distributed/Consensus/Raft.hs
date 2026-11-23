@@ -1,6 +1,5 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedRecordDot #-}
@@ -18,11 +17,13 @@ where
 import Control.Applicative ((<|>))
 import Control.Concurrent.Class.MonadMVar (MVar, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.Class.MonadSTM (MonadSTM, TQueue, TVar, atomically, flushTQueue, newTQueueIO, newTVarIO, readTQueue, readTVar, readTVarIO, retry, writeTQueue, writeTVar)
+import qualified Control.Concurrent.Linearizable as Linearizable
 import Control.Exception (Exception)
 import Control.Monad (replicateM, unless, void, when)
-import Control.Monad.Class.MonadAsync (async, asyncThreadId, concurrently_, forConcurrently_, race_, waitCatch, withAsync)
+import Control.Monad.Class.MonadAsync (async, asyncThreadId, concurrently_, forConcurrently_, race_, wait, waitCatch, withAsync)
 import Control.Monad.Class.MonadFork (ThreadId, throwTo)
 import Control.Monad.Class.MonadTest (exploreRaces)
+import Control.Monad.Class.MonadTime (getMonotonicTimeNSec)
 import Control.Monad.Class.MonadTimer (threadDelay, timeout)
 import Control.Monad.IOSim (ExplorationOptions, IOSim, exploreSimTrace, traceM)
 import Data.Functor ((<&>))
@@ -52,10 +53,8 @@ import Distributed.Consensus.Raft
     RPCResult,
     RaftTrace (..),
     Snapshot,
-    StateMachineStep (..),
     Term,
     runRaftServer,
-    runStateMachineStep,
   )
 import qualified Distributed.Consensus.Raft as Raft
 import Distributed.Consensus.Raft.Admin
@@ -86,9 +85,11 @@ import Distributed.Consensus.Raft.Client
   )
 import qualified Distributed.Consensus.Raft.Client as Client
 import System.Random (RandomGen, mkStdGen64, randomR, uniformR)
+import Test.Distributed.Consensus.Raft.Client (RaftClientTrace (..), checkLinearizability)
 import Test.Distributed.Consensus.Raft.Options (PrintTrace (..), setNumRacyTests, withExplorationOptions, withPrintTraceOption)
 import Test.Distributed.Consensus.Raft.Properties (FaultInjection (..), allProperties)
 import Test.Distributed.Consensus.Raft.Scenario (checkScenario)
+import Test.StateMachine (Command, Node (Node), Result, State, step)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck
   ( Arbitrary (arbitrary),
@@ -96,13 +97,12 @@ import Test.Tasty.QuickCheck
     Property,
     Testable (property),
     chooseBoundedIntegral,
-    chooseInt,
     counterexample,
     elements,
     forAll,
-    oneof,
     testProperty,
     vectorOf,
+    (.&&.),
   )
 import Text.Pretty.Simple (pShow)
 import Prelude hiding (read)
@@ -163,6 +163,7 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
                 checkScenario
                   (allProperties @Command @Result @Node @State faultInjection)
                   trace
+                  .&&. checkLinearizability trace
             )
   where
     debug :: forall a. (Show a) => a -> a
@@ -179,10 +180,14 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
               -- To ensure all lone nodes have time to join, and then leave
                 + 3
                   * maybe 0 maximum (nonEmpty $ sum <$> scenarioInputs.loneNodesWait)
-                -- To ensure all client requests have time to be served
-                + 3
-                  * genericLength scenarioInputs.commands
-                  * timeStep
+                -- To ensure all client requests have time to be served, we wait
+                -- for the client with the most commands as if ever command
+                -- was retried for the maximum number of times.
+                + maybe 0 maximum (nonEmpty $ genericLength <$> IntMap.elems scenarioInputs.commands)
+                  * ( clientRequestTimeout scenarioInputs
+                        + clientRetryBudget scenarioInputs
+                        + clientRetryTick
+                    )
                 -- To ensure membership changes have time to land
                 + 3
                   * 6 -- 6 attempts
@@ -194,40 +199,29 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
               withAdminSession harness.hAdminNode harness.hAdminSpec $ \runAdminAction ->
                 -- Run servers until the clients are done interacting
                 withAsync (runServers harness runAdminAction) $ \_ -> do
-                  -- Likewise, one client session for the whole command sequence,
-                  -- so that request IDs are unique across commands.
-                  withClientSession harness.hClientNode harness.hClientSpec $ \runClientAction ->
-                    runClient
-                      runClientAction
-                      -- In principle, there is no upper bound on how long a
-                      -- client can wait to receive a message. I'm putting a generous
-                      -- bound here because I have seen situations where the client never
-                      -- receives a reply (due to a bug)
-                      (10 * scenarioInputs.electionTimeoutUpperBound)
-                      (clientRetryBudget scenarioInputs)
-                      mempty -- initial state
-                      scenarioInputs.commands
+                  withAsync (runClients harness scenarioInputs) $ \clients -> do
+                    wait clients
+                    -- We give an opportunity to all lone servers to leave the cluster
+                    -- properly before we shut everyone down.
+                    let shutDownNode node =
+                          let tryShutDown :: Int -> IOSim s ()
+                              tryShutDown 0 = pure ()
+                              tryShutDown attemptsLeft =
+                                timeout
+                                  (fromIntegral scenarioInputs.electionTimeoutUpperBound)
+                                  (runAdminAction (Admin.shutDown >>= Admin.sendAdminCommand node <&> void))
+                                  >>= maybe
+                                    (tryShutDown (attemptsLeft - 1))
+                                    (either (const (tryShutDown (attemptsLeft - 1))) pure)
+                           in tryShutDown 3
 
-                  -- We give an opportunity to all lone servers to leave the cluster
-                  -- properly before we shut everyone down.
-                  let shutDownNode node =
-                        let tryShutDown :: Int -> IOSim s ()
-                            tryShutDown 0 = pure ()
-                            tryShutDown attemptsLeft =
-                              timeout
-                                (fromIntegral scenarioInputs.electionTimeoutUpperBound)
-                                (runAdminAction (Admin.shutDown >>= Admin.sendAdminCommand node <&> void))
-                                >>= maybe
-                                  (tryShutDown (attemptsLeft - 1))
-                                  (either (const (tryShutDown (attemptsLeft - 1))) pure)
-                         in tryShutDown 3
-
-                  forConcurrently_ harness.loneServers $ \(server, isDone, _, _) -> do
-                    takeMVar isDone
-                    shutDownNode server.sConfig.nodeId
-                  forConcurrently_ harness.clusterServers $ \server ->
-                    shutDownNode server.sConfig.nodeId
+                    forConcurrently_ harness.loneServers $ \(server, isDone, _, _) -> do
+                      takeMVar isDone
+                      shutDownNode server.sConfig.nodeId
+                    forConcurrently_ harness.clusterServers $ \server ->
+                      shutDownNode server.sConfig.nodeId
           )
+
     runServers ::
       Harness s ->
       (forall a. RaftAdminT Node (IOSim s) a -> IOSim s a) ->
@@ -279,88 +273,102 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
               (runServerWithFaults server Raft.LoneNode)
         )
 
-    runClient ::
-      (forall a. RaftClientT Command Node Result (IOSim s) a -> IOSim s a) ->
-      -- \| Single request timeout
-      Microseconds ->
-      -- \| Timeout for retries
-      Microseconds ->
-      State ->
-      [Command] ->
+    runClients ::
+      Harness s ->
+      ScenarioInputs ->
       IOSim s ()
-    runClient runRequest maxTime retryBudget = go (Set.singleton (0 :: Node))
+    runClients harness scenarioInputs =
+      forConcurrently_ (IntMap.toList harness.hClients) $ \(clientNode, clientImplementation) ->
+        withClientSession (fromIntegral clientNode) clientImplementation $ \runClientAction ->
+          runClient
+            (fromIntegral clientNode)
+            runClientAction
+            -- In principle, there is no upper bound on how long a
+            -- client can wait to receive a message. I'm putting a generous
+            -- bound here because I have seen situations where the client never
+            -- receives a reply (due to a bug)
+            (clientRequestTimeout scenarioInputs)
+            (clientRetryBudget scenarioInputs)
+            (scenarioInputs.commands IntMap.! (clientNode - minClientNode))
       where
-        -- \| Given a node, and a set of known nodes, deterministically pick another
-        -- node from the set.
-        nextCandidate :: Node -> Set Node -> Maybe Node
-        nextCandidate failed known = Set.lookupGT failed known <|> Set.lookupMin known
+        minClientNode = IntSet.findMin $ IntMap.keysSet harness.hClients
 
-        go _ _ [] = pure ()
-        go knownNodes state (command : rest) = do
-          req <- runRequest (newRequest command)
-          attempt req knownNodes retryBudget 0
+        runClient ::
+          Node ->
+          (forall a. RaftClientT Command Node Result (IOSim s) a -> IOSim s a) ->
+          -- \| Single request timeout
+          Microseconds ->
+          -- \| Timeout for retries
+          Microseconds ->
+          [Command] ->
+          IOSim s ()
+        runClient clientNode runRequest maxTime retryBudget = go (Set.singleton (0 :: Node))
           where
-            (newState, expectedResults) = runStateMachineStep (step command) state
+            -- \| Given a node, and a set of known nodes, deterministically pick another
+            -- node from the set.
+            nextCandidate :: Node -> Set Node -> Maybe Node
+            nextCandidate failed known = Set.lookupGT failed known <|> Set.lookupMin known
 
-            attempt payload nodeSet remaining target = do
-              threadDelay (fromIntegral clientRetryTick)
-              timeout (fromIntegral maxTime) (runRequest (sendClientRequest target payload))
-                >>= \case
-                  Nothing ->
-                    giveUp $
-                      "no response at all within "
-                        <> show (toInteger maxTime)
-                        <> " microseconds"
-                  -- Command needs to be retried but on another target
-                  Just (Left err@(Redirect otherNode))
-                    | remaining <= clientRetryTick ->
-                        giveUp $
-                          "retried for "
-                            <> show (toInteger retryBudget)
-                            <> " microseconds, last response was "
-                            <> show err
-                    | otherwise -> attempt payload (Set.insert otherNode nodeSet) (remaining - clientRetryTick) otherNode
-                  Just (Left err@NoKnownLeader)
-                    | remaining <= clientRetryTick ->
-                        giveUp $
-                          "retried for "
-                            <> show (toInteger retryBudget)
-                            <> " microseconds, last response was "
-                            <> show err
-                    | otherwise -> case nextCandidate target nodeSet of
-                        Nothing -> giveUp "No known nodes to query"
-                        Just candidate -> attempt payload nodeSet (remaining - clientRetryTick) candidate
-                  Just (Right (_leaderId, actualResults)) -> do
-                    when
-                      (actualResults /= expectedResults)
-                      ( fail $
-                          "Unexpected state: following command "
-                            <> show command
-                            <> ", expecting "
-                            <> show expectedResults
-                            <> " but got "
-                            <> show actualResults
-                      )
-                    go knownNodes newState rest
+            go _ [] = pure ()
+            go knownNodes (command : rest) = do
+              req <- runRequest (newRequest command)
+              start <- getMonotonicTimeNSec
+              attempt req knownNodes retryBudget 0 >>= \case
+                Just result -> do
+                  end <- getMonotonicTimeNSec
+                  traceM (MkRaftClientTrace clientNode (Linearizable.MkEvent start end (command, Just result)))
+                Nothing ->
+                  traceM (MkRaftClientTrace clientNode (Linearizable.MkEvent start maxBound (command, Nothing @Result)))
+              go knownNodes rest
               where
-                giveUp why =
-                  case faultInjection of
-                    -- In a real Raft cluster (i.e. subject to faults), there's no guarantee of liveness.
-                    -- That's the price to pay for strong consistency.
-                    --
-                    -- This means we can be stuck in a situation where a cluster is so faulty, that it
-                    -- literally cannot serve any requests -- think of an election + crash loop. Thus,
-                    -- giving up in this context means letting go.
-                    --
-                    -- A Raft cluster that is NOT subject to faults has no excuse for not eventually
-                    -- service client requests, hence the use of 'fail'
-                    FaultInjection -> pure ()
-                    NoFaultInjection ->
-                      fail $
-                        "Client could not get "
-                          <> show command
-                          <> " served, and no node in this scenario can crash: "
-                          <> why
+                attempt payload nodeSet remaining target = do
+                  threadDelay (fromIntegral clientRetryTick)
+                  timeout (fromIntegral maxTime) (runRequest (sendClientRequest target payload))
+                    >>= \case
+                      Nothing ->
+                        giveUp $
+                          "no response at all within "
+                            <> show (toInteger maxTime)
+                            <> " microseconds"
+                      -- Command needs to be retried but on another target
+                      Just (Left err@(Redirect otherNode))
+                        | remaining <= clientRetryTick ->
+                            giveUp $
+                              "retried for "
+                                <> show (toInteger retryBudget)
+                                <> " microseconds, last response was "
+                                <> show err
+                        | otherwise -> attempt payload (Set.insert otherNode nodeSet) (remaining - clientRetryTick) otherNode
+                      Just (Left err@NoKnownLeader)
+                        | remaining <= clientRetryTick ->
+                            giveUp $
+                              "retried for "
+                                <> show (toInteger retryBudget)
+                                <> " microseconds, last response was "
+                                <> show err
+                        | otherwise -> case nextCandidate target nodeSet of
+                            Nothing -> giveUp "No known nodes to query"
+                            Just candidate -> attempt payload nodeSet (remaining - clientRetryTick) candidate
+                      Just (Right (_, result)) -> pure (Just result)
+                  where
+                    giveUp why =
+                      case faultInjection of
+                        -- In a real Raft cluster (i.e. subject to faults), there's no guarantee of liveness.
+                        -- That's the price to pay for strong consistency.
+                        --
+                        -- This means we can be stuck in a situation where a cluster is so faulty, that it
+                        -- literally cannot serve any requests -- think of an election + crash loop. Thus,
+                        -- giving up in this context means letting go.
+                        --
+                        -- A Raft cluster that is NOT subject to faults has no excuse for not eventually
+                        -- service client requests, hence the use of 'fail'
+                        FaultInjection -> pure Nothing
+                        NoFaultInjection ->
+                          fail $
+                            "Client could not get "
+                              <> show command
+                              <> " served, and no node in this scenario can crash: "
+                              <> why
 
 data ScenarioInputs
   = ScenarioInputs
@@ -373,8 +381,10 @@ data ScenarioInputs
     partitionProbability :: Double,
     numInitialClusterNodes :: Int,
     numInitialLoneNodes :: Int,
+    numClientNodes :: Int,
     loneNodesWait :: [(Microseconds, Microseconds)],
-    commands :: [Command]
+    -- | Zero-indexed commands per client node.
+    commands :: IntMap [Command]
   }
   deriving (Eq, Show)
 
@@ -382,6 +392,7 @@ genScenarioInputs :: FaultInjection -> Gen ScenarioInputs
 genScenarioInputs faultInjection = do
   clusterSize <- elements [1, 2, 3]
   numLoneNodes <- elements [0, 1]
+  numClients <- elements [1, 2, 3]
   ss <- vectorOf (clusterSize + numLoneNodes) (chooseBoundedIntegral (0, 1_000_000))
   hb <- chooseBoundedIntegral (clientRetryTick, 200_000)
   -- Making the lower election timeout possibly shorter than the heartbeat timeout
@@ -404,7 +415,7 @@ genScenarioInputs faultInjection = do
           <*> chooseBoundedIntegral (etoub, 3 * etoub)
       )
 
-  cmds <- flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 10)
+  cmds <- replicateM numClients $ flip vectorOf (arbitrary @Command) =<< chooseBoundedIntegral (1, 15)
   pure $
     ScenarioInputs
       { heartbeatTimeout = hb,
@@ -416,8 +427,13 @@ genScenarioInputs faultInjection = do
         partitionProbability = pProb,
         numInitialClusterNodes = clusterSize,
         numInitialLoneNodes = numLoneNodes,
+        numClientNodes = numClients,
         loneNodesWait = loneWaits,
-        commands = cmds
+        commands =
+          IntMap.fromList $
+            zip
+              [0 .. numClients - 1]
+              cmds
       }
 
 data TestFault = TestFault deriving (Show)
@@ -462,6 +478,10 @@ runServerWithFaults server clusterState = do
 -- retry budget below is spent.
 clientRetryTick :: Microseconds
 clientRetryTick = 10_000
+
+-- | How long to wait for a resposne to a single request
+clientRequestTimeout :: ScenarioInputs -> Microseconds
+clientRequestTimeout inputs = 10 * inputs.electionTimeoutUpperBound
 
 -- | How long the client keeps retrying one command before the scenario fails.
 clientRetryBudget :: ScenarioInputs -> Microseconds
@@ -668,9 +688,7 @@ data Harness s
   = MkHarness
   { clusterServers :: IntMap (Server s),
     loneServers :: IntMap (Server s, MVar (IOSim s) (), Microseconds, Microseconds),
-    -- TODO: have multiple concurrent clients
-    hClientNode :: Node,
-    hClientSpec :: ClientImplementation Command Node Result (IOSim s),
+    hClients :: IntMap (ClientImplementation Command Node Result (IOSim s)),
     hAdminNode :: Node,
     hAdminSpec :: AdminImplementation Node (IOSim s)
   }
@@ -683,7 +701,7 @@ testHarness ::
   IOSim s ()
 testHarness
   debug
-  (ScenarioInputs hb etlb etup s faultProbs pSeed pProb numClusterNodes numLoneNodes loneWaits _commands)
+  (ScenarioInputs hb etlb etup s faultProbs pSeed pProb numClusterNodes numLoneNodes numClients loneWaits _commands)
   withHarness = do
     resources <- newEnvironment allNodes
 
@@ -713,8 +731,7 @@ testHarness
                   )
                   loneNodesWithMeta
                   isDones,
-            hClientNode = clientNode,
-            hClientSpec = clientSpec (networkFabric resources),
+            hClients = IntMap.fromList [(clientNode, clientSpec (networkFabric resources) (Node clientNode)) | clientNode <- clientNodes],
             hAdminNode = adminNode,
             hAdminSpec = adminSpec (networkFabric resources)
           }
@@ -723,12 +740,11 @@ testHarness
         mconcat
           [ Set.fromList (fromIntegral <$> serverNodes),
             Set.fromList (fromIntegral <$> loneNodes),
-            Set.singleton clientNode,
+            Set.fromList (fromIntegral <$> clientNodes),
             Set.singleton adminNode
           ]
 
       adminNode = -1
-      clientNode = Node $ numClusterNodes + numLoneNodes + 1
 
       serverNodes = [0 .. numClusterNodes - 1]
       serverNodesWithMeta = zip3 (take numClusterNodes faultProbs) (take numClusterNodes s) serverNodes
@@ -736,12 +752,20 @@ testHarness
       loneNodes = [numClusterNodes .. numClusterNodes + numLoneNodes - 1]
       loneNodesWithMeta = zip4 (drop numClusterNodes faultProbs) (drop numClusterNodes s) loneWaits loneNodes
 
-      clientSpec network =
+      -- Assuming there will never be 1M server nodes in these tests
+      clientNodes =
+        let start = numClusterNodes + numLoneNodes + 1
+         in [start .. start + numClients - 1]
+
+      clientSpec network clientNode =
         ClientImplementation
           { sendRequest = send network.requestsMailbox network.topologyConstraints clientNode,
             receiveResponse =
               receive network.responsesMailbox clientNode,
-            Client.generateSessionId = pure . sessionId 0 . fromIntegral
+            Client.generateSessionId = \node -> do
+              -- That's the simplest way I know how to introduce randomness in IOSim
+              now <- getMonotonicTimeNSec
+              pure $ sessionId now $ fromIntegral node
           }
 
       adminSpec network =
@@ -754,8 +778,8 @@ testHarness
       networkPartitioner network = go (mkStdGen64 pSeed)
         where
           go gen = do
-            let (wait, newGen) = uniformR (0, fromIntegral $ 10 * hb) gen
-            threadDelay wait
+            let (w, newGen) = uniformR (0, fromIntegral $ 10 * hb) gen
+            threadDelay w
             let (constraintGraph, newGen') = randomGraph pProb allNodes newGen
             atomically $ writeTVar (topologyConstraints network) constraintGraph
             go newGen'
@@ -843,39 +867,6 @@ receiveAll mailbox node =
         flushTQueue queue <&> nonEmpty >>= \case
           Nothing -> retry
           Just xs -> pure xs
-
--- Simple key-value store
-
-newtype Node = Node Int
-  deriving (Eq, Show, Bounded, Enum, Num, Ord, Real, Integral)
-
-type State = Map Char Int
-
-data Command
-  = Insert Char Int
-  | Delete Char
-  | Get Char
-  deriving (Eq, Ord, Show)
-
-instance Arbitrary Command where
-  arbitrary =
-    let possibleKeys = ['a', 'b', 'c']
-     in oneof
-          [ Insert <$> elements possibleKeys <*> chooseInt (0, 10),
-            Delete <$> elements possibleKeys,
-            Get <$> elements possibleKeys
-          ]
-
-data Result
-  = Value Int
-  | Ok
-  | Err
-  deriving (Eq, Show)
-
-step :: Command -> StateMachineStep State Result
-step (Insert k v) = Transition $ \state -> (Map.insert k v state, Ok)
-step (Delete k) = Transition $ \state -> (Map.delete k state, Ok)
-step (Get k) = Read $ \state -> maybe Err Value (Map.lookup k state)
 
 -- Random utilities
 
