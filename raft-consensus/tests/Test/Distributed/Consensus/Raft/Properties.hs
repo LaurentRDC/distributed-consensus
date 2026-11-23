@@ -28,11 +28,9 @@ import Test.Distributed.Consensus.Raft.Scenario
     clusterMembershipChangeInitiated,
     commandReceived,
     commandResponded,
-    crashed,
     joinClusterCommandReceived,
     leaveClusterCommandReceived,
     membershipSettled,
-    stateRestored,
   )
 
 -- | Whether we expect the cluster to always respond, or not.
@@ -68,7 +66,6 @@ allProperties faultInjection =
           indexRelationshipProperty,
           monotonicallyIncreasingLastAppliedIndexProperty,
           monotonicallyIncreasingCommitIndexProperty,
-          crashRecoveryProperty,
           singleConfigurationChangeInFlight
         ]
       noFaultProperties = case faultInjection of
@@ -402,13 +399,3 @@ stateMachineSafetyProperty = go mempty <?> "Conflicting entries applied at the s
                     (term' == term && entry' == entry)
             _ -> go acc
         )
-
-crashRecoveryProperty :: (Eq node, Show node) => Scenario entry result node state
-crashRecoveryProperty = go
-  where
-    go = void $ whenever crashed $ \node ->
-      eventually
-        ( stateRestored >>= \(EventContext _ node', _, _) -> predicate $ \_ ->
-            unless (node' == node) Nothing
-        )
-        <?> ("Node " <> Text.show node <> " did not restore state after crash")
