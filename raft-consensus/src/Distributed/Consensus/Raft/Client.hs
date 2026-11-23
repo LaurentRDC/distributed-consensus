@@ -42,7 +42,9 @@ import Control.Concurrent.Class.MonadSTM
     writeTVar,
   )
 import Control.Monad (void)
-import Control.Monad.Class.MonadAsync (MonadAsync, withAsync)
+import Control.Monad.Class.MonadAsync (MonadAsync, link, withAsync)
+import Control.Monad.Class.MonadFork (MonadFork)
+import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Trans.Class (MonadTrans, lift)
 import Control.Monad.Trans.Reader (ReaderT (runReaderT), asks)
 import Data.Map.Strict (Map)
@@ -88,7 +90,10 @@ data ClientImplementation entry node result m = ClientImplementation
 --
 -- It is safe to use the runner from several threads concurrently.
 withClientSession ::
-  (MonadAsync m) =>
+  ( MonadAsync m,
+    MonadFork m,
+    MonadMask m
+  ) =>
   -- | self identification
   node ->
   ClientImplementation entry node result m ->
@@ -119,7 +124,8 @@ withClientSession self impl withSession = do
               Just var -> void $ tryPutTMVar var resp
           recvLoop
 
-  withAsync recvLoop $ \_ ->
+  withAsync recvLoop $ \thread -> do
+    link thread
     withSession (\(MkRaftClientT f) -> runReaderT f env)
 
 data RaftClientEnv entry node result m

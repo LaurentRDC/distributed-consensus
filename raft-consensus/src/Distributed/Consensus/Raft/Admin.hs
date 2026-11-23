@@ -49,7 +49,9 @@ import Control.Concurrent.Class.MonadSTM
     writeTVar,
   )
 import Control.Monad (void)
-import Control.Monad.Class.MonadAsync (MonadAsync, withAsync)
+import Control.Monad.Class.MonadAsync (MonadAsync, link, withAsync)
+import Control.Monad.Class.MonadFork (MonadFork)
+import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Trans.Class (MonadTrans (lift))
 import Control.Monad.Trans.Reader (ReaderT (runReaderT))
 import qualified Control.Monad.Trans.Reader as Reader
@@ -90,7 +92,10 @@ data AdminImplementation node m = AdminImplementation
 --
 -- It is safe to use the runner from several threads concurrently.
 withAdminSession ::
-  (MonadAsync m) =>
+  ( MonadAsync m,
+    MonadFork m,
+    MonadMask m
+  ) =>
   -- | self identification
   node ->
   AdminImplementation node m ->
@@ -111,7 +116,8 @@ withAdminSession self impl withSession = do
               Just var -> void $ tryPutTMVar var (responsePayload resp)
           recvLoop
 
-  withAsync recvLoop $ \_ ->
+  withAsync recvLoop $ \thread -> do
+    link thread
     withSession
       ( \(MkRaftAdminT f) ->
           runReaderT
