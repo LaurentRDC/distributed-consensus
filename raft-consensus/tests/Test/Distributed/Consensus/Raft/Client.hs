@@ -19,7 +19,7 @@ import Distributed.Consensus.Raft
   ( runStateMachineStep,
   )
 import Test.StateMachine (Command (..), Key, Node (..), Result, State, step)
-import Test.Tasty.QuickCheck (Property, counterexample, (.&&.))
+import Test.Tasty.QuickCheck (Property, counterexample, property, (.&&.))
 
 checkLinearizability :: Trace (SimResult a) SimEvent -> Property
 checkLinearizability trace' =
@@ -28,8 +28,13 @@ checkLinearizability trace' =
   -- individual key independently.
   Data.List.foldl'
     (.&&.)
-    (counterexample mempty True)
-    (checkLinearizabilityOnKey <$> enumFromTo minBound maxBound)
+    (property True)
+    -- The scenario inputs are such that there's always at least one
+    -- client with at least one command. Therefore, if 'clientEvents' is
+    -- null, we've got a problem, since an empty history is trivially linearizable.
+    ( counterexample "No client events generated" (not (null clientEvents))
+        : (checkLinearizabilityOnKey <$> enumFromTo minBound maxBound)
+    )
   where
     (clientEvents :: [RaftClientTrace Command Result Node]) = raftClientTrace trace'
 
