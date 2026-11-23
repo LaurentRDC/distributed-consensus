@@ -36,6 +36,7 @@ module Distributed.Consensus.Raft.Transformer.Definition
     yesVotes,
     currentClientRequests,
     pendingReadRequests,
+    readOnlySequenceNum,
     randomGen,
 
     -- ** Read-only client requests
@@ -44,6 +45,7 @@ module Distributed.Consensus.Raft.Transformer.Definition
     pendingReadLogIndex,
     pendingReadClient,
     pendingReadLeaderAcknowledgedBy,
+    pendingReadSequenceNum,
     pendingReadProjection,
 
     -- * Generic helpers
@@ -71,7 +73,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word64)
 import Distributed.Consensus.Raft.Client (ClientRequestId)
-import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, Role (..), Term)
+import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, ReadOnlySequenceNum, Role (..), Term)
 import Distributed.Consensus.Raft.Implementation (Event (..), Implementation, LogEntry)
 import Distributed.Consensus.Raft.Log (Log, newLog)
 import Distributed.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
@@ -131,6 +133,10 @@ data RaftState node entry state result = MkRaftState
     _yesVotes :: !(Set node),
     _currentClientRequests :: !(Map ClientRequestId node),
     _pendingReadRequests :: !(Map ClientRequestId (PendingRead node state result)),
+    -- | Counter incremented on each incoming read-only query. This counter allows to know
+    -- when a heartbeat counts to acknowledge a read-only request (or was already
+    -- in-flight, for example)
+    _readOnlySequenceNum :: !ReadOnlySequenceNum,
     _randomGen :: !StdGen
   }
 
@@ -140,6 +146,7 @@ data PendingRead node state result = MkPendingRead
   { _pendingReadTerm :: !Term,
     _pendingReadLogIndex :: !LogIndex,
     _pendingReadClient :: !node,
+    _pendingReadSequenceNum :: !ReadOnlySequenceNum,
     -- After the request is accepted by the leader,
     -- we store nodes that have acknowledged us as the leader
     -- here. Once `hasQuorum` is reached, we can reply
@@ -177,6 +184,7 @@ initialRaftState initRole seed clusterConf initialState =
       _yesVotes = mempty,
       _currentClientRequests = mempty,
       _pendingReadRequests = mempty,
+      _readOnlySequenceNum = 0,
       -- We use mkStdGen64 for reproducibility across 32-bit and 64-bit architectures
       _randomGen = mkStdGen64 seed
     }

@@ -230,6 +230,7 @@ sendAppendEntriesTo destination = do
             <*> pure previousLogTerm
             <*> pure (((,) <$> view _1 <*> view _3) <$> toBeReplicated)
             <*> use commitIndex
+            <*> use readOnlySequenceNum
           )
           >>= runSend . sendRPC destination . AE
       Nothing ->
@@ -462,6 +463,8 @@ acceptClientRequests requests = do
       -- Read-only requests don't go to the log, and so
       -- we need to persist more information about them.
       Read runRead -> do
+        readOnlySequenceNum += 1
+        rseq <- use readOnlySequenceNum
         pendingReadRequests
           %= Map.insert
             clientReqId
@@ -470,7 +473,8 @@ acceptClientRequests requests = do
                   _pendingReadLogIndex = ci,
                   _pendingReadClient = clientId,
                   _pendingReadLeaderAcknowledgedBy = Set.singleton s,
-                  _pendingReadProjection = runRead
+                  _pendingReadProjection = runRead,
+                  _pendingReadSequenceNum = rseq
                 }
             )
         trace (\ctx -> ReadOnlyQueryQueued ctx ci entry)
@@ -532,10 +536,17 @@ serveReadOnlyQueries = whenRole Leader $ do
   appIx <- use lastApplied
   ourTerm <- use term
   leaderId <- self
+  entries <- use commandLog
 
-  let canBeServed pendingRead =
+  let appliedInOurTerm = case entries Log.!? appIx of
+        Found (t, _, _) -> t == ourTerm
+        LogIndexInSnapshot (SnapshotMetadata _ t) -> t == ourTerm
+        NotFound -> False
+
+      canBeServed pendingRead =
         -- TODO: what if it's an old term? How could this even be possible?
         (pendingRead ^. pendingReadTerm == ourTerm)
+          && appliedInOurTerm
           && (pendingRead ^. pendingReadLogIndex <= appIx)
           && hasQuorum clusterConf (pendingRead ^. pendingReadLeaderAcknowledgedBy)
 

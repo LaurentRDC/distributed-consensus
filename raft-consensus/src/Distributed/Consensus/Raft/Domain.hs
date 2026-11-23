@@ -15,6 +15,9 @@ module Distributed.Consensus.Raft.Domain
     sessionId,
     SequenceNum,
 
+    -- ** Read-only sequences
+    ReadOnlySequenceNum,
+
     -- * Snapshots
     Snapshot (..),
     SnapshotMetadata (..),
@@ -76,6 +79,11 @@ sessionId = MkSessionId
 -- | Incrementing sequence number for every client or admin request
 -- in the same session.
 newtype SequenceNum = MkSequenceNum Word64
+  deriving stock (Eq, Ord)
+  deriving newtype (Show, Real, Num, Enum, Bounded, Integral, Binary)
+
+-- | Incrementing counter for each round of approval for a read-only query.
+newtype ReadOnlySequenceNum = MkReadOnlySequenceNum Word64
   deriving stock (Eq, Ord)
   deriving newtype (Show, Real, Num, Enum, Bounded, Integral, Binary)
 

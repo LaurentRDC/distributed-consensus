@@ -31,7 +31,7 @@ where
 import Data.Binary (Binary)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Sequence (Seq)
-import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, Snapshot, SnapshotMetadata, StateMachineStep, Term)
+import Distributed.Consensus.Raft.Domain (ClusterConfiguration (..), LogIndex, ReadOnlySequenceNum, Snapshot, SnapshotMetadata, StateMachineStep, Term)
 import Distributed.Consensus.Raft.Domain.Admin (AdminRequest, AdminResponse)
 import Distributed.Consensus.Raft.Domain.Client (ClientRequest, ClientRequestId, ClientResponse, ClientResult)
 import Distributed.Consensus.Raft.Log (Log)
@@ -176,7 +176,8 @@ data AppendEntries node entry = AppendEntries
     aePreviousLogIndex :: !LogIndex,
     aePreviousLogTerm :: !Term,
     aeEntries :: !(Seq (Term, LogEntry node entry)),
-    aeCommitIndex :: !LogIndex
+    aeCommitIndex :: !LogIndex,
+    aeReadOnlySeqNum :: !ReadOnlySequenceNum
   }
   deriving (Eq, Show, Ord, Generic)
 
@@ -186,7 +187,8 @@ data AppendEntriesResult node result = AppendEntriesResult
   { aerCurrentTerm :: !Term,
     aerNode :: !node,
     aerMatch :: !Bool,
-    aerNewEntryLogIndex :: !LogIndex
+    aerNewEntryLogIndex :: !LogIndex,
+    aerReadOnlySeqNum :: !ReadOnlySequenceNum
   }
   deriving (Eq, Ord, Show, Generic)
 

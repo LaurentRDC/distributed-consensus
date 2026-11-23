@@ -88,6 +88,7 @@ import Distributed.Consensus.Raft.Transformer
     pendingClusterMembershipChanges,
     pendingReadLeaderAcknowledgedBy,
     pendingReadRequests,
+    pendingReadSequenceNum,
     persistSnapshot,
     proposeClusterMembership,
     resetElectionTimer,
@@ -107,7 +108,7 @@ import Distributed.Consensus.Raft.Transformer
     yesVotes,
   )
 import qualified Distributed.Consensus.Raft.Transformer as Transformer
-import Lens.Micro.Platform (at, mapped, use, view, (%=), (.=))
+import Lens.Micro.Platform (at, filtered, traversed, use, view, (%=), (.=))
 
 server ::
   ( Ord node,
@@ -268,7 +269,7 @@ handleAppendEntries ::
   ) =>
   AppendEntries node entry ->
   RaftT entry node state result m ()
-handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLogTerm newEntries leaderCommitIndex) = do
+handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLogTerm newEntries leaderCommitIndex leaderReadOnlySeqNum) = do
   termComparison <- handleTermNumber leaderTerm
   when (termComparison /= LT) (becomeFollower (Just leaderNode))
 
@@ -304,7 +305,8 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
                     { aerCurrentTerm = ourTerm,
                       aerNode = s,
                       aerMatch = False,
-                      aerNewEntryLogIndex = ourLastIndex
+                      aerNewEntryLogIndex = ourLastIndex,
+                      aerReadOnlySeqNum = leaderReadOnlySeqNum
                     }
                 )
             )
@@ -348,7 +350,8 @@ handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLo
                     { aerCurrentTerm = ourTerm,
                       aerNode = s,
                       aerMatch = True,
-                      aerNewEntryLogIndex = lastVerifiedIndex
+                      aerNewEntryLogIndex = lastVerifiedIndex,
+                      aerReadOnlySeqNum = leaderReadOnlySeqNum
                     }
                 )
             )
@@ -371,7 +374,7 @@ handleAppendEntriesResult ::
   ) =>
   AppendEntriesResult node result ->
   RaftT entry node state result m ()
-handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode responderSuccess responderLogIndex) = do
+handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode responderSuccess responderLogIndex responderReadOnlySeqNum) = do
   termComp <- handleTermNumber responderTerm
   ourRole <- use role
   when (ourRole == Leader && termComp == EQ) $
@@ -380,7 +383,16 @@ handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode respo
         matchIndex . at responderNode .= Just responderLogIndex
         nextIndex . at responderNode .= Just (succ responderLogIndex)
 
-        pendingReadRequests . mapped . pendingReadLeaderAcknowledgedBy %= Set.insert responderNode
+        pendingReadRequests
+          . traversed
+          -- Only if the responder is responding to a recent-enough 'ReadOnlySequenceNum'
+          -- should the responder count in the quorum for a read-only request.
+          --
+          -- This prevents, for example, a heartbeat that was already in-flight when a read-only
+          -- query was received from counting
+          . filtered ((<= responderReadOnlySeqNum) . view pendingReadSequenceNum)
+          . pendingReadLeaderAcknowledgedBy
+          %= Set.insert responderNode
 
         serveReadOnlyQueries
 
