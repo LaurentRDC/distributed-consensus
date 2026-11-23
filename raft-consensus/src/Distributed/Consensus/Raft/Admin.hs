@@ -36,7 +36,19 @@ module Distributed.Consensus.Raft.Admin
   )
 where
 
-import Control.Concurrent.Class.MonadSTM (MonadSTM, TMVar, TVar, atomically, newEmptyTMVar, newTVarIO, putTMVar, readTMVar, readTVar, writeTVar)
+import Control.Concurrent.Class.MonadSTM
+  ( MonadSTM,
+    TMVar,
+    TVar,
+    atomically,
+    newEmptyTMVar,
+    newTVarIO,
+    readTMVar,
+    readTVar,
+    tryPutTMVar,
+    writeTVar,
+  )
+import Control.Monad (void)
 import Control.Monad.Class.MonadAsync (MonadAsync, withAsync)
 import Control.Monad.Trans.Class (MonadTrans (lift))
 import Control.Monad.Trans.Reader (ReaderT (runReaderT))
@@ -44,7 +56,13 @@ import qualified Control.Monad.Trans.Reader as Reader
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import Distributed.Consensus.Raft.Domain (SequenceNum, SessionId, sessionId)
-import Distributed.Consensus.Raft.Domain.Admin (AdminCommand (..), AdminCommandResult (..), AdminRequest, AdminRequestId (MkAdminRequestId), AdminResponse)
+import Distributed.Consensus.Raft.Domain.Admin
+  ( AdminCommand (..),
+    AdminCommandResult (..),
+    AdminRequest,
+    AdminRequestId (MkAdminRequestId),
+    AdminResponse,
+  )
 import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import Distributed.Consensus.Raft.Timer (Microseconds)
 import Lens.Micro.Platform (makeLenses)
@@ -89,7 +107,8 @@ withAdminSession self impl withSession = do
             box <- readTVar mbox
             case Map.lookup adminReqId box of
               Nothing -> pure ()
-              Just var -> putTMVar var (responsePayload resp)
+              -- Using 'tryPutTMVar' here in case of duplicate responses
+              Just var -> void $ tryPutTMVar var (responsePayload resp)
           recvLoop
 
   withAsync recvLoop $ \_ ->

@@ -29,7 +29,19 @@ module Distributed.Consensus.Raft.Client
   )
 where
 
-import Control.Concurrent.Class.MonadSTM (MonadSTM, TMVar, TVar, atomically, newEmptyTMVar, newTVarIO, putTMVar, readTMVar, readTVar, writeTVar)
+import Control.Concurrent.Class.MonadSTM
+  ( MonadSTM,
+    TMVar,
+    TVar,
+    atomically,
+    newEmptyTMVar,
+    newTVarIO,
+    readTMVar,
+    readTVar,
+    tryPutTMVar,
+    writeTVar,
+  )
+import Control.Monad (void)
 import Control.Monad.Class.MonadAsync (MonadAsync, withAsync)
 import Control.Monad.Trans.Class (MonadTrans, lift)
 import Control.Monad.Trans.Reader (ReaderT (runReaderT), asks)
@@ -103,7 +115,8 @@ withClientSession self impl withSession = do
             box <- readTVar mbox
             case Map.lookup reqId box of
               Nothing -> pure ()
-              Just var -> putTMVar var resp
+              -- Using 'tryPutTMVar' here in case a response is duplicated
+              Just var -> void $ tryPutTMVar var resp
           recvLoop
 
   withAsync recvLoop $ \_ ->
