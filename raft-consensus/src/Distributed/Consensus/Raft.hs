@@ -2,6 +2,9 @@ module Distributed.Consensus.Raft
   ( -- * Server
     runRaftServer,
     withRaftServer,
+
+    -- ** Configuration
+    simpleConfig,
     Config (..),
 
     -- ** Configuration types
@@ -101,6 +104,7 @@ import Distributed.Consensus.Raft.Transformer
   ( ClusterState (..),
     Config (..),
     runRaftT,
+    simpleConfig,
   )
 
 -- | Run a Raft server. This function never returns.

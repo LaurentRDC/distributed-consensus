@@ -1,9 +1,11 @@
+{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 module Distributed.Consensus.Raft.Transformer.Definition
   ( runRaftT,
     RaftT,
     Config (..),
+    simpleConfig,
     ClusterState (..),
     RaftEnv,
     implementation,
@@ -65,6 +67,7 @@ import Control.Concurrent.Class.MonadSTM (TQueue, atomically, newTQueue, writeTQ
 import Control.Monad (void)
 import Control.Monad.Class.MonadAsync (MonadAsync, async)
 import Control.Monad.Class.MonadSTM (MonadSTM)
+import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.RWS.CPS (RWST, ask, asks, evalRWST, get, gets, local, modify, put, state)
 import Control.Monad.Trans.Reader (ReaderT, runReaderT)
@@ -79,6 +82,7 @@ import Distributed.Consensus.Raft.Log (Log, newLog)
 import Distributed.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
 import Lens.Micro.Platform (makeLenses)
 import System.Random (StdGen, mkStdGen64)
+import System.Random.Stateful (randomIO)
 
 type RaftT entry node result state m =
   -- Note: using RWST prevents to use the `MonadAsync`, `MonadSTM`, ...
@@ -234,6 +238,28 @@ data RaftEnv entry node result state m
     _exitLock :: MVar m ()
   }
 
+-- | Simplest configuration with good defaults:
+--
+-- * Election range between 1s and 2s
+-- * Heartbeat timeout of 100ms
+-- * Random seed
+-- * Keep 100 000 log entries before compaction
+simpleConfig :: (MonadIO m) => node -> m (Config node)
+simpleConfig node = do
+  seed <- randomIO
+  pure $
+    MkConfig
+      { nodeId = node,
+        electionTimeoutRange = (1_000_000, 2_000_000),
+        heartBeatTimeout = 100_000,
+        randomSeed = seed,
+        maxLogLength = Just 100_000
+      }
+
+-- | Runtime configuration for a Raft server.
+--
+-- You should use 'simpleConfig' if you don't have strong opinions
+-- on the configuration values.
 data Config node
   = MkConfig
   { -- | Identification for the node
