@@ -8,6 +8,9 @@ module Distributed.Consensus.Raft.Implementation
     Networking (..),
     Persistence (..),
 
+    -- ** Helpers
+    nullTracer,
+
     -- * Types
     LogEntry (..),
     Command (..),
@@ -49,8 +52,15 @@ data Implementation entry node state result m = Implementation
   { persistence :: Persistence entry node state m,
     stateMachine :: entry -> StateMachineStep state result,
     networking :: Networking entry node state result m,
+    -- | Event tracer. This is mostly useful for testing and debugging.
+    --
+    -- You can turn tracing off using 'nullTracer'
     tracer :: RaftTrace entry result node state -> m ()
   }
+
+-- | Ignore 'RaftTrace' events
+nullTracer :: (Applicative m) => RaftTrace entry result node state -> m ()
+nullTracer _ = pure ()
 
 -- | Networking implementation.
 data Networking entry node state result m = Networking

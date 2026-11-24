@@ -1,6 +1,7 @@
 module Distributed.Consensus.Raft
   ( -- * Server
     runRaftServer,
+    withRaftServer,
     Config (..),
 
     -- ** Configuration types
@@ -13,6 +14,9 @@ module Distributed.Consensus.Raft
     Persistence (..),
     StateMachineStep (..),
     runStateMachineStep,
+
+    -- ** Helpers
+    nullTracer,
 
     -- ** Domain types
     LogEntry (..),
@@ -50,7 +54,7 @@ module Distributed.Consensus.Raft
 where
 
 import Control.Concurrent.Class.MonadMVar (MonadMVar)
-import Control.Monad.Class.MonadAsync (MonadAsync)
+import Control.Monad.Class.MonadAsync (MonadAsync, link, withAsync)
 import Control.Monad.Class.MonadFork (MonadFork)
 import Control.Monad.Class.MonadThrow (MonadMask)
 import Control.Monad.Class.MonadTimer (MonadDelay)
@@ -85,6 +89,7 @@ import Distributed.Consensus.Raft.Implementation
     RPC (..),
     RPCResult (..),
     RaftTrace (..),
+    nullTracer,
   )
 import Distributed.Consensus.Raft.Log (Log)
 import Distributed.Consensus.Raft.Messaging
@@ -98,6 +103,9 @@ import Distributed.Consensus.Raft.Transformer
     runRaftT,
   )
 
+-- | Run a Raft server. This function never returns.
+--
+-- See also 'withRaftServer'.
 runRaftServer ::
   ( Ord node,
     MonadMVar m,
@@ -113,3 +121,25 @@ runRaftServer ::
   m ()
 runRaftServer config startingState initState impl =
   runRaftT config startingState initState impl server
+
+-- | Run a Raft server in a separate thread, while running a separate action.
+--
+-- Once the action returns, the server is shut down.
+withRaftServer ::
+  ( Ord node,
+    MonadMVar m,
+    MonadMask m,
+    MonadDelay m,
+    MonadAsync m,
+    MonadFork m
+  ) =>
+  Config node ->
+  ClusterState node ->
+  state ->
+  Implementation entry node state result m ->
+  m a ->
+  m a
+withRaftServer config startingState initState impl f =
+  withAsync (runRaftServer config startingState initState impl) $ \serverThread -> do
+    link serverThread
+    f

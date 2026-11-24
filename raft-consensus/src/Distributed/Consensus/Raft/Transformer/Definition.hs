@@ -244,6 +244,10 @@ data Config node
     -- | Heartbeat timeout.
     heartBeatTimeout :: !Microseconds,
     -- | Random seed for the generation of election timeouts.
+    --
+    -- Make sure to not re-use a seed across servers. Re-using the same seed
+    -- on multiple Raft servers will lead to permanently-split votes, rendering
+    -- the cluster unable to process any requests.
     randomSeed :: !Word64,
     -- | If provided, once the log on any node
     -- reaches this length, a snapshot is produced
