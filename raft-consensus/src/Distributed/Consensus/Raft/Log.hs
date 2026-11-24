@@ -164,11 +164,25 @@ lastLogInfo (Log _ _ lix lt) = (lt, lix)
 -- Otherwise, this function does nothing.
 applySnapshot :: SnapshotMetadata -> Log entry node -> Log entry node
 applySnapshot newSnapshot@((SnapshotMetadata absoluteLastIndex lastSnapshotTerm)) log'
-  | smLastIncludedIndex newSnapshot <= smLastIncludedIndex (lSnapshotMetadata log') = log'
-  | otherwise =
-      let relativeLastIndex = relativeIndex log' absoluteLastIndex
-       in Log
-            (Seq.drop (fromIntegral relativeLastIndex) (lEntries log'))
-            newSnapshot
-            (max absoluteLastIndex (lLastIndex log'))
-            (max lastSnapshotTerm (lLastTerm log'))
+  | absoluteLastIndex <= smLastIncludedIndex (lSnapshotMetadata log') = log'
+  | otherwise = case log' !? absoluteLastIndex of
+      Found (entryTerm, _, _)
+        -- An invariant is that if the log's entry at the same tip index
+        -- as the snapshot has the same term, then the rest of the log is also
+        -- contained in the snapshot. We can truncate the log
+        --
+        -- Otherwise, the log must be entirely replaced by the snapshot
+        | entryTerm == lastSnapshotTerm ->
+            let relativeLastIndex = relativeIndex log' absoluteLastIndex
+             in Log
+                  (Seq.drop (fromIntegral relativeLastIndex) (lEntries log'))
+                  newSnapshot
+                  (lLastIndex log')
+                  (lLastTerm log')
+      _ ->
+        Log
+          { lEntries = mempty,
+            lSnapshotMetadata = newSnapshot,
+            lLastIndex = absoluteLastIndex,
+            lLastTerm = lastSnapshotTerm
+          }
