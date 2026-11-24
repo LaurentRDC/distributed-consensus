@@ -459,32 +459,34 @@ handleRequestVote ::
   Term ->
   RaftT entry node state result m ()
 handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLastLogIndexTerm = do
-  handleTermNumber candidateTerm >>= \case
-    GT -> leaderStepDown Nothing
-    _ -> pure ()
-
+  termOrdering <- handleTermNumber candidateTerm
   ourTerm <- use term
-  trace (\ctx -> VoteRequestedBy ctx candidateTerm candidateNode)
-  mAlreadyVoted <- use votedFor
   s <- self
-  entries <- use commandLog
-  case mAlreadyVoted of
-    -- We haven't voted yet
-    Nothing ->
-      if (candidateLastLogIndexTerm, candidateLastLogIndex) >= Log.lastLogInfo entries
-        then do
-          voteFor (Just candidateNode)
-          grantVote ourTerm
-          trace (\ctx -> VotedFor ctx candidateTerm candidateNode)
-        else do
+  trace (\ctx -> VoteRequestedBy ctx candidateTerm candidateNode)
+  case termOrdering of
+    LT -> runSend $ Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
+    _ -> do
+      when (termOrdering == GT) $ leaderStepDown Nothing
+      mAlreadyVoted <- use votedFor
+      entries <- use commandLog
+      case mAlreadyVoted of
+        -- We haven't voted yet
+        Nothing ->
+          if candidateTerm >= ourTerm
+            && (candidateLastLogIndexTerm, candidateLastLogIndex) >= Log.lastLogInfo entries
+            then do
+              voteFor (Just candidateNode)
+              grantVote ourTerm
+              trace (\ctx -> VotedFor ctx candidateTerm candidateNode)
+            else do
+              runSend $ Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
+        -- We already voted for this candidate
+        Just someCandidate
+          | someCandidate == candidateNode ->
+              runSend $ Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm True)
+        -- We already voted, for another candidate
+        Just _ ->
           runSend $ Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
-    -- We already voted for this candidate
-    Just someCandidate
-      | someCandidate == candidateNode ->
-          runSend $ Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm True)
-    -- We already voted, for another candidate
-    Just _ ->
-      runSend $ Transformer.sendRPCResult candidateNode (RequestVoteResult s ourTerm False)
   where
     grantVote ourTerm = do
       s <- self
