@@ -82,7 +82,6 @@ import Distributed.Consensus.Raft.Transformer
     implementation,
     isClusterMember,
     leaderStepDown,
-    matchIndex,
     nextIndex,
     peers,
     pendingClusterMembershipChanges,
@@ -102,6 +101,7 @@ import Distributed.Consensus.Raft.Transformer
     setCommitIndex,
     term,
     trace,
+    updateMatchIndex,
     updateTerm,
     voteFor,
     votedFor,
@@ -380,8 +380,7 @@ handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode respo
   when (ourRole == Leader && termComp == EQ) $
     if responderSuccess
       then do
-        matchIndex . at responderNode .= Just responderLogIndex
-        nextIndex . at responderNode .= Just (succ responderLogIndex)
+        updateMatchIndex responderNode responderLogIndex
 
         pendingReadRequests
           . traversed
@@ -547,8 +546,7 @@ handleInstallSnapshotResult (InstallSnapshotResult responderTerm responderNode (
   termComp <- handleTermNumber responderTerm
   ourRole <- use role
   when (ourRole == Leader && termComp == EQ) $ do
-    matchIndex . at responderNode .= Just lastIncludedIndex
-    nextIndex . at responderNode .= Just (succ lastIncludedIndex)
+    updateMatchIndex responderNode lastIncludedIndex
     -- The only reason to send an 'InstallSnapshot' RPC
     -- (and thus get a result) is because a node has gotten behind
     -- in its entries. With the snapshot installed, we're free to

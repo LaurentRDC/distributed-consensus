@@ -28,6 +28,7 @@ module Distributed.Consensus.Raft.Transformer
     applyCommittedEntries,
     nextElectionTimeout,
     updateTerm,
+    updateMatchIndex,
     trace,
     acceptClientRequests,
     persistSnapshot,
@@ -442,6 +443,15 @@ updateTerm update = do
     lift $ impl.persistence.writeTerm s newTerm
     term .= newTerm
   pure (currTerm, newTerm)
+
+updateMatchIndex ::
+  (Ord node, Monad m) =>
+  node -> LogIndex -> RaftT entry node state result m ()
+updateMatchIndex responder ackedIndex = do
+  prev <- use (matchIndex . at responder)
+  let newMatch = maybe ackedIndex (max ackedIndex) prev
+  matchIndex . at responder .= Just newMatch
+  nextIndex . at responder .= Just (succ newMatch)
 
 -- | Set up a callback for a client request
 acceptClientRequests ::
