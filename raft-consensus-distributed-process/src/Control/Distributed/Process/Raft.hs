@@ -19,7 +19,7 @@ import Distributed.Consensus.Raft (Networking (..))
 
 networking ::
   (Serializable entry, Serializable state, Serializable result) =>
-  Process (Networking entry NodeId state result Process)
+  Process (Networking entry NodeId result state Process)
 networking = do
   (rpcQueue, rpcResultQueue, clientRequestQueue, adminRequestQueue) <-
     liftIO $

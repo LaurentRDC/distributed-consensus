@@ -135,7 +135,7 @@ data Snapshot node state = Snapshot
   }
   deriving (Eq, Ord, Show, Generic)
 
-instance (Binary state, Binary node) => Binary (Snapshot node state)
+instance (Binary node, Binary state) => Binary (Snapshot node state)
 
 -- | A state machine entry results in a step which can either read the state ('Read')
 -- or mutate the state ('Write').
@@ -149,10 +149,10 @@ instance (Binary state, Binary node) => Binary (Snapshot node state)
 --    Increment -> Transition $ \st -> (succ st, succ st)
 --    Decrement -> Transition $ \st -> (pred st, pred st)
 -- :}
-data StateMachineStep state result
+data StateMachineStep result state
   = Read (state -> result)
   | Transition (state -> (state, result))
 
-runStateMachineStep :: StateMachineStep state result -> state -> (state, result)
+runStateMachineStep :: StateMachineStep result state -> state -> (state, result)
 runStateMachineStep (Read runRead) st = (st, runRead st)
 runStateMachineStep (Transition runTrans) st = runTrans st

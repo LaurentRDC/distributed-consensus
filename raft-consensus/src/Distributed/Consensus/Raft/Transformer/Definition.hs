@@ -80,30 +80,30 @@ import Distributed.Consensus.Raft.Timer (Microseconds, Timer, newTimer)
 import Lens.Micro.Platform (makeLenses)
 import System.Random (StdGen, mkStdGen64)
 
-type RaftT entry node state result m =
+type RaftT entry node result state m =
   -- Note: using RWST prevents to use the `MonadAsync`, `MonadSTM`, ...
   -- classes.
   -- The alternative would be to keep the 'RaftState' in a mutable variable
   -- (e.g. 'MVar'), but it's not clear how much of a performance or usability
   -- downgrade this would be.
   RWST
-    (RaftEnv entry node state result m)
+    (RaftEnv entry node result state m)
     ()
-    (RaftState node entry state result)
+    (RaftState entry node result state)
     m
 
 -- | This type exists so that we can spin out asynchronous threads
 -- for sending messages
-type RaftSendT entry node state result m =
+type RaftSendT entry node result state m =
   ReaderT
-    (RaftEnv entry node state result m)
+    (RaftEnv entry node result state m)
     m
 
 -- | Run an action of type 'RaftSendT' asynchronously
 runSend ::
   (MonadAsync m) =>
-  RaftSendT entry node state result m () ->
-  RaftT entry node state result m ()
+  RaftSendT entry node result state m () ->
+  RaftT entry node result state m ()
 runSend act = ask >>= lift . void . async . runReaderT act
 
 data ClusterState node
@@ -113,14 +113,14 @@ data ClusterState node
     -- in which case this cluster has a single node
     InCluster (Set node)
 
-data RaftState node entry state result = MkRaftState
+data RaftState entry node result state = MkRaftState
   { _role :: !Role,
     _term :: !Term,
     _clusterConfiguration :: !(ClusterConfiguration node),
     _internalState :: !state,
     _votedFor :: !(Maybe node),
     _currentLeader :: !(Maybe node),
-    _commandLog :: !(Log node (LogEntry node entry)),
+    _commandLog :: !(Log (LogEntry entry node) node),
     _commitIndex :: !LogIndex,
     _lastApplied :: !LogIndex,
     _nextIndex :: !(Map node LogIndex),
@@ -132,7 +132,7 @@ data RaftState node entry state result = MkRaftState
     -- | Set of votes received in the current term
     _yesVotes :: !(Set node),
     _currentClientRequests :: !(Map ClientRequestId node),
-    _pendingReadRequests :: !(Map ClientRequestId (PendingRead node state result)),
+    _pendingReadRequests :: !(Map ClientRequestId (PendingRead node result state)),
     -- | Counter incremented on each incoming read-only query. This counter allows to know
     -- when a heartbeat counts to acknowledge a read-only request (or was already
     -- in-flight, for example)
@@ -142,7 +142,7 @@ data RaftState node entry state result = MkRaftState
 
 -- | A pending read-only request isn't part of the
 -- log, so we need a little bit of extra metadata
-data PendingRead node state result = MkPendingRead
+data PendingRead node result state = MkPendingRead
   { _pendingReadTerm :: !Term,
     _pendingReadLogIndex :: !LogIndex,
     _pendingReadClient :: !node,
@@ -166,7 +166,7 @@ initialRaftState ::
   Set node ->
   -- | Initial internal state
   state ->
-  RaftState node entry state result
+  RaftState entry node result state
 initialRaftState initRole seed clusterConf initialState =
   MkRaftState
     { _role = initRole,
@@ -197,8 +197,8 @@ runRaftT ::
   Config node ->
   ClusterState node ->
   state ->
-  Implementation entry node state result m ->
-  RaftT entry node state result m a ->
+  Implementation entry node result state m ->
+  RaftT entry node result state m a ->
   m a
 runRaftT config startingState internalState impl f = do
   queue <- atomically newTQueue
@@ -222,11 +222,11 @@ runRaftT config startingState internalState impl f = do
       )
       (initialRaftState initRole (randomSeed config) members internalState)
 
-data RaftEnv entry node state result m
+data RaftEnv entry node result state m
   = MkRaftEnv
   { _configuration :: !(Config node),
-    _implementation :: !(Implementation entry node state result m),
-    _eventQueue :: TQueue m (Event node entry result state),
+    _implementation :: !(Implementation entry node result state m),
+    _eventQueue :: TQueue m (Event entry node result state),
     -- Handle to a thread which will send a heartbeat timeout
     -- event after the appropriate amount of time.
     _heartBeatTimer :: Timer m,

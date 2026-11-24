@@ -40,7 +40,7 @@ import qualified System.OsPath as OsPath
 
 data RaftRecord entry node state
   = SnapshotRecord (Snapshot node state)
-  | LogRecord (Term, LogIndex, LogEntry node entry)
+  | LogRecord (Term, LogIndex, LogEntry entry node)
   | -- | Truncating the write-ahead log is done by changing
     -- how the read-back is done
     TruncateFrom LogIndex

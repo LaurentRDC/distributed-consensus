@@ -83,7 +83,7 @@ clientMailboxProcessName = "raft-consensus-client-mailbox"
 -- separate threads. However, you should call 'withClientSession' only once.
 sendClientRequest ::
   NodeId ->
-  ClientRequest NodeId entry ->
+  ClientRequest entry NodeId ->
   RaftClientT
     entry
     NodeId

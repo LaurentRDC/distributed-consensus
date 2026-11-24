@@ -36,7 +36,7 @@ checkLinearizability trace' =
         : (checkLinearizabilityOnKey <$> enumFromTo minBound maxBound)
     )
   where
-    (clientEvents :: [RaftClientTrace Command Result Node]) = raftClientTrace trace'
+    (clientEvents :: [RaftClientTrace Command Node Result]) = raftClientTrace trace'
 
     checkLinearizabilityOnKey :: Key -> Property
     checkLinearizabilityOnKey key =
@@ -90,7 +90,7 @@ checkLinearizability trace' =
 
 raftClientTrace ::
   (Typeable entry, Typeable result, Typeable node) =>
-  Trace (SimResult a) SimEvent -> [RaftClientTrace entry result node]
+  Trace (SimResult a) SimEvent -> [RaftClientTrace entry node result]
 raftClientTrace =
   selectTraceEvents
     ( \_ ev -> case ev of
@@ -98,7 +98,7 @@ raftClientTrace =
         _ -> Nothing -- internal io-sim event
     )
 
-data RaftClientTrace entry result node
+data RaftClientTrace entry node result
   = MkRaftClientTrace
   { rctNode :: node,
     rctEvent :: Linearizable.Event Word64 (entry, Maybe result)

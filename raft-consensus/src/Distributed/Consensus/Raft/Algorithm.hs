@@ -118,7 +118,7 @@ server ::
     MonadAsync m,
     MonadDelay m
   ) =>
-  RaftT entry node state result m ()
+  RaftT entry node result state m ()
 server = do
   impl <- view implementation
   queue <- view eventQueue
@@ -188,7 +188,7 @@ handleEvent ::
     MonadAsync m,
     MonadMVar m
   ) =>
-  Event node entry result state -> RaftT entry node state result m ()
+  Event entry node result state -> RaftT entry node result state m ()
 handleEvent EventElectionTimeout = do
   r <- use role
   member <- isClusterMember
@@ -221,7 +221,7 @@ handleClientRequest ::
     MonadFork m,
     MonadDelay m
   ) =>
-  NonEmpty (ClientRequest node entry) -> RaftT entry node state result m ()
+  NonEmpty (ClientRequest entry node) -> RaftT entry node result state m ()
 handleClientRequest requests = do
   mLeaderId <- use currentLeader
   use role >>= \case
@@ -267,8 +267,8 @@ handleAppendEntries ::
     MonadFork m,
     MonadDelay m
   ) =>
-  AppendEntries node entry ->
-  RaftT entry node state result m ()
+  AppendEntries entry node ->
+  RaftT entry node result state m ()
 handleAppendEntries (AppendEntries leaderTerm leaderNode prevLogIndex previousLogTerm newEntries leaderCommitIndex leaderReadOnlySeqNum) = do
   termComparison <- handleTermNumber leaderTerm
   when (termComparison /= LT) (becomeFollower (Just leaderNode))
@@ -373,7 +373,7 @@ handleAppendEntriesResult ::
     MonadDelay m
   ) =>
   AppendEntriesResult node result ->
-  RaftT entry node state result m ()
+  RaftT entry node result state m ()
 handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode responderSuccess responderLogIndex responderReadOnlySeqNum) = do
   termComp <- handleTermNumber responderTerm
   ourRole <- use role
@@ -430,7 +430,7 @@ handleTermNumber ::
     MonadMask m,
     MonadAsync m
   ) =>
-  Term -> RaftT entry node state result m Ordering
+  Term -> RaftT entry node result state m Ordering
 handleTermNumber newTerm = do
   (currTerm, _newTerm) <- updateTerm (const newTerm)
 
@@ -456,7 +456,7 @@ handleRequestVote ::
   node ->
   LogIndex ->
   Term ->
-  RaftT entry node state result m ()
+  RaftT entry node result state m ()
 handleRequestVote candidateTerm candidateNode candidateLastLogIndex candidateLastLogIndexTerm = do
   termOrdering <- handleTermNumber candidateTerm
   ourTerm <- use term
@@ -501,7 +501,7 @@ handleRequestVoteResult ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  node -> Term -> Bool -> RaftT entry node state result m ()
+  node -> Term -> Bool -> RaftT entry node result state m ()
 handleRequestVoteResult voter voterTerm votedForUs = do
   handleTermNumber voterTerm >>= \case
     LT -> pure () -- Vote request for an old term
@@ -518,7 +518,7 @@ handleRequestVoteResult voter voterTerm votedForUs = do
 
 handleInstallSnapshot ::
   (MonadMVar m, MonadAsync m, MonadMask m, MonadFork m, MonadDelay m) =>
-  InstallSnapshot node state -> RaftT entry node state result m ()
+  InstallSnapshot node state -> RaftT entry node result state m ()
 handleInstallSnapshot (InstallSnapshot leaderTerm leaderNode snapshot) =
   handleTermNumber leaderTerm >>= \case
     LT ->
@@ -541,7 +541,7 @@ handleInstallSnapshotResult ::
     MonadFork m,
     MonadDelay m
   ) =>
-  InstallSnapshotResult node -> RaftT entry node state result m ()
+  InstallSnapshotResult node -> RaftT entry node result state m ()
 handleInstallSnapshotResult (InstallSnapshotResult responderTerm responderNode (SnapshotMetadata lastIncludedIndex _)) = do
   termComp <- handleTermNumber responderTerm
   ourRole <- use role
@@ -561,7 +561,7 @@ handleClusterMembershipRequest ::
     MonadFork m,
     MonadDelay m
   ) =>
-  ClusterMembershipRequest node -> RaftT entry node state result m ()
+  ClusterMembershipRequest node -> RaftT entry node result state m ()
 handleClusterMembershipRequest request = do
   let (requester, resultCtor) = case request of
         ClusterMembershipJoinRequest r -> (r, ClusterMembershipJoinResult)
@@ -624,7 +624,7 @@ handleClusterMembershipResult ::
     MonadMask m,
     MonadAsync m
   ) =>
-  ClusterMembershipResult node -> RaftT entry node state result m ()
+  ClusterMembershipResult node -> RaftT entry node result state m ()
 handleClusterMembershipResult = \case
   ClusterMembershipJoinResult (Right leaderId) -> do
     becomeFollower (Just leaderId)
@@ -633,7 +633,7 @@ handleClusterMembershipResult = \case
   ClusterMembershipLeaveResult (Right _) -> pure () -- Nothing to do until log entry is applied
   ClusterMembershipLeaveResult (Left _) -> pure ()
 
-handleAdminRequest :: (MonadMVar m, MonadAsync m) => AdminRequest node -> RaftT entry node state result m ()
+handleAdminRequest :: (MonadMVar m, MonadAsync m) => AdminRequest node -> RaftT entry node result state m ()
 handleAdminRequest req@(MkRequest reqId adminId command) = do
   trace (`AdminRequestReceived` req)
   mLeaderId <- use currentLeader

@@ -48,24 +48,24 @@ import GHC.Generics (Generic)
 -- * State mechine: given an @entry@, how does the @state@ evolve?
 -- * Networking: how are nodes communicating?
 -- * Tracing: how is debugging information traced?
-data Implementation entry node state result m = Implementation
+data Implementation entry node result state m = Implementation
   { persistence :: Persistence entry node state m,
-    stateMachine :: entry -> StateMachineStep state result,
-    networking :: Networking entry node state result m,
+    stateMachine :: entry -> StateMachineStep result state,
+    networking :: Networking entry node result state m,
     -- | Event tracer. This is mostly useful for testing and debugging.
     --
     -- You can turn tracing off using 'nullTracer'
-    tracer :: RaftTrace entry result node state -> m ()
+    tracer :: RaftTrace entry node result state -> m ()
   }
 
 -- | Ignore 'RaftTrace' events
-nullTracer :: (Applicative m) => RaftTrace entry result node state -> m ()
+nullTracer :: (Applicative m) => RaftTrace entry node result state -> m ()
 nullTracer _ = pure ()
 
 -- | Networking implementation.
-data Networking entry node state result m = Networking
+data Networking entry node result state m = Networking
   { -- | Send a remote procedure call to another Raft node.
-    sendRPC :: node -> RPC node entry state -> m (),
+    sendRPC :: node -> RPC entry node state -> m (),
     -- | Send the result of a remote procedure call to another Raft node.
     sendRPCResult :: node -> RPCResult node result -> m (),
     -- | Send a response to a client.
@@ -75,7 +75,7 @@ data Networking entry node state result m = Networking
     -- | Receive a remote procedure call.
     --
     -- At the type implies, this call should /block/ until a message is ready.
-    receiveRPC :: m (RPC node entry state),
+    receiveRPC :: m (RPC entry node state),
     -- | Receive the result of a remote procedure call.
     --
     -- At the type implies, this call should /block/ until a message is ready.
@@ -85,7 +85,7 @@ data Networking entry node state result m = Networking
     -- This call should block until at least one request is available. If
     -- your software stack allows for it, queueing requests allows
     -- for pipelined processing which is much more efficient.
-    receiveClientRequests :: m (NonEmpty (ClientRequest node entry)),
+    receiveClientRequests :: m (NonEmpty (ClientRequest entry node)),
     -- | Receive a request from an administrator.
     --
     -- At the type implies, this call should /block/ until a message is ready.
@@ -100,7 +100,7 @@ data Persistence entry node state m = Persistence
   { -- | Read log entries, starting from and including, a given 'LogIndex'
     --
     -- Implementations should
-    readLogEntriesFrom :: node -> LogIndex -> m [(Term, LogIndex, LogEntry node entry)],
+    readLogEntriesFrom :: node -> LogIndex -> m [(Term, LogIndex, LogEntry entry node)],
     -- | Write log entries durably.
     --
     -- Note that the writes need to support overwriting. In the normal course
@@ -111,7 +111,7 @@ data Persistence entry node state m = Persistence
     -- This function also receives the node identification (of type @node@), which
     -- allows to persist data in a shared location for multiple nodes
     -- (e.g. in a remote database)
-    writeLogEntry :: node -> [(Term, LogIndex, LogEntry node entry)] -> m (),
+    writeLogEntry :: node -> [(Term, LogIndex, LogEntry entry node)] -> m (),
     -- Truncate log entries starting, and including, the provided log index.
     --
     -- Note that not all storage technologies support truncation. For example,
@@ -164,13 +164,13 @@ instance (Binary entry) => Binary (Command entry)
 -- in the replicated log. This includes client commands,
 -- byt also leadership changes (which are no-op entries)
 -- and cluster membership changes.
-data LogEntry node entry
+data LogEntry entry node
   = LogEntryCommand (Command entry)
   | LogEntryLeaderChange
   | LogEntryMembershipChange (ClusterConfiguration node)
   deriving (Eq, Show, Ord, Generic)
 
-instance (Binary node, Binary entry) => Binary (LogEntry node entry)
+instance (Binary node, Binary entry) => Binary (LogEntry entry node)
 
 data CommandResponse node result
   = MkCommandResponse
@@ -180,18 +180,18 @@ data CommandResponse node result
 
 instance (Binary node, Binary result) => Binary (CommandResponse node result)
 
-data AppendEntries node entry = AppendEntries
+data AppendEntries entry node = AppendEntries
   { aeLeaderTerm :: !Term,
     aeLeaderNode :: !node,
     aePreviousLogIndex :: !LogIndex,
     aePreviousLogTerm :: !Term,
-    aeEntries :: !(Seq (Term, LogEntry node entry)),
+    aeEntries :: !(Seq (Term, LogEntry entry node)),
     aeCommitIndex :: !LogIndex,
     aeReadOnlySeqNum :: !ReadOnlySequenceNum
   }
   deriving (Eq, Show, Ord, Generic)
 
-instance (Binary node, Binary entry) => Binary (AppendEntries node entry)
+instance (Binary node, Binary entry) => Binary (AppendEntries entry node)
 
 data AppendEntriesResult node result = AppendEntriesResult
   { aerCurrentTerm :: !Term,
@@ -244,8 +244,8 @@ data ClusterMembershipResult node
 
 instance (Binary node) => Binary (ClusterMembershipResult node)
 
-data RPC node entry state
-  = AE (AppendEntries node entry)
+data RPC entry node state
+  = AE (AppendEntries entry node)
   | IS (InstallSnapshot node state)
   | CM (ClusterMembershipRequest node)
   | RequestVote
@@ -259,7 +259,7 @@ data RPC node entry state
       Term
   deriving (Eq, Ord, Show, Generic) -- For easy derivation of de/serialization
 
-instance (Binary node, Binary entry, Binary state) => Binary (RPC node entry state)
+instance (Binary node, Binary entry, Binary state) => Binary (RPC entry node state)
 
 data RPCResult node result
   = AER (AppendEntriesResult node result)
@@ -276,11 +276,11 @@ data RPCResult node result
 
 instance (Binary node, Binary result) => Binary (RPCResult node result)
 
-data Event node entry result state
+data Event entry node result state
   = EventElectionTimeout
   | EventHeartBeatTimeout
-  | EventIncomingClientRequest (NonEmpty (ClientRequest node entry))
-  | EventRPC (RPC node entry state)
+  | EventIncomingClientRequest (NonEmpty (ClientRequest entry node))
+  | EventRPC (RPC entry node state)
   | EventRPCResult (RPCResult node result)
   | EventAdminRequest (AdminRequest node)
   | EventSnapshotPersisted (Snapshot node state)
@@ -293,8 +293,8 @@ data EventContext node
 instance (Show node) => Show (EventContext node) where
   show (EventContext term node) = "[Term=" <> show term <> " | node=" <> show node <> "]"
 
-data RaftTrace entry result node state
-  = StateRestored (EventContext node) (Maybe node) (Log node (LogEntry node entry))
+data RaftTrace entry node result state
+  = StateRestored (EventContext node) (Maybe node) (Log (LogEntry entry node) node)
   | LeaderElected (EventContext node)
   | VotedFor (EventContext node) !Term node
   | VoteRequestedBy (EventContext node) !Term node
@@ -303,7 +303,7 @@ data RaftTrace entry result node state
   | BecameCandidate (EventContext node)
   | BecameFollower (EventContext node)
   | BecameNonMember (EventContext node)
-  | EventReceived (EventContext node) (Event node entry result state)
+  | EventReceived (EventContext node) (Event entry node result state)
   | SplitElection (EventContext node)
   | ElectionTriggered (EventContext node)
   | -- | Command received by the leader node. If the command needs to be redirected
@@ -318,7 +318,7 @@ data RaftTrace entry result node state
   | JoinedCluster (EventContext node)
   | LeftCluster (EventContext node)
   | CommitIndexIncreasedTo (EventContext node) !LogIndex
-  | LogEntryAppended (EventContext node) !Term !LogIndex (LogEntry node entry)
+  | LogEntryAppended (EventContext node) !Term !LogIndex (LogEntry entry node)
   | ReadOnlyQueryQueued (EventContext node) !LogIndex entry
   | LastLogIndexChangedTo (EventContext node) !LogIndex
   | LogEntryApplied (EventContext node) !Term !LogIndex entry

@@ -18,7 +18,7 @@ import FileSystem
     touchFile,
   )
 
-runFileSystemCommand :: FileSystemCommand -> StateMachineStep FileSystem FileSystemResult
+runFileSystemCommand :: FileSystemCommand -> StateMachineStep FileSystemResult FileSystem
 runFileSystemCommand ListDir = Read $ \fs -> list fs & \files -> FilesFound files
 runFileSystemCommand (TouchFile path) = Transition $ \fs -> touchFile path fs & (,FileTouched path)
 runFileSystemCommand (DeleteFile path) = Transition $ \fs ->

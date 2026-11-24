@@ -117,7 +117,7 @@ runRaftServer ::
   Config node ->
   ClusterState node ->
   state ->
-  Implementation entry node state result m ->
+  Implementation entry node result state m ->
   m ()
 runRaftServer config startingState initState impl =
   runRaftT config startingState initState impl server
@@ -136,7 +136,7 @@ withRaftServer ::
   Config node ->
   ClusterState node ->
   state ->
-  Implementation entry node state result m ->
+  Implementation entry node result state m ->
   m a ->
   m a
 withRaftServer config startingState initState impl f =

@@ -51,8 +51,8 @@ import Distributed.Consensus.Raft.Admin (AdminCommand (..))
 import Distributed.Consensus.Raft.Client (ClientResult)
 import Test.Tasty.QuickCheck (Property, counterexample)
 
-type Scenario entry result state node =
-  Monitor (RaftTrace entry result state node) ()
+type Scenario entry node result state =
+  Monitor (RaftTrace entry node result state) ()
 
 -- | Check a scenario over a 'Trace'.
 checkScenario ::
@@ -65,7 +65,7 @@ checkScenario ::
     Typeable node,
     Typeable state
   ) =>
-  Scenario entry result state node ->
+  Scenario entry node result state ->
   Trace (SimResult a) SimEvent ->
   Property
 checkScenario scenario trace' =
@@ -78,7 +78,7 @@ checkScenario scenario trace' =
 
 raftTrace ::
   (Typeable entry, Typeable result, Typeable node, Typeable state) =>
-  Trace (SimResult a) SimEvent -> [RaftTrace entry result node state]
+  Trace (SimResult a) SimEvent -> [RaftTrace entry node result state]
 raftTrace =
   selectTraceEvents
     ( \_ ev -> case ev of
@@ -86,87 +86,87 @@ raftTrace =
         _ -> Nothing -- internal io-sim event
     )
 
-stateRestored :: Predicate (RaftTrace entry result node state) (EventContext node, Maybe node, Log node (LogEntry node entry))
+stateRestored :: Predicate (RaftTrace entry node result state) (EventContext node, Maybe node, Log (LogEntry entry node) node)
 stateRestored = predicate $ \case
   StateRestored ctx mVote logEntries -> Just (ctx, mVote, logEntries)
   _ -> Nothing
 
-leaderElected :: Predicate (RaftTrace entry result node state) (EventContext node)
+leaderElected :: Predicate (RaftTrace entry node result state) (EventContext node)
 leaderElected = predicate $ \case
   (LeaderElected ctx) -> Just ctx
   _ -> Nothing
 
-votedFor :: Predicate (RaftTrace entry result node state) (EventContext node, Term, node)
+votedFor :: Predicate (RaftTrace entry node result state) (EventContext node, Term, node)
 votedFor = predicate $ \case
   VotedFor ctx candidateTerm candidateNode -> Just (ctx, candidateTerm, candidateNode)
   _ -> Nothing
 
-commandReceived :: Predicate (RaftTrace entry result node state) (EventContext node, ClientRequestId, entry)
+commandReceived :: Predicate (RaftTrace entry node result state) (EventContext node, ClientRequestId, entry)
 commandReceived = predicate $ \case
   (CommandReceived ctx reqId entry) -> Just (ctx, reqId, entry)
   _ -> Nothing
 
-commandResponded :: Predicate (RaftTrace entry result node state) (EventContext node, CommandResponse node (ClientResult result))
+commandResponded :: Predicate (RaftTrace entry node result state) (EventContext node, CommandResponse node (ClientResult result))
 commandResponded = predicate $ \case
   (CommandResultResponded ctx response) -> Just (ctx, response)
   _ -> Nothing
 
-joinClusterCommandReceived :: Predicate (RaftTrace entry result node state) (EventContext node)
+joinClusterCommandReceived :: Predicate (RaftTrace entry node result state) (EventContext node)
 joinClusterCommandReceived = predicate $ \case
   (AdminRequestReceived ctx (MkRequest _ _ (JoinCluster _))) -> Just ctx
   _ -> Nothing
 
-leaveClusterCommandReceived :: Predicate (RaftTrace entry result node state) (EventContext node)
+leaveClusterCommandReceived :: Predicate (RaftTrace entry node result state) (EventContext node)
 leaveClusterCommandReceived = predicate $ \case
   (AdminRequestReceived ctx (MkRequest _ _ LeaveCluster)) -> Just ctx
   _ -> Nothing
 
-joinedCluster :: Predicate (RaftTrace entry result node state) (EventContext node)
+joinedCluster :: Predicate (RaftTrace entry node result state) (EventContext node)
 joinedCluster = predicate $ \case
   JoinedCluster ctx -> Just ctx
   _ -> Nothing
 
-clusterMembershipChangeInitiated :: Predicate (RaftTrace entry result node state) (EventContext node)
+clusterMembershipChangeInitiated :: Predicate (RaftTrace entry node result state) (EventContext node)
 clusterMembershipChangeInitiated = predicate $ \case
   MembershipChangeInitiated ctx -> pure ctx
   _ -> Nothing
 
-clusterMembershipChangeCompleted :: Predicate (RaftTrace entry result node state) (EventContext node)
+clusterMembershipChangeCompleted :: Predicate (RaftTrace entry node result state) (EventContext node)
 clusterMembershipChangeCompleted = predicate $ \case
   MembershipChangeCompleted ctx -> pure ctx
   _ -> Nothing
 
-clusterMembershipChangeApplied :: Predicate (RaftTrace entry result node state) (EventContext node, ClusterConfiguration node)
+clusterMembershipChangeApplied :: Predicate (RaftTrace entry node result state) (EventContext node, ClusterConfiguration node)
 clusterMembershipChangeApplied = predicate $ \case
   MembershipChangeApplied ctx clusterConf -> pure (ctx, clusterConf)
   _ -> Nothing
 
-rpcReceived :: Predicate (RaftTrace entry result node state) (EventContext node, RPC node entry state)
+rpcReceived :: Predicate (RaftTrace entry node result state) (EventContext node, RPC entry node state)
 rpcReceived = predicate $ \case
   (EventReceived ctx (EventRPC rpc)) -> Just (ctx, rpc)
   _ -> Nothing
 
-rpcResultReceived :: Predicate (RaftTrace entry result node state) (EventContext node, RPCResult node result)
+rpcResultReceived :: Predicate (RaftTrace entry node result state) (EventContext node, RPCResult node result)
 rpcResultReceived = predicate $ \case
   (EventReceived ctx (EventRPCResult resp)) -> Just (ctx, resp)
   _ -> Nothing
 
-commitIndexIncreased :: Predicate (RaftTrace entry result node state) (EventContext node, LogIndex)
+commitIndexIncreased :: Predicate (RaftTrace entry node result state) (EventContext node, LogIndex)
 commitIndexIncreased = predicate $ \case
   (CommitIndexIncreasedTo ctx logIndex) -> Just (ctx, logIndex)
   _ -> Nothing
 
-logEntryApplied :: Predicate (RaftTrace entry result node state) (EventContext node, (Term, LogIndex, entry))
+logEntryApplied :: Predicate (RaftTrace entry node result state) (EventContext node, (Term, LogIndex, entry))
 logEntryApplied = predicate $ \case
   (LogEntryApplied ctx entryTerm entryLog entry) -> Just (ctx, (entryTerm, entryLog, entry))
   _ -> Nothing
 
-crashed :: Predicate (RaftTrace entry result node state) node
+crashed :: Predicate (RaftTrace entry node result state) node
 crashed = predicate $ \case
   Crashed node -> Just node
   _ -> Nothing
 
-membershipSettled :: (Eq node) => (Set node -> Bool) -> node -> Predicate (RaftTrace entry result node state) ()
+membershipSettled :: (Eq node) => (Set node -> Bool) -> node -> Predicate (RaftTrace entry node result state) ()
 membershipSettled wanted node = predicate $ \case
   MembershipChangeApplied _ (Joint _ _) -> Just ()
   MembershipChangeApplied _ (Simple cluster) | wanted cluster -> Just ()

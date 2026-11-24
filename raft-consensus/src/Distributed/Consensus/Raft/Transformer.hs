@@ -114,29 +114,29 @@ import Lens.Micro.Platform
 import System.Random (uniformR)
 
 -- | Node identifier
-self :: (Monad m) => RaftT entry node state result m node
+self :: (Monad m) => RaftT entry node result state m node
 self = view configuration <&> nodeId
 
 -- | All nodes in the cluster, except self
-peers :: (Monad m, Ord node) => RaftT entry node state result m (Set node)
+peers :: (Monad m, Ord node) => RaftT entry node result state m (Set node)
 peers = do
   s <- self
   use clusterConfiguration <&> Set.delete s . allNodes
 
 -- | All nodes in the cluster; both 'self' and 'peers'.
-clusterNodes :: (Monad m, Ord node) => RaftT entry node state result m (Set node)
+clusterNodes :: (Monad m, Ord node) => RaftT entry node result state m (Set node)
 clusterNodes = use clusterConfiguration <&> allNodes
 
 -- | Returns @Nothing@ if the exit lock has been unlocked, in which case
 -- the server should shut down
-dequeueEvent :: (MonadMVar m, MonadAsync m) => RaftT entry node state result m (Maybe (Event node entry result state))
+dequeueEvent :: (MonadMVar m, MonadAsync m) => RaftT entry node result state m (Maybe (Event entry node result state))
 dequeueEvent = do
   queue <- view eventQueue
   lock <- view exitLock
   lift (race (takeMVar lock) (atomically (readTQueue queue)))
     >>= either (const (pure Nothing)) (pure . Just)
 
-enqueueEvent :: (MonadSTM m) => Event node entry result state -> RaftT entry node state result m ()
+enqueueEvent :: (MonadSTM m) => Event entry node result state -> RaftT entry node result state m ()
 enqueueEvent event = do
   queue <- view eventQueue
   lift $ atomically $ writeTQueue queue event
@@ -144,7 +144,7 @@ enqueueEvent event = do
 -- | Send a 'RPC' to another node.
 --
 -- To send a 'RPC' to multiple other nodes, concurrently, see 'sendRPCConcurrently'
-sendRPC :: (Monad m) => node -> RPC node entry state -> RaftSendT entry node state result m ()
+sendRPC :: (Monad m) => node -> RPC entry node state -> RaftSendT entry node result state m ()
 sendRPC node rpc = do
   impl <- view implementation
   lift $ impl.networking.sendRPC node rpc
@@ -152,22 +152,22 @@ sendRPC node rpc = do
 -- | Send a 'RPC' concurrently to other nodes.
 --
 -- To send a 'RPC' to a single node, see 'sendRPC'
-sendRPCConcurrently :: (MonadAsync m) => Set node -> RPC node entry state -> RaftSendT entry node state result m ()
+sendRPCConcurrently :: (MonadAsync m) => Set node -> RPC entry node state -> RaftSendT entry node result state m ()
 sendRPCConcurrently nodes rpc = do
   impl <- view implementation
   lift $ mapConcurrently_ (flip impl.networking.sendRPC rpc) nodes
 
-sendRPCResult :: (Monad m) => node -> RPCResult node result -> RaftSendT entry node state result m ()
+sendRPCResult :: (Monad m) => node -> RPCResult node result -> RaftSendT entry node result state m ()
 sendRPCResult node rpc = do
   impl <- view implementation
   lift $ impl.networking.sendRPCResult node rpc
 
-sendClientResponse :: (Monad m) => node -> ClientResponse node result -> RaftSendT entry node state result m ()
+sendClientResponse :: (Monad m) => node -> ClientResponse node result -> RaftSendT entry node result state m ()
 sendClientResponse node response = do
   impl <- view implementation
   lift $ impl.networking.sendClientResponse node response
 
-sendAdminResponse :: (Monad m) => node -> AdminResponse node -> RaftSendT entry node state result m ()
+sendAdminResponse :: (Monad m) => node -> AdminResponse node -> RaftSendT entry node result state m ()
 sendAdminResponse admin response = do
   impl <- view implementation
   lift $ impl.networking.sendAdminResponse admin response
@@ -175,8 +175,8 @@ sendAdminResponse admin response = do
 whenRole ::
   (Monad m) =>
   Role ->
-  RaftT entry node state result m () ->
-  RaftT entry node state result m ()
+  RaftT entry node result state m () ->
+  RaftT entry node result state m ()
 whenRole r action = do
   ourRole <- use role
   when (ourRole == r) action
@@ -192,7 +192,7 @@ sendHeartbeat ::
     MonadMask m,
     MonadAsync m
   ) =>
-  RaftT entry node state result m ()
+  RaftT entry node result state m ()
 sendHeartbeat =
   whenRole Leader $ do
     config <- view configuration
@@ -201,7 +201,7 @@ sendHeartbeat =
 
 -- | For a given destination node, look up which of the entries
 -- in our log should be replicated, and send an appropriate 'AppendEntries' RPC.
-sendAppendEntriesTo :: (Ord node, MonadAsync m) => node -> RaftT entry node state result m ()
+sendAppendEntriesTo :: (Ord node, MonadAsync m) => node -> RaftT entry node result state m ()
 sendAppendEntriesTo destination = do
   entries <- use commandLog
   use (nextIndex . at destination)
@@ -247,7 +247,7 @@ applyEntry ::
     MonadMVar m,
     MonadAsync m
   ) =>
-  Term -> LogIndex -> LogEntry node entry -> RaftT entry node state result m (Maybe (CommandResponse node result))
+  Term -> LogIndex -> LogEntry entry node -> RaftT entry node result state m (Maybe (CommandResponse node result))
 applyEntry entryTerm entryIndex (LogEntryCommand (Command reqId entry)) = do
   sm <- view implementation <&> stateMachine
   currState <- use internalState
@@ -271,7 +271,7 @@ applyEntry _entryTerm _entryIndex (LogEntryMembershipChange clusterConf) = do
 
 -- | Updates the commit index. Returns 'True' if some log entries can be applied,
 -- and 'False' otherwise.
-updateCommitIndex :: (Ord node, Monad m) => RaftT entry node state result m Bool
+updateCommitIndex :: (Ord node, Monad m) => RaftT entry node result state m Bool
 updateCommitIndex = do
   commitIndex' <- use commitIndex
   entries <- use commandLog
@@ -326,7 +326,7 @@ updateCommitIndex = do
       trace (`CommitIndexIncreasedTo` lastIndex)
       pure True
 
-setCommitIndex :: (Monad m) => LogIndex -> RaftT entry node state result m ()
+setCommitIndex :: (Monad m) => LogIndex -> RaftT entry node result state m ()
 setCommitIndex ix = do
   impl <- view implementation
   s <- self
@@ -337,7 +337,7 @@ setCommitIndex ix = do
 -- but also in persisted state.
 --
 -- This function doesn't emit any RPCs
-voteFor :: (Monad m) => Maybe node -> RaftT entry node state result m ()
+voteFor :: (Monad m) => Maybe node -> RaftT entry node result state m ()
 voteFor mNode = do
   impl <- view implementation
   s <- self
@@ -348,12 +348,12 @@ voteFor mNode = do
 
 -- | Update the commit index, and apply log entries if there are
 -- any log entries that /can/ be applied.
-applyLogEntries :: (Ord node, MonadMVar m, MonadAsync m, MonadMask m, MonadFork m, MonadDelay m) => RaftT entry node state result m ()
+applyLogEntries :: (Ord node, MonadMVar m, MonadAsync m, MonadMask m, MonadFork m, MonadDelay m) => RaftT entry node result state m ()
 applyLogEntries = do
   isTimeToCommit <- updateCommitIndex
   when isTimeToCommit applyCommittedEntries
 
-applyCommittedEntries :: (Ord node, MonadMVar m, MonadAsync m, MonadMask m, MonadFork m, MonadDelay m) => RaftT entry node state result m ()
+applyCommittedEntries :: (Ord node, MonadMVar m, MonadAsync m, MonadMask m, MonadFork m, MonadDelay m) => RaftT entry node result state m ()
 applyCommittedEntries = do
   lastAppliedIndex <- use lastApplied
   currentCommitIndex <- use commitIndex
@@ -414,7 +414,7 @@ applyCommittedEntries = do
   -- we might be able to serve some read-only requests
   serveReadOnlyQueries
 
-nextElectionTimeout :: (Monad m) => RaftT entry node state result m Microseconds
+nextElectionTimeout :: (Monad m) => RaftT entry node result state m Microseconds
 nextElectionTimeout = do
   gen <- use randomGen
   (lowerBound, upperBound) <- view configuration <&> electionTimeoutRange
@@ -422,7 +422,7 @@ nextElectionTimeout = do
   randomGen .= nextGen
   pure timeout
 
-trace :: (Monad m) => (EventContext node -> RaftTrace entry result node state) -> RaftT entry node state result m ()
+trace :: (Monad m) => (EventContext node -> RaftTrace entry node result state) -> RaftT entry node result state m ()
 trace makeTrace = do
   eventCtx <- EventContext <$> use term <*> self
   impl <- view implementation
@@ -431,7 +431,7 @@ trace makeTrace = do
 -- | Update the internal term state, returning the previous and new 'Term's.
 --
 -- If the update function returns the current term, this function does nothing.
-updateTerm :: (Monad m) => (Term -> Term) -> RaftT entry node state result m (Term, Term)
+updateTerm :: (Monad m) => (Term -> Term) -> RaftT entry node result state m (Term, Term)
 updateTerm update = do
   currTerm <- use term
   s <- self
@@ -446,7 +446,7 @@ updateTerm update = do
 
 updateMatchIndex ::
   (Ord node, Monad m) =>
-  node -> LogIndex -> RaftT entry node state result m ()
+  node -> LogIndex -> RaftT entry node result state m ()
 updateMatchIndex responder ackedIndex = do
   prev <- use (matchIndex . at responder)
   let newMatch = maybe ackedIndex (max ackedIndex) prev
@@ -457,8 +457,8 @@ updateMatchIndex responder ackedIndex = do
 acceptClientRequests ::
   (MonadMVar m) =>
   -- | Client node
-  NonEmpty (ClientRequest node entry) ->
-  RaftT entry node state result m (NonEmpty ClientRequestId)
+  NonEmpty (ClientRequest entry node) ->
+  RaftT entry node result state m (NonEmpty ClientRequestId)
 acceptClientRequests requests = do
   -- The term is part of the request ID. Our internal counter is volatile and
   -- restarts from zero whenever we boot, so without the term an entry stamped
@@ -491,7 +491,7 @@ acceptClientRequests requests = do
       Transition _ -> currentClientRequests %= Map.insert clientReqId clientId
     pure clientReqId
 
-currentSnapshot :: (Monad m) => RaftT entry node state result m (Snapshot node state)
+currentSnapshot :: (Monad m) => RaftT entry node result state m (Snapshot node state)
 currentSnapshot = do
   lastAppliedIndex <- use lastApplied
   entries <- use commandLog
@@ -519,7 +519,7 @@ currentSnapshot = do
 -- | Serialize the snapshot in a separate thread.
 --
 -- An event will be emitted to run `applySnapshot`
-persistSnapshot :: (MonadAsync m) => Snapshot node state -> RaftT entry node state result m ()
+persistSnapshot :: (MonadAsync m) => Snapshot node state -> RaftT entry node result state m ()
 persistSnapshot snapshot = do
   s <- self
   impl <- view implementation
@@ -533,14 +533,14 @@ persistSnapshot snapshot = do
         (EventSnapshotPersisted snapshot)
 
 -- | Whether we are in the configuration we are currently using.
-isClusterMember :: (Ord node, Monad m) => RaftT entry node state result m Bool
+isClusterMember :: (Ord node, Monad m) => RaftT entry node result state m Bool
 isClusterMember = do
   s <- self
   use clusterConfiguration <&> Set.member s . allNodes
 
 -- | Check if any of the pending read only queries
 -- can be served. If they can, serve them!
-serveReadOnlyQueries :: (Ord node, MonadAsync m) => RaftT entry node state result m ()
+serveReadOnlyQueries :: (Ord node, MonadAsync m) => RaftT entry node result state m ()
 serveReadOnlyQueries = whenRole Leader $ do
   clusterConf <- use clusterConfiguration
   appIx <- use lastApplied
@@ -581,7 +581,7 @@ serveReadOnlyQueries = whenRole Leader $ do
 applySnapshot ::
   (Monad m) =>
   Snapshot node state ->
-  RaftT entry node state result m ()
+  RaftT entry node result state m ()
 applySnapshot snapshot = do
   let snapshotIndex = snapshot.sMetadata.smLastIncludedIndex
   alreadyApplied <- use lastApplied <&> (>= snapshotIndex)
@@ -608,8 +608,8 @@ appendLogEntries ::
     MonadFork m,
     MonadDelay m
   ) =>
-  NonEmpty (Term, LogEntry node entry) ->
-  RaftT entry node state result m ()
+  NonEmpty (Term, LogEntry entry node) ->
+  RaftT entry node result state m ()
 appendLogEntries entries = do
   s <- self
   impl <- view implementation
@@ -645,7 +645,7 @@ restoreState ::
     MonadFork m,
     MonadDelay m
   ) =>
-  RaftT entry node state result m ()
+  RaftT entry node result state m ()
 restoreState = do
   impl <- view implementation
   s <- self
@@ -688,7 +688,7 @@ restoreState = do
   applyCommittedEntries
 
 -- | Is a cluster membership change ongoing?
-pendingClusterMembershipChanges :: (Monad m) => RaftT entry node state result m Bool
+pendingClusterMembershipChanges :: (Monad m) => RaftT entry node result state m Bool
 pendingClusterMembershipChanges =
   (>) <$> use pendingConfigurationIndex <*> use lastApplied
 
@@ -699,7 +699,7 @@ setClusterMembership ::
     MonadMVar m,
     MonadAsync m
   ) =>
-  ClusterConfiguration node -> RaftT entry node state result m ()
+  ClusterConfiguration node -> RaftT entry node result state m ()
 setClusterMembership clusterConf = do
   clusterConfiguration .= clusterConf
   trace (`MembershipChangeApplied` clusterConf)
@@ -720,7 +720,7 @@ proposeClusterMembership ::
     MonadFork m,
     MonadDelay m
   ) =>
-  ClusterConfiguration node -> RaftT entry node state result m ()
+  ClusterConfiguration node -> RaftT entry node result state m ()
 proposeClusterMembership clusterConf = do
   use commandLog <&> succ . Log.lastLogIndex >>= assign pendingConfigurationIndex
   ourTerm <- use term
@@ -728,7 +728,7 @@ proposeClusterMembership clusterConf = do
 
 -- | If the cluster is currently in a joint configuration, unify the
 -- membership to be in a simple configuration. Otherwise, do nothing.
-unifyCluster :: (MonadMVar m, MonadAsync m, Ord node, MonadMask m, MonadFork m, MonadDelay m) => RaftT entry node state result m ()
+unifyCluster :: (MonadMVar m, MonadAsync m, Ord node, MonadMask m, MonadFork m, MonadDelay m) => RaftT entry node result state m ()
 unifyCluster = do
   pending <- pendingClusterMembershipChanges
   use clusterConfiguration >>= \case
@@ -743,7 +743,7 @@ becomeLeader ::
     MonadMask m,
     MonadAsync m
   ) =>
-  RaftT entry node state result m ()
+  RaftT entry node result state m ()
 becomeLeader = do
   role .= Leader
   self <&> Just >>= assign currentLeader
@@ -769,7 +769,7 @@ becomeLeader = do
 
 -- | Reply to clients that the leader is stepping down. This function does nothing
 -- if the role isn't 'Leader'
-leaderStepDown :: (MonadAsync m) => Maybe node -> RaftT entry node state result m ()
+leaderStepDown :: (MonadAsync m) => Maybe node -> RaftT entry node result state m ()
 leaderStepDown mNewLeader = whenRole Leader $ do
   clientReqs <- use currentClientRequests
   for_ (Map.toList clientReqs) $ \(reqId, requester) -> do
@@ -792,7 +792,7 @@ becomeFollower ::
   (MonadMVar m, MonadDelay m, MonadFork m, MonadMask m, MonadAsync m) =>
   -- | Leader if known
   Maybe node ->
-  RaftT entry node state result m ()
+  RaftT entry node result state m ()
 becomeFollower mLeaderNodeId = do
   leaderStepDown mLeaderNodeId
   resetHeartBeatTimer
@@ -812,7 +812,7 @@ becomeCandidate ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  RaftT entry node state result m ()
+  RaftT entry node result state m ()
 becomeCandidate = do
   trace BecameCandidate
   role .= Candidate
@@ -850,14 +850,14 @@ checkElection ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  RaftT entry node state result m ()
+  RaftT entry node result state m ()
 checkElection = do
   q <- hasQuorum <$> use clusterConfiguration <*> use yesVotes
   when q becomeLeader
 
 becomeNonMember ::
   (MonadMVar m, MonadAsync m) =>
-  RaftT entry node state result m ()
+  RaftT entry node result state m ()
 becomeNonMember = do
   r <- use role
   leaderStepDown Nothing
@@ -873,7 +873,7 @@ resetHeartBeatTimer ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  RaftT entry node state result m ()
+  RaftT entry node result state m ()
 resetHeartBeatTimer = do
   config <- view configuration
   view heartBeatTimer >>= lift . resetTimer config.heartBeatTimeout
@@ -885,7 +885,7 @@ resetElectionTimer ::
     MonadMVar m,
     MonadDelay m
   ) =>
-  RaftT entry node state result m ()
+  RaftT entry node result state m ()
 resetElectionTimer = do
   electionTimeout <- nextElectionTimeout
   view electionTimer >>= lift . resetTimer electionTimeout

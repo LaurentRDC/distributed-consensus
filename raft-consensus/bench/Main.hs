@@ -135,16 +135,16 @@ data ScenarioInputs
 data Server
   = MkServer
   { sConfig :: Config Node,
-    sSpec :: Implementation Command Node State Result IO
+    sSpec :: Implementation Command Node Result State IO
   }
 
 type Mailbox a = IntMap (TQueue a)
 
 data NetworkFabric
   = MkNetworkFabric
-  { rpcMailbox :: Mailbox (RPC Node Command State),
+  { rpcMailbox :: Mailbox (RPC Command Node State),
     rpcResultsMailbox :: Mailbox (RPCResult Node Result),
-    requestsMailbox :: Mailbox (ClientRequest Node Command),
+    requestsMailbox :: Mailbox (ClientRequest Command Node),
     responsesMailbox :: Mailbox (ClientResponse Node Result),
     adminMailbox :: Mailbox (AdminRequest Node),
     adminResponsesMailbox :: Mailbox (AdminResponse Node)
@@ -308,7 +308,7 @@ data Result
 
 instance NFData Result
 
-step :: Command -> StateMachineStep State Result
+step :: Command -> StateMachineStep Result State
 step (Insert k v) = Transition $ \state -> (Map.insert k v state, Ok)
 step (Delete k) = Transition $ \state -> (Map.delete k state, Ok)
 step (Get k) = Read $ \state -> maybe Err Value (Map.lookup k state)

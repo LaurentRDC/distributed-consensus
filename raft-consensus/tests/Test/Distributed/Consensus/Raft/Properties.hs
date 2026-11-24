@@ -44,13 +44,13 @@ data FaultInjection
 -- It's still not clear to me why, but without the explicit forall here,
 -- RaftTrace events don't get picked up.
 allProperties ::
-  forall entry result node state.
+  forall entry node result state.
   ( Eq entry,
     Ord node,
     Show node,
     Show entry
   ) =>
-  FaultInjection -> Scenario entry result node state
+  FaultInjection -> Scenario entry node result state
 allProperties faultInjection =
   let -- Properties in Figure 3 of the Raft paper
       coreRaftProperties =
@@ -81,7 +81,7 @@ allProperties faultInjection =
 
 -- | Ensure that in each term where a leader is elected, no other leader
 -- is elected
-singleLeaderPerTermProperty :: Scenario entry result node state
+singleLeaderPerTermProperty :: Scenario entry node result state
 singleLeaderPerTermProperty = go mempty <?> "Another leader elected for the same term"
   where
     go seenTerms =
@@ -100,7 +100,7 @@ singleLeaderPerTermProperty = go mempty <?> "Another leader elected for the same
 --
 -- Note that under fault conditions, the same vote for the same term may be cast multiple
 -- times. I consider this acceptable; votes are idempotent
-singleVoteCastPerTermProperty :: (Ord node, Show node) => Scenario entry result node state
+singleVoteCastPerTermProperty :: (Ord node, Show node) => Scenario entry node result state
 singleVoteCastPerTermProperty = go mempty <?> "More than one vote cast per term"
   where
     go votes =
@@ -119,7 +119,7 @@ singleVoteCastPerTermProperty = go mempty <?> "More than one vote cast per term"
         )
 
 -- | Ensure that each node witnesses terms that increase monotonically
-monotonicallyIncreasingTermProperty :: (Ord node) => Scenario entry result node state
+monotonicallyIncreasingTermProperty :: (Ord node) => Scenario entry node result state
 monotonicallyIncreasingTermProperty = go mempty <?> "Term not increased monotonically"
   where
     go latestKnownTerms =
@@ -143,7 +143,7 @@ monotonicallyIncreasingTermProperty = go mempty <?> "Term not increased monotoni
     roleTerm _ = Nothing
 
 -- | Ensure that each node's last applied index increases monotonically.
-monotonicallyIncreasingLastAppliedIndexProperty :: (Ord node) => Scenario entry result node state
+monotonicallyIncreasingLastAppliedIndexProperty :: (Ord node) => Scenario entry node result state
 monotonicallyIncreasingLastAppliedIndexProperty = go mempty <?> "Last applied index not increasing monotonically"
   where
     go acc =
@@ -164,7 +164,7 @@ monotonicallyIncreasingLastAppliedIndexProperty = go mempty <?> "Last applied in
         )
 
 -- | Ensure that each node's commit index increases monotonically.
-monotonicallyIncreasingCommitIndexProperty :: (Ord node) => Scenario entry result node state
+monotonicallyIncreasingCommitIndexProperty :: (Ord node) => Scenario entry node result state
 monotonicallyIncreasingCommitIndexProperty = go mempty <?> "Commit index not increasing monotonically"
   where
     go acc =
@@ -185,7 +185,7 @@ monotonicallyIncreasingCommitIndexProperty = go mempty <?> "Commit index not inc
 
 -- | Ensure that every command that was acknowledged by the leader
 -- receives a response with the same request ID.
-allAcceptedCommandReceiveResponseProperty :: Scenario entry result node state
+allAcceptedCommandReceiveResponseProperty :: Scenario entry node result state
 allAcceptedCommandReceiveResponseProperty = go
   where
     go = void $ whenever commandReceived $ \(_, reqId, _) ->
@@ -194,7 +194,7 @@ allAcceptedCommandReceiveResponseProperty = go
               predicate $ \_ -> unless (reqId == reqId') Nothing
        in eventually thisCommandResponded <?> "Never received a response for " <> Text.show reqId
 
-singleConfigurationChangeInFlight :: (Ord node) => Scenario entry result node state
+singleConfigurationChangeInFlight :: (Ord node) => Scenario entry node result state
 singleConfigurationChangeInFlight = go mempty <?> "A leader appended a configuration change while another was not completed"
   where
     go leaders =
@@ -217,7 +217,7 @@ singleConfigurationChangeInFlight = go mempty <?> "A leader appended a configura
 
 -- | Ensure that every cluster membership change that's accepted by a leader
 -- is seen through by the same leader
-allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration :: (Eq node) => Scenario entry result node state
+allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration :: (Eq node) => Scenario entry node result state
 allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration =
   go <?> "An accepted cluster membership request did not result in new configuration"
   where
@@ -227,7 +227,7 @@ allAcceptedClusterMembershipRequestsResultInNewClusterConfiguration =
             predicate $ \_ -> unless (ctx == ctx') Nothing
         )
 
-allAdminRequestToJoinComplete :: (Ord node, Show node) => Scenario entry result node state
+allAdminRequestToJoinComplete :: (Ord node, Show node) => Scenario entry node result state
 allAdminRequestToJoinComplete =
   go <?> "A command to join a cluster did not result in new cluster membership"
   where
@@ -239,7 +239,7 @@ allAdminRequestToJoinComplete =
         <> Text.show nodeJoining
         <> " to join a cluster did not result in new cluster membership"
 
-allAdminRequestToLeaveComplete :: (Show node, Ord node) => Scenario entry result node state
+allAdminRequestToLeaveComplete :: (Show node, Ord node) => Scenario entry node result state
 allAdminRequestToLeaveComplete =
   go
   where
@@ -269,7 +269,7 @@ data NodeIndexes
 -- | Ensures that the following relationship holds for each node individually:
 --
 --    appliex index  <=  commit index  <=  log length
-indexRelationshipProperty :: (Ord node) => Scenario entry result node state
+indexRelationshipProperty :: (Ord node) => Scenario entry node result state
 indexRelationshipProperty = go mempty <?> "index relationship did not hold"
   where
     checkState node acc =
@@ -321,7 +321,7 @@ indexRelationshipProperty = go mempty <?> "index relationship did not hold"
 
 -- | If two logs contain an entry with the same index and term, then the
 -- logs are identical in all entries up through the given index
-logMatchingProperty :: (Ord node, Eq entry) => Scenario entry result node state
+logMatchingProperty :: (Ord node, Eq entry) => Scenario entry node result state
 logMatchingProperty = go mempty mempty <?> "Conflicting entries appended at the same index and term"
   where
     go logs seen =
@@ -376,7 +376,7 @@ logMatchingProperty = go mempty mempty <?> "Conflicting entries appended at the 
 
 -- | If a node has applied a log entry at a given index to its state machine, no other node
 -- will ever apply a different log entry for the same index.
-stateMachineSafetyProperty :: (Show entry, Eq entry) => Scenario entry result node state
+stateMachineSafetyProperty :: (Show entry, Eq entry) => Scenario entry node result state
 stateMachineSafetyProperty = go mempty <?> "Conflicting entries applied at the same index"
   where
     go acc =

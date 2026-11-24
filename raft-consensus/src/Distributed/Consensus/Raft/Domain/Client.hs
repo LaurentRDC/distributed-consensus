@@ -27,7 +27,7 @@ data ClientRequestId
 
 instance Binary ClientRequestId
 
-type ClientRequest node entry = Request ClientRequestId node entry
+type ClientRequest entry node = Request ClientRequestId node entry
 
 data ClientResult result
   = Success !result

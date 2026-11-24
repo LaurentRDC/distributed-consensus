@@ -80,7 +80,7 @@ instance MonadTrans (RaftClientT entry node result) where
   lift = MkRaftClientT . lift
 
 data ClientImplementation entry node result m = ClientImplementation
-  { sendRequest :: node -> ClientRequest node entry -> m (),
+  { sendRequest :: node -> ClientRequest entry node -> m (),
     receiveResponse :: m (ClientResponse node result),
     -- | Generate a globally-unique session ID.
     generateSessionId :: node -> m SessionId
@@ -147,7 +147,7 @@ data ClientError entry node
   | NoKnownLeader
   deriving (Eq, Show, Ord)
 
-newRequest :: (MonadSTM m) => entry -> RaftClientT entry node result m (ClientRequest node entry)
+newRequest :: (MonadSTM m) => entry -> RaftClientT entry node result m (ClientRequest entry node)
 newRequest entry = do
   (seqNumVar, sessId, self) <- MkRaftClientT $ asks ((,,) <$> nextRequestId <*> currentSessionId <*> node)
   reqId <- lift $ atomically $ do
@@ -179,7 +179,7 @@ newRequest entry = do
 sendClientRequest ::
   (MonadSTM m) =>
   node ->
-  ClientRequest node entry ->
+  ClientRequest entry node ->
   RaftClientT
     entry
     node

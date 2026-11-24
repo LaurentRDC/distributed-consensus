@@ -161,7 +161,7 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
             (scenario scenarioInputs)
             ( \_ trace ->
                 checkScenario
-                  (allProperties @Command @Result @Node @State faultInjection)
+                  (allProperties @Command @Node @Result @State faultInjection)
                   trace
                   .&&. checkLinearizability trace
             )
@@ -443,7 +443,7 @@ instance Exception TestFault
 data Server s
   = MkServer
   { sConfig :: Config Node,
-    sSpec :: Implementation Command Node State Result (IOSim s),
+    sSpec :: Implementation Command Node Result State (IOSim s),
     sFaultInjector :: TVar (IOSim s) (Maybe (ThreadId (IOSim s))) -> IOSim s ()
   }
 
@@ -571,9 +571,9 @@ type TopologyConstraints s = TVar (IOSim s) (Map Node (Set Node))
 
 data NetworkFabric s
   = MkNetworkFabric
-  { rpcMailbox :: Mailbox s (RPC Node Command State),
+  { rpcMailbox :: Mailbox s (RPC Command Node State),
     rpcResultsMailbox :: Mailbox s (RPCResult Node Result),
-    requestsMailbox :: Mailbox s (ClientRequest Node Command),
+    requestsMailbox :: Mailbox s (ClientRequest Command Node),
     responsesMailbox :: Mailbox s (ClientResponse Node Result),
     adminMailbox :: Mailbox s (AdminRequest Node),
     adminResponsesMailbox :: Mailbox s (AdminResponse Node),
@@ -590,7 +590,7 @@ data NetworkFabric s
 data Environment s
   = MkResources
   { networkFabric :: NetworkFabric s,
-    logPersistence :: IntMap (TVar (IOSim s) (Map LogIndex (Term, LogEntry Node Command))),
+    logPersistence :: IntMap (TVar (IOSim s) (Map LogIndex (Term, LogEntry Command Node))),
     votePersistence :: IntMap (TVar (IOSim s) (Map Term Node)),
     termPersistence :: IntMap (TVar (IOSim s) Term),
     snapshotPersistence :: IntMap (TVar (IOSim s) (Maybe (Snapshot Node State))),
@@ -786,9 +786,9 @@ testHarness
 
 writeLogEntryTest ::
   (MonadSTM m) =>
-  IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) ->
+  IntMap (TVar m (Map LogIndex (Term, LogEntry Command Node))) ->
   Node ->
-  [(Term, LogIndex, LogEntry Node Command)] ->
+  [(Term, LogIndex, LogEntry Command Node)] ->
   m ()
 writeLogEntryTest storage self batch = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
@@ -799,7 +799,7 @@ writeLogEntryTest storage self batch = case IntMap.lookup (fromIntegral self) st
 
 truncateLogEntriesTest ::
   (MonadSTM m) =>
-  IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) ->
+  IntMap (TVar m (Map LogIndex (Term, LogEntry Command Node))) ->
   Node ->
   LogIndex ->
   m ()
@@ -809,7 +809,7 @@ truncateLogEntriesTest storage self truncateFrom = case IntMap.lookup (fromInteg
     log' <- readTVar var
     writeTVar var (log' `Map.restrictKeys` Set.fromAscList [0 .. pred truncateFrom])
 
-readLogEntriesFromTest :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Node Command))) -> Node -> LogIndex -> m [(Term, LogIndex, LogEntry Node Command)]
+readLogEntriesFromTest :: (MonadSTM m) => IntMap (TVar m (Map LogIndex (Term, LogEntry Command Node))) -> Node -> LogIndex -> m [(Term, LogIndex, LogEntry Command Node)]
 readLogEntriesFromTest storage self logIndex = case IntMap.lookup (fromIntegral self) storage of
   Nothing -> error $ "Persistence badly configured: missing node " <> show self
   Just var -> readTVarIO var <&> fmap (\(ix, (term, entry)) -> (term, ix, entry)) . Map.toAscList . Map.filterWithKey (\ix _ -> ix >= logIndex)

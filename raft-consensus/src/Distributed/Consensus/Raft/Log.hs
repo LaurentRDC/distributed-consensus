@@ -43,7 +43,7 @@ newtype RelativeLogIndex = RelativeLogIndex LogIndex
   deriving stock (Generic, Eq, Ord, Show)
   deriving newtype (Real, Enum, Num, Integral)
 
-data Log node entry = Log
+data Log entry node = Log
   { lEntries :: !(Seq (Term, LogIndex, entry)),
     lSnapshotMetadata :: !SnapshotMetadata,
     -- Metadata stored for performance reasons
@@ -52,7 +52,7 @@ data Log node entry = Log
   }
   deriving (Eq, Show)
 
-buildLog :: Seq (Term, LogIndex, entry) -> Maybe SnapshotMetadata -> Log node entry
+buildLog :: Seq (Term, LogIndex, entry) -> Maybe SnapshotMetadata -> Log entry node
 buildLog entries mMetadata =
   let metadata = fromMaybe (SnapshotMetadata 0 0) mMetadata
    in Log
@@ -64,19 +64,19 @@ buildLog entries mMetadata =
             _ Seq.:> (lastTerm, _, _) -> lastTerm
         }
 
-relativeIndex :: Log node entry -> LogIndex -> RelativeLogIndex
+relativeIndex :: Log entry node -> LogIndex -> RelativeLogIndex
 relativeIndex (Log _ ((SnapshotMetadata !lastIx _)) _ _) !ix = RelativeLogIndex $ ix - lastIx
 {-# INLINEABLE relativeIndex #-}
 
-absoluteIndex :: Log node entry -> RelativeLogIndex -> LogIndex
+absoluteIndex :: Log entry node -> RelativeLogIndex -> LogIndex
 absoluteIndex (Log _ ((SnapshotMetadata !lastIx _)) _ _) (RelativeLogIndex !ix) = ix + lastIx
 {-# INLINEABLE absoluteIndex #-}
 
-append :: Log node entry -> (Term, entry) -> Log node entry
+append :: Log entry node -> (Term, entry) -> Log entry node
 Log es sn lst _ `append` (!term, !newEntry) = Log (es Seq.|> (term, succ lst, newEntry)) sn (succ lst) term
 {-# INLINEABLE append #-}
 
-extend :: Log node entry -> Seq (Term, entry) -> Log node entry
+extend :: Log entry node -> Seq (Term, entry) -> Log entry node
 Log es sn lst lt `extend` !newEntries =
   Log
     (es Seq.>< Seq.zipWith (\ix (t, e) -> (t, ix, e)) indices newEntries)
@@ -92,7 +92,7 @@ Log es sn lst lt `extend` !newEntries =
 
 -- | Truncate the log so that it retains only the entries up to, and including,
 -- the absolute index @ix@.
-keepEntriesUpTo :: Log node entry -> LogIndex -> Log node entry
+keepEntriesUpTo :: Log entry node -> LogIndex -> Log entry node
 log'@(Log es sn@((SnapshotMetadata lastIx lastSnapshotTerm)) lst _) `keepEntriesUpTo` ix
   -- Nothing to truncate
   | ix >= lst = log'
@@ -119,7 +119,7 @@ data Reconciliation entry
       !(Seq (Term, entry))
 
 -- | Reconcile an existing 'Log' with new entries starting from a previous log index.
-reconcile :: Log nod entry -> LogIndex -> Seq (Term, entry) -> Reconciliation entry
+reconcile :: Log entry node -> LogIndex -> Seq (Term, entry) -> Reconciliation entry
 reconcile log' prevIx = go (succ prevIx)
   where
     go !ix remaining = case Seq.viewl remaining of
@@ -137,7 +137,7 @@ data Lookup a
   | NotFound
   deriving (Functor)
 
-(!?) :: Log node entry -> LogIndex -> Lookup (Term, LogIndex, entry)
+(!?) :: Log entry node -> LogIndex -> Lookup (Term, LogIndex, entry)
 (!?) log'@(Log es meta@(SnapshotMetadata lst _) _ _) ix
   | ix <= lst = LogIndexInSnapshot meta
   | otherwise =
@@ -146,23 +146,23 @@ data Lookup a
         -- is traditionally one-based indexing, hence the -1 offset
         es Seq.!? (fromIntegral (relativeIndex log' ix) - 1)
 
-logEntries :: Log node entry -> Seq (Term, LogIndex, entry)
+logEntries :: Log entry node -> Seq (Term, LogIndex, entry)
 logEntries = lEntries
 
-newLog :: Log node entry
+newLog :: Log entry node
 newLog = buildLog mempty Nothing
 
-lastLogIndex :: Log node entry -> LogIndex
+lastLogIndex :: Log entry node -> LogIndex
 lastLogIndex = lLastIndex
 {-# INLINE lastLogIndex #-}
 
-lastLogInfo :: Log node entry -> (Term, LogIndex)
+lastLogInfo :: Log entry node -> (Term, LogIndex)
 lastLogInfo (Log _ _ lix lt) = (lt, lix)
 {-# INLINE lastLogInfo #-}
 
 -- | Apply a snapshot to the log if it advances the log index only.
 -- Otherwise, this function does nothing.
-applySnapshot :: SnapshotMetadata -> Log node entry -> Log node entry
+applySnapshot :: SnapshotMetadata -> Log entry node -> Log entry node
 applySnapshot newSnapshot@((SnapshotMetadata absoluteLastIndex lastSnapshotTerm)) log'
   | smLastIncludedIndex newSnapshot <= smLastIncludedIndex (lSnapshotMetadata log') = log'
   | otherwise =

@@ -46,7 +46,7 @@ data Result
   | Err
   deriving (Eq, Ord, Show)
 
-step :: Command -> StateMachineStep State Result
+step :: Command -> StateMachineStep Result State
 step (Insert k v) = Transition $ \state -> (Map.insert k v state, Ok)
 step (Delete k) = Transition $ \state -> (Map.delete k state, Ok)
 step (Get k) = Read $ \state -> maybe Err Value (Map.lookup k state)
