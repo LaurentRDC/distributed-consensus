@@ -390,7 +390,7 @@ data ScenarioInputs
 
 genScenarioInputs :: FaultInjection -> Gen ScenarioInputs
 genScenarioInputs faultInjection = do
-  clusterSize <- elements [1, 2, 3]
+  clusterSize <- elements [1, 2, 3, 4, 5]
   numLoneNodes <- elements [0, 1]
   numClients <- elements [1, 2, 3]
   ss <- vectorOf (clusterSize + numLoneNodes) (chooseBoundedIntegral (0, 1_000_000))
