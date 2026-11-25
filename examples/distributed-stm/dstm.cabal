@@ -1,0 +1,63 @@
+cabal-version:      3.4
+name:               dstm
+version:            0.1.0.0
+synopsis:           Distributed software transactional memory
+-- description:
+homepage:           https://github.com/LaurentRDC/distributed-consensus
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             Laurent P. René de Cotret
+maintainer:         laurent.decotret@outlook.com
+copyright:          Laurent P. René de Cotret
+category:           Distributed Systems
+build-type:         Simple
+extra-doc-files:    README.md
+
+common warnings
+    ghc-options: -Wall
+                 -Wcompat
+                 -Widentities
+                 -Wincomplete-uni-patterns
+                 -Wincomplete-record-updates
+                 -Wredundant-constraints
+                 -fhide-source-paths
+                 -Wpartial-fields
+                 -Wunused-packages
+
+library
+    import:           warnings
+    ghc-options:      -rtsopts -threaded -with-rtsopts=-N
+    exposed-modules:  Control.Distributed.STM
+    other-modules:    Control.Distributed.STM.Internal
+    build-depends:    base >= 4.18 && <4.23
+                    , binary
+                    , bytestring
+                    , containers
+                    , directory
+                    , distributed-process ^>=0.7
+                    , filepath
+                    , mtl
+                    , stm
+                    , raft-consensus
+                    , raft-consensus-distributed-process
+                    , raft-consensus-distributed-process:client
+                    , raft-consensus-wal
+    hs-source-dirs:   library
+    default-language: Haskell2010
+
+executable dstm-bank
+    import:           warnings
+    ghc-options:      -rtsopts -threaded -with-rtsopts=-N
+    main-is:          Main.hs
+    build-depends:    base >= 4.18 && <4.23
+                    , containers
+                    , distributed-process ^>=0.7
+                    , dstm
+                    , network
+                    , network-transport-tcp
+                    , optparse-applicative ^>=0.19
+                    , random
+    hs-source-dirs:   bank-demo
+    default-language: Haskell2010
+
+

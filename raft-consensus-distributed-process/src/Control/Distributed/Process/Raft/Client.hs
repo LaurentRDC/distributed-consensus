@@ -6,16 +6,39 @@ module Control.Distributed.Process.Raft.Client
     Microseconds,
     ClientError (..),
     newRequest,
+    clientSession,
   )
 where
 
 import Control.Concurrent.STM (atomically, newTQueueIO, readTQueue, writeTQueue)
-import Control.Distributed.Process (NodeId, Process, exit, getSelfNode, link, match, matchUnknown, nsendRemote, receiveWait, register, spawnLocal)
+import Control.Distributed.Process
+  ( NodeId,
+    Process,
+    exit,
+    getSelfNode,
+    link,
+    match,
+    matchUnknown,
+    nsendRemote,
+    receiveWait,
+    register,
+    spawnLocal,
+  )
 import Control.Distributed.Process.Raft.Instances ()
 import Control.Distributed.Process.Serializable (Serializable)
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
-import Distributed.Consensus.Raft.Client (ClientError, ClientImplementation (..), ClientRequest, Microseconds, RaftClientT, newRequest, sessionId, withClientSession)
+import Distributed.Consensus.Raft.Client
+  ( ClientError,
+    ClientImplementation (..),
+    ClientRequest,
+    Microseconds,
+    RaftClientT,
+    clientSession,
+    newRequest,
+    sessionId,
+    withClientSession,
+  )
 import Distributed.Consensus.Raft.Client qualified as Raft.Client
 import System.Random.Stateful (randomIO)
 
@@ -50,7 +73,7 @@ withRaftClient f = do
   where
     impl recvQueue =
       ClientImplementation
-        { sendRequest = (`nsendRemote` clientMailboxProcessName),
+        { sendRequest = (`nsendRemote` serverMailboxProcessName),
           receiveResponse = liftIO $ atomically $ readTQueue recvQueue,
           generateSessionId =
             const $
@@ -58,10 +81,11 @@ withRaftClient f = do
                 sessionId <$> randomIO <*> randomIO
         }
 
--- | This value needs to be kept in sync with 'Control.Distributed.Process.Raft'.
--- The alternative would be a tiny shared library...
 clientMailboxProcessName :: String
-clientMailboxProcessName = "raft-consensus-client-mailbox"
+clientMailboxProcessName = "raft-consensus-client-inbox"
+
+serverMailboxProcessName :: String
+serverMailboxProcessName = "raft-consensus-server-inbox"
 
 -- | Send a request to a Raft cluster.
 --

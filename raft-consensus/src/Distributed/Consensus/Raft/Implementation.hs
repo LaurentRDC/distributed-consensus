@@ -147,7 +147,9 @@ data Persistence entry node state m = Persistence
     -- | Read the last persisted commit index. A default value of @0@ should be
     -- returned if the commit index was never persisted
     readCommitIndex :: node -> m LogIndex,
-    -- | Write the node's commit index durably.
+    -- | Write the node's commit index. Note that this does
+    -- not need to be durable; storing the commit index is a startup performance
+    -- optimization.
     writeCommitIndex :: node -> LogIndex -> m ()
   }
 

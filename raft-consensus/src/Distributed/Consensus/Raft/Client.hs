@@ -14,6 +14,9 @@ module Distributed.Consensus.Raft.Client
     ClientError (..),
     Microseconds,
 
+    -- ** Session information
+    clientSession,
+
     -- ** Request payloads
     newRequest,
 
@@ -151,6 +154,11 @@ data ClientError entry node
   | Timeout
   | NoKnownLeader
   deriving (Eq, Show, Ord)
+
+-- | Read the current session ID. This helper can be useful if you need
+-- to pin information to the current client
+clientSession :: (Monad m) => RaftClientT entry node result m SessionId
+clientSession = MkRaftClientT $ asks currentSessionId
 
 newRequest :: (MonadSTM m) => entry -> RaftClientT entry node result m (ClientRequest entry node)
 newRequest entry = do

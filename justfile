@@ -26,3 +26,7 @@ distfs-servers n="5" keep-state="false":
 [group('example: distfs')]
 distfs-client *args:
     cabal -v0 run distfs-client -- {{args}}
+
+[group('example: dstm')]
+dstm-bank n="5":
+    ./examples/distributed-stm/run-servers.sh {{n}}

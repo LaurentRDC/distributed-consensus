@@ -28,3 +28,4 @@ cabal.profiling.project.local~
 .ghc.environment.*
 # For temporary files used by local examples
 .distfs/
+.dstm/
