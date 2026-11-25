@@ -3,12 +3,12 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Control.Distributed.STM
   ( DSTM,
-    Cluster,
-    withCluster,
-    atomically,
+    Atomically,
+    withAtomically,
 
     -- * DVars
     DVar,
@@ -68,12 +68,25 @@ data Cluster = MkCluster
     nextLocalId :: STM.TVar Word64
   }
 
+-- | Type synonym for a function which can run a 'DSTM' action.
+type Atomically = forall a. DSTM a -> Process a
+
 -- | Spawn all of the services needed to form a distributed STM cluster.
-withCluster :: [NodeId] -> (Cluster -> Process ()) -> Process ()
-withCluster peers runCluster = do
+--
+-- @
+-- 'withAtomically' peers $ \atomically -> do
+--     counter <- atomically $ 'newDVar' (0 :: Int)
+--     atomically $ 'modifyDVar' counter succ
+-- @
+--
+-- Note that since the inner 'Atomically' function uses a 'forall', you
+-- may need to add type annotations that you don't when using 'stm' directly.
+withAtomically :: [NodeId] -> (Atomically -> Process r) -> Process r
+withAtomically peers body = do
   spawnLocal (serverProcess peers) >>= link
   nid <- getSelfNode
-  cluster (fromMaybe nid $ listToMaybe peers) (nid : peers) >>= runCluster
+  cs <- cluster (fromMaybe nid $ listToMaybe peers) (nid : peers)
+  body (runAtomically cs)
 
 serverProcess :: [NodeId] -> Process ()
 serverProcess peers = do
@@ -200,8 +213,8 @@ newtype DSTM a
 liftProcess :: Process a -> DSTM a
 liftProcess = DSTM . lift . lift . lift
 
-atomically :: Cluster -> DSTM a -> Process a
-atomically cs (DSTM body) = attempt
+runAtomically :: Cluster -> DSTM a -> Process a
+runAtomically cs (DSTM body) = attempt
   where
     attempt = do
       (r, tx) <- runReaderT (runStateT (runExceptT body) (MkTxLog mempty mempty)) cs

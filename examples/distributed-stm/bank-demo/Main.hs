@@ -1,4 +1,5 @@
 {-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Main (main) where
 
@@ -6,7 +7,6 @@ import Control.Applicative ((<**>))
 import Control.Concurrent (threadDelay)
 import Control.Distributed.Process
   ( NodeId (NodeId),
-    Process,
     expect,
     getSelfNode,
     getSelfPid,
@@ -19,14 +19,11 @@ import Control.Distributed.Process
   )
 import Control.Distributed.Process.Node (initRemoteTable, newLocalNode, runProcess)
 import Control.Distributed.STM
-  ( Cluster,
-    DVar,
-    atomically,
-    modifyDVar,
+  ( modifyDVar,
     newDVar,
     readDVar,
     retry,
-    withCluster,
+    withAtomically,
   )
 import Control.Exception (throwIO)
 import Control.Monad (forM_, unless)
@@ -84,8 +81,6 @@ parseRuntimeOpts =
               )
           )
 
-type Account = DVar Int
-
 main :: IO ()
 main = do
   hSetBuffering stdout LineBuffering
@@ -96,12 +91,18 @@ main = do
 
   let ps = [NodeId (encodeEndPointAddress "127.0.0.1" p 0) | p <- peers opts]
 
-  runProcess node $ withCluster ps $ \cluster -> do
+  runProcess node $ withAtomically ps $ \atomically -> do
     getSelfPid >>= register "sync-accounts"
     (acc0, acc1, acc2) <-
       if lead opts
         then do
-          accounts <- createAccounts cluster
+          accounts <-
+            atomically $
+              (,,)
+                <$> newDVar (10 :: Int) -- This type annotation is required if 'atomically' uses RankNType
+                <*> newDVar 10
+                <*> newDVar 10
+
           (ackPort, acks) <- newChan
 
           -- Broadcast the new accounts until all other nodes have acknowledged
@@ -129,7 +130,7 @@ main = do
 
         loop n = do
           liftIO $ randomRIO (100_000, 200_000) >>= threadDelay
-          (v0, v1, v2, acctSum) <- atomically cluster $ do
+          (v0, v1, v2, acctSum) <- atomically $ do
             let sourceVar = accountMap IntMap.! (n `mod` 3)
             source <- readDVar sourceVar
             unless (source >= 3) retry
@@ -160,10 +161,3 @@ main = do
           loop (succ n)
 
     loop 0
-
-createAccounts :: Cluster -> Process (Account, Account, Account)
-createAccounts cs = atomically cs $ do
-  (,,)
-    <$> newDVar 10
-    <*> newDVar 10
-    <*> newDVar 10
