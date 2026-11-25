@@ -243,7 +243,7 @@ benchHarness
               map (\(serverSeed, n) -> (n, mkServer' serverSeed (fromIntegral n))) serverNodesWithSeeds,
           withClient = \useClient ->
             withClientSession clientNode (clientSpec networkFabric) $ \runSession ->
-              useClient (\leader comm -> runSession (newRequest comm >>= sendClientRequest leader))
+              useClient (\leader comm -> runSession (newRequest comm >>= sendClientRequest maxBound leader))
         }
     where
       adminNode = -1

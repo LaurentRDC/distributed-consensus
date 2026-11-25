@@ -207,12 +207,8 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
                           let tryShutDown :: Int -> IOSim s ()
                               tryShutDown 0 = pure ()
                               tryShutDown attemptsLeft =
-                                timeout
-                                  (fromIntegral scenarioInputs.electionTimeoutUpperBound)
-                                  (runAdminAction (Admin.shutDown >>= Admin.sendAdminCommand node <&> void))
-                                  >>= maybe
-                                    (tryShutDown (attemptsLeft - 1))
-                                    (either (const (tryShutDown (attemptsLeft - 1))) pure)
+                                runAdminAction (Admin.shutDown >>= Admin.sendAdminCommand scenarioInputs.electionTimeoutUpperBound node <&> void)
+                                  >>= either (const (tryShutDown (attemptsLeft - 1))) pure
                            in tryShutDown 3
 
                     forConcurrently_ harness.loneServers $ \(server, isDone, _, _) -> do
@@ -262,11 +258,11 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
 
                   threadDelay (fromIntegral waitToJoin)
                   untilJoined runAdminAction contact requestTimeout betweenAttempts node $
-                    Admin.joinCluster contact >>= Admin.sendAdminCommand node
+                    Admin.joinCluster contact >>= Admin.sendAdminCommand maxBound node
 
                   threadDelay (fromIntegral waitToLeave)
                   untilLeft runAdminAction contact requestTimeout betweenAttempts node $
-                    Admin.leaveCluster >>= Admin.sendAdminCommand node
+                    Admin.leaveCluster >>= Admin.sendAdminCommand maxBound node
 
                   putMVar isDone ()
               )
@@ -323,15 +319,15 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
               where
                 attempt payload nodeSet remaining target = do
                   threadDelay (fromIntegral clientRetryTick)
-                  timeout (fromIntegral maxTime) (runRequest (sendClientRequest target payload))
+                  runRequest (sendClientRequest maxTime target payload)
                     >>= \case
-                      Nothing ->
+                      Left Timeout ->
                         giveUp $
                           "no response at all within "
                             <> show (toInteger maxTime)
                             <> " microseconds"
                       -- Command needs to be retried but on another target
-                      Just (Left err@(Redirect otherNode))
+                      (Left err@(Redirect otherNode))
                         | remaining <= clientRetryTick ->
                             giveUp $
                               "retried for "
@@ -339,7 +335,7 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
                                 <> " microseconds, last response was "
                                 <> show err
                         | otherwise -> attempt payload (Set.insert otherNode nodeSet) (remaining - clientRetryTick) otherNode
-                      Just (Left err@NoKnownLeader)
+                      (Left err@NoKnownLeader)
                         | remaining <= clientRetryTick ->
                             giveUp $
                               "retried for "
@@ -349,7 +345,7 @@ propClusterWith printTrace updateExplorationOptions faultInjection raceOrNot =
                         | otherwise -> case nextCandidate target nodeSet of
                             Nothing -> giveUp "No known nodes to query"
                             Just candidate -> attempt payload nodeSet (remaining - clientRetryTick) candidate
-                      Just (Right (_, result)) -> pure (Just result)
+                      (Right (_, result)) -> pure (Just result)
                   where
                     giveUp why =
                       case faultInjection of
@@ -542,7 +538,7 @@ untilMembership direction runAdminAction initialContact requestTimeout betweenAt
     go attemptsLeft contact
       | attemptsLeft <= 0 = pure ()
       | otherwise =
-          attempt (Admin.getClusterConfiguration >>= Admin.sendAdminCommand contact) >>= \case
+          attempt (Admin.getClusterConfiguration >>= Admin.sendAdminCommand maxBound contact) >>= \case
             -- Settled: the configuration says what we wanted it to say.
             Just (Right (ClusterConfigurationIs (Simple cluster)))
               | isDone cluster -> pure ()

@@ -62,10 +62,10 @@ testAdminCommands getTransport = testCase "Tests that admin commands are communi
       runProcess node $ withRaftAdmin $ \runAdmin -> runAdmin $ do
         -- Since the helper functions e.g. 'joinCluster' automatically wait for a response,
         -- we spin up a new thread for each of them
-        void $ joinCluster arbitraryOtherNodeId >>= sendAdminCommand serverNodeId
-        void $ leaveCluster >>= sendAdminCommand serverNodeId
-        void $ getClusterConfiguration >>= sendAdminCommand serverNodeId
-        void $ shutDown >>= sendAdminCommand serverNodeId
+        void $ joinCluster arbitraryOtherNodeId >>= sendAdminCommand maxBound serverNodeId
+        void $ leaveCluster >>= sendAdminCommand maxBound serverNodeId
+        void $ getClusterConfiguration >>= sendAdminCommand maxBound serverNodeId
+        void $ shutDown >>= sendAdminCommand maxBound serverNodeId
 
 testClientCommands :: IO Transport -> TestTree
 testClientCommands getTransport = testCase "Tests that client commands are communicated" $ do
@@ -108,5 +108,5 @@ testClientCommands getTransport = testCase "Tests that client commands are commu
             -- logic in the server to process a request and send a response.
             --
             -- We basicaly yeet a message '()' in a separate process, which
-            -- blocks forever, and then await that all requests be done
-            void $ runClient (newRequest () >>= sendClientRequest serverNodeId)
+            -- blocks for as much time as possible, and then await that all requests be done
+            void $ runClient (newRequest () >>= sendClientRequest maxBound serverNodeId)

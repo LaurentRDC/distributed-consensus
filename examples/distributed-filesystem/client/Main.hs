@@ -59,7 +59,7 @@ main = do
     withRaftClient $ \runAction -> do
       req <- runAction $ newRequest (rcCommand opts)
       let makeRequest server =
-            runAction (sendClientRequest server req)
+            runAction (sendClientRequest maxBound server req)
               >>= \case
                 Left (Redirect otherServerNode) -> do
                   liftIO $ Text.IO.putStrLn $ "Redirected to " <> Text.show otherServerNode

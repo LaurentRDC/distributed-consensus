@@ -41,8 +41,10 @@ import Control.Concurrent.Class.MonadSTM
     TMVar,
     TVar,
     atomically,
+    check,
     newEmptyTMVar,
     newTVarIO,
+    orElse,
     readTMVar,
     readTVar,
     tryPutTMVar,
@@ -52,6 +54,7 @@ import Control.Monad (void)
 import Control.Monad.Class.MonadAsync (MonadAsync, link, withAsync)
 import Control.Monad.Class.MonadFork (MonadFork)
 import Control.Monad.Class.MonadThrow (MonadMask)
+import Control.Monad.Class.MonadTimer (MonadTimer, registerDelay)
 import Control.Monad.Trans.Class (MonadTrans (lift))
 import Control.Monad.Trans.Reader (ReaderT (runReaderT))
 import qualified Control.Monad.Trans.Reader as Reader
@@ -138,6 +141,7 @@ makeLenses ''AdminImplementation
 
 data AdminError node
   = AdminNotLeader !(Maybe node)
+  | Timeout
   | UnexpectedAdminResponse
   deriving (Eq, Show)
 
@@ -175,7 +179,8 @@ shutDown :: (MonadSTM m) => RaftAdminT node m (AdminRequest node)
 shutDown = newCommand ShutDown
 
 sendAdminCommand ::
-  (MonadSTM m) =>
+  (MonadTimer m) =>
+  Microseconds ->
   node ->
   AdminRequest node ->
   RaftAdminT
@@ -185,7 +190,7 @@ sendAdminCommand ::
         (AdminError node)
         (AdminCommandResult node)
     )
-sendAdminCommand contact req@(MkRequest reqId _ command) = do
+sendAdminCommand timeout contact req@(MkRequest reqId _ command) = do
   send <- asks (sendAdminRequest . implementation)
   mbox <- asks mailbox
   lift $ do
@@ -196,23 +201,31 @@ sendAdminCommand contact req@(MkRequest reqId _ command) = do
 
       pure resultVar
 
+    expired <- registerDelay (fromIntegral timeout)
     send contact req
 
     -- TODO: clean up mailbox entry for req ID
     --       regardless of success (possibly using 'bracket')
     atomically
-      ( do
-          resp <- readTMVar resultVar
-          mbox' <- readTVar mbox
-          writeTVar mbox (Map.delete reqId mbox')
-          pure (expectedResponse command resp)
+      ( ( do
+            resp <- readTMVar resultVar
+            mbox' <- readTVar mbox
+            writeTVar mbox (Map.delete reqId mbox')
+            pure (expectedResponse command (Just resp))
+        )
+          `orElse` ( do
+                       readTVar expired >>= check
+                       readTVar mbox >>= writeTVar mbox . Map.delete reqId
+                       pure (expectedResponse command Nothing)
+                   )
       )
 
 -- TODO: is there a better way to associate valid responses based on the request?
-expectedResponse :: AdminCommand node -> AdminCommandResult node -> Either (AdminError node) (AdminCommandResult node)
-expectedResponse _ (NotLeader leader) = Left (AdminNotLeader leader)
-expectedResponse (JoinCluster {}) JoinInitiated = Right JoinInitiated
-expectedResponse (LeaveCluster {}) LeaveInitiated = Right LeaveInitiated
-expectedResponse GetClusterConfiguration resp@(ClusterConfigurationIs {}) = Right resp
-expectedResponse ShutDown ShutdownInitiated = Right ShutdownInitiated
+expectedResponse :: AdminCommand node -> Maybe (AdminCommandResult node) -> Either (AdminError node) (AdminCommandResult node)
+expectedResponse _ Nothing = Left Timeout
+expectedResponse _ (Just (NotLeader leader)) = Left (AdminNotLeader leader)
+expectedResponse (JoinCluster {}) (Just JoinInitiated) = Right JoinInitiated
+expectedResponse (LeaveCluster {}) (Just LeaveInitiated) = Right LeaveInitiated
+expectedResponse GetClusterConfiguration (Just resp@(ClusterConfigurationIs {})) = Right resp
+expectedResponse ShutDown (Just ShutdownInitiated) = Right ShutdownInitiated
 expectedResponse _ _ = Left UnexpectedAdminResponse

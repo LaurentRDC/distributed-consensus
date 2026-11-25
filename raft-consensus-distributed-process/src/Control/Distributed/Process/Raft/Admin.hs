@@ -63,6 +63,7 @@ adminMailboxProcessName :: String
 adminMailboxProcessName = "raft-consensus-admin-mailbox"
 
 sendAdminCommand ::
+  Microseconds ->
   NodeId ->
   AdminRequest NodeId ->
   RaftAdminT

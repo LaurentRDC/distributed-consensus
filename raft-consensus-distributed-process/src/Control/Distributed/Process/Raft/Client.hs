@@ -82,6 +82,7 @@ clientMailboxProcessName = "raft-consensus-client-mailbox"
 -- It is perfectly safe, and encouraged, to send separate requests in
 -- separate threads. However, you should call 'withClientSession' only once.
 sendClientRequest ::
+  Microseconds ->
   NodeId ->
   ClientRequest entry NodeId ->
   RaftClientT

@@ -1,4 +1,5 @@
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -34,8 +35,10 @@ import Control.Concurrent.Class.MonadSTM
     TMVar,
     TVar,
     atomically,
+    check,
     newEmptyTMVar,
     newTVarIO,
+    orElse,
     readTMVar,
     readTVar,
     tryPutTMVar,
@@ -45,6 +48,7 @@ import Control.Monad (void)
 import Control.Monad.Class.MonadAsync (MonadAsync, link, withAsync)
 import Control.Monad.Class.MonadFork (MonadFork)
 import Control.Monad.Class.MonadThrow (MonadMask)
+import Control.Monad.Class.MonadTimer (MonadTimer, registerDelay)
 import Control.Monad.Trans.Class (MonadTrans, lift)
 import Control.Monad.Trans.Reader (ReaderT (runReaderT), asks)
 import Data.Map.Strict (Map)
@@ -144,6 +148,7 @@ makeLenses ''ClientImplementation
 data ClientError entry node
   = -- | The client should make the request to another node
     Redirect node
+  | Timeout
   | NoKnownLeader
   deriving (Eq, Show, Ord)
 
@@ -177,7 +182,9 @@ newRequest entry = do
 -- It is perfectly safe, and encouraged, to send separate requests in
 -- separate threads. However, you should call 'withClientSession' only once.
 sendClientRequest ::
-  (MonadSTM m) =>
+  (MonadTimer m) =>
+  -- | Maximum time to wait for a response.
+  Microseconds ->
   node ->
   ClientRequest entry node ->
   RaftClientT
@@ -189,7 +196,7 @@ sendClientRequest ::
         (ClientError entry node)
         (node, result)
     )
-sendClientRequest lastKnownLeader req@(MkRequest reqId _ _) = do
+sendClientRequest timeout lastKnownLeader req@(MkRequest reqId _ _) = do
   send <- MkRaftClientT $ asks (sendRequest . implementation)
   mbox <- MkRaftClientT $ asks mailbox
   ackVar <- MkRaftClientT $ asks latestAcknowledgement
@@ -198,37 +205,45 @@ sendClientRequest lastKnownLeader req@(MkRequest reqId _ _) = do
         resultVar <- atomically $ do
           mbox' <- readTVar mbox
           resultVar <- newEmptyTMVar
-          -- TODO: bracket to deregister
+          -- TODO: bracket to deregister in case of an exception
           writeTVar mbox (Map.insert reqId resultVar mbox')
 
           pure resultVar
 
+        expired <- registerDelay (fromIntegral timeout)
         send lastKnownLeader req
 
         -- TODO: clean up mailbox entry for req ID
         --       regardless of success (possibly using 'bracket')
         atomically
-          ( do
-              resp <- readTMVar resultVar
-              mbox' <- readTVar mbox
-              lAck <- readTVar ackVar
-              writeTVar mbox (Map.delete reqId mbox')
+          ( ( do
+                resp <- readTMVar resultVar
+                mbox' <- readTVar mbox
+                lAck <- readTVar ackVar
+                writeTVar mbox (Map.delete reqId mbox')
 
-              let MkClientRequestId _ respSeqNum = responseRequestId resp
-                  watermark = Max respSeqNum
-              writeTVar
-                ackVar
-                ( maybe
-                    (Just watermark)
-                    (Just . mappend watermark)
-                    lAck
-                )
+                let MkClientRequestId _ respSeqNum = responseRequestId resp
+                    watermark = Max respSeqNum
+                writeTVar
+                  ackVar
+                  ( maybe
+                      (Just watermark)
+                      (Just . mappend watermark)
+                      lAck
+                  )
 
-              pure resp
+                pure (Just resp)
+            )
+              `orElse` ( do
+                           readTVar expired >>= check
+                           readTVar mbox >>= writeTVar mbox . Map.delete reqId
+                           pure Nothing
+                       )
           )
     )
     >>= \case
-      (MkResponse _ (Just actualLeaderId) NotLeader) -> pure $ Left $ Redirect actualLeaderId
-      (MkResponse _ (Just leader) (Success result)) -> pure $ Right (leader, result)
+      Nothing -> pure $ Left Timeout
+      Just (MkResponse _ (Just actualLeaderId) NotLeader) -> pure $ Left $ Redirect actualLeaderId
+      Just (MkResponse _ (Just leader) (Success result)) -> pure $ Right (leader, result)
       -- TODO: what if leader is @Nothing@ but response is `Success`??
-      (MkResponse _ Nothing _) -> pure $ Left NoKnownLeader
+      Just (MkResponse _ Nothing _) -> pure $ Left NoKnownLeader
