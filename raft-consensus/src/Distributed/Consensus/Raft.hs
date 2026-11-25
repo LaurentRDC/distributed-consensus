@@ -30,6 +30,7 @@ module Distributed.Consensus.Raft
     LogIndex,
     Snapshot (..),
     SnapshotMetadata (..),
+    SessionId,
 
     -- ** Remote procedure calls
     RPC (..),
@@ -67,6 +68,7 @@ import Distributed.Consensus.Raft.Domain
   ( ClusterConfiguration (..),
     LogIndex,
     Role,
+    SessionId,
     Snapshot (..),
     SnapshotMetadata (..),
     StateMachineStep (..),

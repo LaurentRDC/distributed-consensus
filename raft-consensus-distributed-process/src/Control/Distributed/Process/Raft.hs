@@ -41,14 +41,14 @@ networking = do
   --       Then, on the first 'sendX', we first query the node to ask which
   --       'ProcessId' is the mailbox one
   spawnMailbox rpcMailboxProcessName (recvLoop rpcQueue rpcResultQueue)
-  spawnMailbox clientMailboxProcessName (clientRecvLoop clientRequestQueue)
+  spawnMailbox serverMailboxProcessName (clientRecvLoop clientRequestQueue)
   spawnMailbox adminMailboxProcessName (adminRecvLoop adminRequestQueue)
 
   pure
     Networking
       { sendRPC = (`nsendRemote` rpcMailboxProcessName),
         sendRPCResult = (`nsendRemote` rpcMailboxProcessName),
-        sendClientResponse = (`nsendRemote` clientMailboxProcessName),
+        sendClientResponse = (`nsendRemote` remoteClientMailboxProcessName),
         sendAdminResponse = (`nsendRemote` adminMailboxProcessName),
         receiveRPC = liftIO $ atomically $ readTQueue rpcQueue,
         receiveRPCResult = liftIO $ atomically $ readTQueue rpcResultQueue,
@@ -68,7 +68,8 @@ networking = do
       register processName pid
 
     rpcMailboxProcessName = "raft-consensus-mailbox"
-    clientMailboxProcessName = "raft-consensus-client-mailbox"
+    serverMailboxProcessName = "raft-consensus-server-inbox"
+    remoteClientMailboxProcessName = "raft-consensus-client-inbox"
     adminMailboxProcessName = "raft-consensus-admin-mailbox"
 
     recvLoop rpcQueue rpcResultQueue =
