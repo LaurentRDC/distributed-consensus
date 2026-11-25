@@ -147,7 +147,7 @@ withPersistence dir codec f = do
     writeTermToFile _node = writeDurably termFile
 
     readCommitIndexFromFile _node = liftIO $ try (IO.readFile commitIndexFile) >>= either (\(_ :: SomeException) -> pure 0) (pure . Binary.decode)
-    writeCommitIndexToFile _node = writeDurably commitIndexFile
+    writeCommitIndexToFile _node = liftIO . IO.writeFile commitIndexFile . Binary.encode
 
     readVotedForFromFile _node term =
       liftIO $
