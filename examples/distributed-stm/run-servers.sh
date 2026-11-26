@@ -16,12 +16,6 @@ EOF
 }
 
 n=5
-keep_state=false
-# The script isn't at the root of the repo, but
-# directories such as .distfs are at the root of the repo,
-# so we need to detect it
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(git -C "$script_dir" rev-parse --show-toplevel)"
 
 while (($# > 0)); do
     case "$1" in
@@ -45,10 +39,6 @@ while (($# > 0)); do
             ;;
     esac
 done
-
-if ! "$keep_state"; then
-    rm -rf "$repo_root/.dstm"
-fi
 
 start=4000
 ports=($(seq "$start" $((start + n - 1))))
@@ -81,9 +71,7 @@ for port in "${ports[@]}"; do
         leader=false
     fi
 
-    mkdir -p "$repo_root/.dstm/$port"
-
-    cabal run dstm-bank -- --port="$port" "${args[@]}" > "$repo_root/.dstm/$port/output.log" &
+    cabal run dstm-bank -- --port="$port" "${args[@]}" &
     pids+=("$!")
 done
 

@@ -33,15 +33,12 @@ library
                     , binary
                     , bytestring
                     , containers
-                    , directory
                     , distributed-process ^>=0.7
-                    , filepath
                     , mtl
                     , stm
                     , raft-consensus
                     , raft-consensus-distributed-process
                     , raft-consensus-distributed-process:client
-                    , raft-consensus-wal
     hs-source-dirs:   library
     default-language: Haskell2010
 
@@ -60,4 +57,22 @@ executable dstm-bank
     hs-source-dirs:   bank-demo
     default-language: Haskell2010
 
-
+benchmark dstm-bench
+  import:           warnings
+  default-language: Haskell2010
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   bench
+  main-is:          Main.hs
+  ghc-options:      -rtsopts -threaded -with-rtsopts=-N
+  build-depends:    async
+                  , base
+                  , containers
+                  , distributed-process ^>=0.7
+                  , dstm
+                  , network-transport
+                  , network-transport-tcp
+                  , raft-consensus
+                  , random
+                  , stm
+                  , tasty
+                  , tasty-bench

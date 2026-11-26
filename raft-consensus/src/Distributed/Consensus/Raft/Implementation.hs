@@ -10,6 +10,7 @@ module Distributed.Consensus.Raft.Implementation
 
     -- ** Helpers
     nullTracer,
+    ephemeralPersistence,
 
     -- * Types
     LogEntry (..),
@@ -152,6 +153,25 @@ data Persistence entry node state m = Persistence
     -- optimization.
     writeCommitIndex :: node -> LogIndex -> m ()
   }
+
+-- | This 'Persistence' implementation does absolutely nothing.
+-- Only use this for testing, or for performance-critical workloads,
+-- where fault-tolerance is not required.
+ephemeralPersistence :: (Applicative m) => Persistence entry node state m
+ephemeralPersistence =
+  Persistence
+    { readLogEntriesFrom = \_ _ -> pure [],
+      writeLogEntry = \_ _ -> pure (),
+      truncateLogEntriesFrom = \_ _ -> pure (),
+      readTerm = \_ -> pure 0,
+      writeTerm = \_ _ -> pure (),
+      readVotedFor = \_ _ -> pure Nothing,
+      writeVotedFor = \_ _ _ -> pure (),
+      readSnapshot = \_ -> pure Nothing,
+      writeSnapshot = \_ _ -> pure (),
+      readCommitIndex = \_ -> pure 0,
+      writeCommitIndex = \_ _ -> pure ()
+    }
 
 -- | A 'Command' comes from clients
 data Command entry

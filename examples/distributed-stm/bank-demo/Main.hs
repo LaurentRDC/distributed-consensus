@@ -23,7 +23,7 @@ import Control.Distributed.STM
     newDVar,
     readDVar,
     retry,
-    withAtomically,
+    withDSTM,
   )
 import Control.Exception (throwIO)
 import Control.Monad (forM_, unless)
@@ -91,7 +91,7 @@ main = do
 
   let ps = [NodeId (encodeEndPointAddress "127.0.0.1" p 0) | p <- peers opts]
 
-  runProcess node $ withAtomically ps $ \atomically -> do
+  runProcess node $ withDSTM ps $ \atomically -> do
     getSelfPid >>= register "sync-accounts"
     (acc0, acc1, acc2) <-
       if lead opts
@@ -99,7 +99,7 @@ main = do
           accounts <-
             atomically $
               (,,)
-                <$> newDVar (10 :: Int) -- This type annotation is required if 'atomically' uses RankNType
+                <$> newDVar (10 :: Int)
                 <*> newDVar 10
                 <*> newDVar 10
 

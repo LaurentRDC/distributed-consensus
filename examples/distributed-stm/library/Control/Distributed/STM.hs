@@ -8,7 +8,8 @@
 module Control.Distributed.STM
   ( DSTM,
     Atomically,
-    withAtomically,
+    withDSTM,
+    withDSTMOpts,
 
     -- * DVars
     DVar,
@@ -31,6 +32,7 @@ import qualified Control.Distributed.Process.Raft as Process
 import Control.Distributed.Process.Raft.Client (clientSession, newRequest, sendClientRequest, withRaftClient)
 import Control.Distributed.STM.Internal
   ( DVarId (..),
+    Store,
     TxCommand (..),
     TxResult (..),
     Version,
@@ -55,12 +57,9 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Set as Set
-import Distributed.Consensus.Raft (ClusterState (..), Implementation (..), SessionId, runRaftServer, simpleConfig)
+import Distributed.Consensus.Raft (ClusterState (..), Config (..), Implementation (..), Persistence, SessionId, ephemeralPersistence, nullTracer, runRaftServer, simpleConfig)
 import Distributed.Consensus.Raft.Client (ClientError (..))
-import Distributed.Consensus.Raft.WAL (binaryWALCodec, withPersistence)
 import GHC.Generics (Generic)
-import System.Directory.OsPath (getCurrentDirectory)
-import System.OsPath (unsafeEncodeUtf, (</>))
 
 data Cluster = MkCluster
   { call :: TxCommand -> Process TxResult,
@@ -74,42 +73,56 @@ type Atomically = forall a. DSTM a -> Process a
 -- | Spawn all of the services needed to form a distributed STM cluster.
 --
 -- @
--- 'withAtomically' peers $ \atomically -> do
+-- 'withDSTM' peers $ \atomically -> do
 --     counter <- atomically $ 'newDVar' (0 :: Int)
 --     atomically $ 'modifyDVar' counter succ
 -- @
 --
--- Note that since the inner 'Atomically' function uses a 'forall', you
--- may need to add type annotations that you don't when using 'stm' directly.
-withAtomically :: [NodeId] -> (Atomically -> Process r) -> Process r
-withAtomically peers body = do
-  spawnLocal (serverProcess peers) >>= link
+-- 'withDSTM' will use sensible defaults for the underlying Raft cluster,
+-- while disabling fault-tolerance. If you need to enable fault-tolerance,
+-- or tune performance characteristics, see 'withDSTMOpts'
+withDSTM ::
+  [NodeId] ->
+  (Atomically -> Process r) ->
+  Process r
+withDSTM =
+  withDSTMOpts
+    ephemeralPersistence
+    id
+
+withDSTMOpts ::
+  Persistence TxCommand NodeId Store Process ->
+  (Config NodeId -> Config NodeId) ->
+  [NodeId] ->
+  (Atomically -> Process r) ->
+  Process r
+withDSTMOpts persist localConfig peers body = do
+  spawnLocal (serverProcess persist localConfig peers) >>= link
   nid <- getSelfNode
   cs <- cluster (fromMaybe nid $ listToMaybe peers) (nid : peers)
   body (runAtomically cs)
 
-serverProcess :: [NodeId] -> Process ()
-serverProcess peers = do
+serverProcess ::
+  Persistence TxCommand NodeId Store Process ->
+  (Config NodeId -> Config NodeId) ->
+  [NodeId] ->
+  Process ()
+serverProcess persist localConfig peers = do
   let clusterState = InCluster (Set.fromList peers)
   network <- Process.networking
   nid <- getSelfNode
   conf <- simpleConfig nid
-  cwd <- liftIO getCurrentDirectory
-  withPersistence
-    (cwd </> unsafeEncodeUtf ".dstm" </> unsafeEncodeUtf (show nid))
-    binaryWALCodec
-    $ \persist ->
-      runRaftServer
-        conf
-        clusterState
-        emptyStore
-        ( Implementation
-            { persistence = persist,
-              stateMachine = txEngine,
-              networking = network,
-              tracer = liftIO . print
-            }
-        )
+  runRaftServer
+    (localConfig conf)
+    clusterState
+    emptyStore
+    ( Implementation
+        { persistence = persist,
+          stateMachine = txEngine,
+          networking = network,
+          tracer = nullTracer
+        }
+    )
 
 cluster :: NodeId -> [NodeId] -> Process Cluster
 cluster leader known = do

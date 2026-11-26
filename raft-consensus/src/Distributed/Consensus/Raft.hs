@@ -20,6 +20,7 @@ module Distributed.Consensus.Raft
 
     -- ** Helpers
     nullTracer,
+    ephemeralPersistence,
 
     -- ** Domain types
     LogEntry (..),
@@ -94,6 +95,7 @@ import Distributed.Consensus.Raft.Implementation
     RPC (..),
     RPCResult (..),
     RaftTrace (..),
+    ephemeralPersistence,
     nullTracer,
   )
 import Distributed.Consensus.Raft.Log (Log)
