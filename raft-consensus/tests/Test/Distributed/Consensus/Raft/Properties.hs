@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ExplicitForAll #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -8,7 +9,7 @@ module Test.Distributed.Consensus.Raft.Properties
   )
 where
 
-import Control.Monad (unless, void)
+import Control.Monad (unless, void, when)
 import Control.Monitor
   ( allOf,
     assert,
@@ -55,7 +56,7 @@ allProperties faultInjection =
   let -- Properties in Figure 3 of the Raft paper
       coreRaftProperties =
         [ singleLeaderPerTermProperty,
-          -- TODO: leader append-only
+          leaderAppendOnlyProperty,
           logMatchingProperty,
           -- TODO: leader completeness
           stateMachineSafetyProperty
@@ -398,4 +399,38 @@ stateMachineSafetyProperty = go mempty <?> "Conflicting entries applied at the s
                     )
                     (term' == term && entry' == entry)
             _ -> go acc
+        )
+
+leaderAppendOnlyProperty :: (Ord node) => Scenario entry node result state
+leaderAppendOnlyProperty = go mempty mempty <?> "A leader overwrite or deleted an entry from its own log"
+  where
+    go !lastIx !leaders =
+      step
+        ()
+        ( \case
+            LeaderElected (EventContext _ n) -> go lastIx (Set.insert n leaders)
+            BecameFollower (EventContext _ n) -> go lastIx (Set.delete n leaders)
+            BecameCandidate (EventContext _ n) -> go lastIx (Set.delete n leaders)
+            BecameNonMember (EventContext _ n) -> go lastIx (Set.delete n leaders)
+            GracefulShutdown (EventContext _ n) -> go lastIx (Set.delete n leaders)
+            Crashed n -> go (Map.delete n lastIx) (Set.delete n leaders)
+            LogEntryAppended (EventContext _ n) _ ix _ -> do
+              when (n `Set.member` leaders) $
+                case Map.lookup n lastIx of
+                  Nothing -> pure ()
+                  Just prev ->
+                    assert
+                      ("Leader appended at index " <> Text.show ix <> " but its last index was " <> Text.show prev)
+                      (ix == succ prev)
+              go (Map.insert n ix lastIx) leaders
+            LastLogIndexChangedTo (EventContext _ n) ix -> do
+              when (n `Set.member` leaders) $
+                case Map.lookup n lastIx of
+                  Nothing -> pure ()
+                  Just prev ->
+                    assert
+                      "Leader's last log index regressed"
+                      (ix >= prev)
+              go (Map.insert n ix lastIx) leaders
+            _ -> go lastIx leaders
         )

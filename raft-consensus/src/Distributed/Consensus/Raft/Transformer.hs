@@ -604,7 +604,15 @@ applySnapshot snapshot = do
   alreadyApplied <- use lastApplied <&> (>= snapshotIndex)
   -- Log.applySnapshot is a no-op if the incoming snapshot doesn't
   -- advance the log
+  lastIndexBefore <- use commandLog <&> Log.lastLogIndex
   commandLog %= Log.applySnapshot snapshot.sMetadata
+
+  -- A snapshot may change the last log index (either truncating
+  -- the log or fast-forwarding it), leading to the last log index
+  -- jumping around
+  lastIndexAfter <- use commandLog <&> Log.lastLogIndex
+  when (lastIndexAfter /= lastIndexBefore) $
+    trace (`LastLogIndexChangedTo` lastIndexAfter)
 
   unless alreadyApplied $ do
     internalState .= sData snapshot
