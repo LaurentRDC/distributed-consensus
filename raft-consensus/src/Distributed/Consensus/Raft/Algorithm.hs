@@ -11,7 +11,7 @@ module Distributed.Consensus.Raft.Algorithm
 where
 
 import Control.Concurrent.Class.MonadMVar (MonadMVar, putMVar)
-import Control.Concurrent.Class.MonadSTM (atomically, writeTQueue)
+import Control.Concurrent.Class.MonadSTM (atomically, readTQueue, tryPeekTQueue, writeTQueue)
 import Control.Monad (forever, unless, when)
 import Control.Monad.Class.MonadAsync (MonadAsync, async, cancel, link)
 import Control.Monad.Class.MonadFork (MonadFork, labelThisThread)
@@ -199,7 +199,16 @@ handleEvent EventElectionTimeout = do
       trace ElectionTriggered
     becomeCandidate
 handleEvent EventHeartBeatTimeout = Transformer.sendHeartbeat
-handleEvent (EventIncomingClientRequest requests) = handleClientRequest requests
+handleEvent (EventIncomingClientRequest requests) = do
+  -- There may be other client requests queued up. We can increase throughput by flushing them all
+  queue <- view eventQueue
+  let go =
+        tryPeekTQueue queue >>= \case
+          Just (EventIncomingClientRequest !otherRequests) -> readTQueue queue *> ((otherRequests :) <$> go)
+          _ -> pure []
+
+  queued <- lift (atomically go)
+  handleClientRequest (NonEmpty.appendList requests (concatMap NonEmpty.toList queued))
 handleEvent (EventRPC (RequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm)) =
   handleRequestVote candidateTerm candidateNode candidateLastLogEntry candidateLastLogEntryTerm
 handleEvent (EventRPC (AE appendEntries)) = handleAppendEntries appendEntries
