@@ -19,10 +19,13 @@ import Control.Monitor
     whenever,
     (<?>),
   )
+import Data.Foldable (for_)
+import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
-import Distributed.Consensus.Raft (CommandResponse (..), EventContext (..), LogEntry (LogEntryMembershipChange), LogIndex, RaftTrace (..), SnapshotMetadata (SnapshotMetadata))
+import Distributed.Consensus.Raft (CommandResponse (..), EventContext (..), LogEntry (LogEntryMembershipChange), LogIndex, RaftTrace (..), SnapshotMetadata (SnapshotMetadata), Term)
 import Test.Distributed.Consensus.Raft.Scenario
   ( Scenario,
     clusterMembershipChangeCompleted,
@@ -58,7 +61,7 @@ allProperties faultInjection =
         [ singleLeaderPerTermProperty,
           leaderAppendOnlyProperty,
           logMatchingProperty,
-          -- TODO: leader completeness
+          leaderCompletenessProperty,
           stateMachineSafetyProperty
         ]
       otherProperties =
@@ -434,3 +437,58 @@ leaderAppendOnlyProperty = go mempty mempty <?> "A leader overwrite or deleted a
               go (Map.insert n ix lastIx) leaders
             _ -> go lastIx leaders
         )
+
+data NodeLog = MkNodeLog !LogIndex !(Map LogIndex Term)
+
+data Committed
+  = NothingCommitted
+  | Committed !LogIndex !Term
+
+leaderCompletenessProperty :: (Ord node) => Scenario entry node result state
+leaderCompletenessProperty = go mempty NothingCommitted <?> "A leader is missing an entry that was previously committed"
+  where
+    go !logs !committed =
+      step
+        ()
+        ( \case
+            LogEntryAppended (EventContext _ n) t ix _ ->
+              go (Map.alter (Just . appendEntry ix t . fromMaybe emptyNodeLog) n logs) committed
+            LastLogIndexChangedTo (EventContext _ n) ix ->
+              go (Map.adjust (\(MkNodeLog _ runs) -> MkNodeLog ix runs) n logs) committed
+            SnapshotApplied (EventContext _ n) (SnapshotMetadata ix t) -> do
+              let update l@(MkNodeLog lastIx runs)
+                    | termAt ix l == Just t = l
+                    | otherwise = MkNodeLog (max ix lastIx) (Map.insert ix t (Map.dropWhileAntitone (<= ix) runs))
+               in go (Map.alter (Just . update . fromMaybe emptyNodeLog) n logs) committed
+            CommitIndexIncreasedTo (EventContext _ n) c
+              | Just t <- Map.lookup n logs >>= termAt c -> case committed of
+                  Committed c' t' | c == c' -> do
+                    assert ("Index " <> Text.show c <> "committed in two separate terms: " <> Text.show t <> " and " <> Text.show t') (t == t')
+                    go logs committed
+                  Committed c' _ | c < c' -> go logs committed
+                  _ -> go logs (Committed c t)
+            LeaderElected (EventContext term n) -> do
+              case committed of
+                NothingCommitted -> pure ()
+                Committed c t -> do
+                  let nodeLog = Map.findWithDefault emptyNodeLog n logs
+                      MkNodeLog lastIx _ = nodeLog
+
+                  assert ("Incongruent last index for leader of term " <> Text.show term) (lastIx >= c)
+
+                  for_ (termAt c nodeLog) $ \t' ->
+                    assert ("Incongruent terms for leader at term " <> Text.show term) (t' == t)
+
+              go logs committed
+            _ -> go logs committed
+        )
+      where
+        emptyNodeLog = MkNodeLog 0 mempty
+
+        appendEntry !ix !t (MkNodeLog _ runs) =
+          let kept = Map.takeWhileAntitone (< ix) runs
+           in MkNodeLog ix $ case Map.lookupMax kept of
+                Just (_, t') | t' == t -> kept
+                _ -> Map.insert ix t kept
+
+        termAt ix (MkNodeLog _ runs) = snd <$> Map.lookupLE ix runs
