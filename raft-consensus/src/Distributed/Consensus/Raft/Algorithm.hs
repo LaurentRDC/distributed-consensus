@@ -523,7 +523,13 @@ handleInstallSnapshot (InstallSnapshot leaderTerm leaderNode snapshot) =
   handleTermNumber leaderTerm >>= \case
     LT ->
       -- old term
-      pure () -- TODO: what do I do here?
+      -- We reply so that the other node hopefully learns of our newer term
+      -- and transitions to follower
+      InstallSnapshotResult
+        <$> use term
+        <*> (view configuration <&> nodeId)
+        <*> pure (sMetadata snapshot)
+        >>= runSend . Transformer.sendRPCResult leaderNode . ISR
     _ -> do
       becomeFollower (Just leaderNode)
       persistSnapshot snapshot
