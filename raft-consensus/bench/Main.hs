@@ -24,7 +24,7 @@ import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word (Word64)
-import Distributed.Consensus.Raft (Config (..), Implementation (..), Microseconds, Networking (..), Persistence (..), RPC, RPCResult, StateMachineStep (..), runRaftServer)
+import Distributed.Consensus.Raft (Config (..), Implementation (..), Microseconds, Networking (..), RPC, RPCResult, StateMachineStep (..), ephemeralPersistence, runRaftServer)
 import qualified Distributed.Consensus.Raft as Raft
 import Distributed.Consensus.Raft.Admin (AdminRequest, AdminResponse)
 import Distributed.Consensus.Raft.Client
@@ -179,20 +179,7 @@ mkServer network hbto etolb etoub seed node =
           },
       sSpec =
         Implementation
-          { persistence =
-              Persistence
-                { readLogEntriesFrom = \_ _ -> pure [],
-                  writeLogEntry = \_ _ -> pure (),
-                  truncateLogEntriesFrom = \_ _ -> pure (),
-                  readTerm = \_ -> pure 0,
-                  writeTerm = \_ _ -> pure (),
-                  readVotedFor = \_ _ -> pure Nothing,
-                  writeVotedFor = \_ _ _ -> pure (),
-                  readSnapshot = \_ -> pure Nothing,
-                  writeSnapshot = \_ _ -> pure (),
-                  readCommitIndex = \_ -> pure 0,
-                  writeCommitIndex = \_ _ -> pure ()
-                },
+          { persistence = ephemeralPersistence,
             stateMachine = step,
             networking =
               Networking

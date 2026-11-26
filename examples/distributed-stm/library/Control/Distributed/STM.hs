@@ -87,6 +87,11 @@ withDSTM ::
   Process r
 withDSTM =
   withDSTMOpts
+    -- TODO: ephemeralPersistence only makes sense if
+    -- the 'NodeId' changed on restart, which it does not.
+    --
+    -- Before this is turned into a package, ephemeralPersistence
+    -- must be swapped for something else.
     ephemeralPersistence
     id
 

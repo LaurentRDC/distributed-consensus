@@ -155,8 +155,14 @@ data Persistence entry node state m = Persistence
   }
 
 -- | This 'Persistence' implementation does absolutely nothing.
--- Only use this for testing, or for performance-critical workloads,
--- where fault-tolerance is not required.
+--
+-- Only use this for testing. If a node crashes and restarts without memory
+-- of its state, it may vote again leading to multiple leaders in a single
+-- cluster, which would be catastrophic.
+--
+-- An alternative would be for a node's identity (the 'node' type variable)
+-- to never be re-used. In this case, it would be perfectly fine to restart
+-- with an empty state.
 ephemeralPersistence :: (Applicative m) => Persistence entry node state m
 ephemeralPersistence =
   Persistence
