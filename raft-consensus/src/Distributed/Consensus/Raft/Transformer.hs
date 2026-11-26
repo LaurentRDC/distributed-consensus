@@ -518,19 +518,35 @@ currentSnapshot = do
 
 -- | Serialize the snapshot in a separate thread.
 --
--- An event will be emitted to run `applySnapshot`
+-- An event will be emitted to run `applySnapshot`.
+--
+-- If a snapshot is currently being serialized, 'persistSnapshot' does nothing. This means
+-- that if the node is currently snapshotting because its log is too long, and then
+-- a leader sends 'InstallSnapshot', the leader's 'InstallSnapshot' may be ignored.
+-- This isn't wrong, but will result in the leader potentially re-sending an 'InstallSnapshot'
+-- RPC again soon.
 persistSnapshot :: (MonadAsync m) => Snapshot node state -> RaftT entry node result state m ()
 persistSnapshot snapshot = do
-  s <- self
-  impl <- view implementation
-  queue <- view eventQueue
+  inprogress <- use snapshotInProgress
 
-  void $ lift $ async $ do
-    impl.persistence.writeSnapshot s snapshot
-    atomically $
-      writeTQueue
-        queue
-        (EventSnapshotPersisted snapshot)
+  -- We guard persisting snapshot, since we could be appending to the log a lot,
+  -- in which case we might notice that the log is too long just as often,
+  -- resulting in a cascade of snapshotting.
+  if inprogress
+    then pure ()
+    else do
+      snapshotInProgress .= True
+
+      s <- self
+      impl <- view implementation
+      queue <- view eventQueue
+
+      void $ lift $ async $ do
+        impl.persistence.writeSnapshot s snapshot
+        atomically $
+          writeTQueue
+            queue
+            (EventSnapshotPersisted snapshot)
 
 -- | Whether we are in the configuration we are currently using.
 isClusterMember :: (Ord node, Monad m) => RaftT entry node result state m Bool
@@ -583,6 +599,7 @@ applySnapshot ::
   Snapshot node state ->
   RaftT entry node result state m ()
 applySnapshot snapshot = do
+  snapshotInProgress .= False
   let snapshotIndex = snapshot.sMetadata.smLastIncludedIndex
   alreadyApplied <- use lastApplied <&> (>= snapshotIndex)
   -- Log.applySnapshot is a no-op if the incoming snapshot doesn't
