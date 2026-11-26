@@ -2,7 +2,7 @@
 
 This directory contains an example implementation of a distributed software transactional memory backend. Instead of the `STM` monad and `TVar`, we implement `DSTM` and `DVar`.
 
-For demonstration purposes, the networking is implemented using the Cloud Haskell implementation [`distributed-process`](https://github.com/haskell-distributed/distributed-process) via the `raft-consensus-distributed-process` package. The persistence layer is implemented using the `wal` package.
+For demonstration purposes, the networking is implemented using the Cloud Haskell implementation [`distributed-process`](https://github.com/haskell-distributed/distributed-process) via the `raft-consensus-distributed-process` package. The persistence layer turned off.
 
 This demo contains a single executable, `dstm-bank`, which shows multiple nodes transferring money between bank accounts, while balances are always conserved.
 
