@@ -112,7 +112,8 @@ runSend ::
 runSend act = ask >>= lift . void . async . runReaderT act
 
 data ClusterState node
-  = -- | Lone node, not in a cluster
+  = -- | Lone node, not in a cluster. This 'ClusterState' is useful if you want
+    -- to start up a Raft server and have it join an existing cluster.
     LoneNode
   | -- | Node in cluster. The cluster configuration can be empty,
     -- in which case this cluster has a single node

@@ -75,14 +75,14 @@ data WriteError
 instance Binary WriteError
 
 data TxCommand
-  = Fetch (Map DVarId Version) DVarId
+  = Fetch (Map DVarId Version) DVarId -- TODO: allow to fetch multiple DVarIds at once
   | Commit (Map DVarId Version) (Map DVarId Write)
   deriving (Show, Generic)
 
 instance Binary TxCommand
 
 data TxResult
-  = Value Version StrictByteString
+  = Value Version StrictByteString -- TODO: allow returning multiple values at once
   | Rejected [(DVarId, WriteError)]
   | Committed
   | Conflict [(DVarId, Maybe Cell)]

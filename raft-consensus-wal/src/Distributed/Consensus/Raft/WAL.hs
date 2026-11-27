@@ -147,6 +147,9 @@ withPersistence dir codec f = do
     writeTermToFile _node = writeDurably termFile
 
     readCommitIndexFromFile _node = liftIO $ try (IO.readFile commitIndexFile) >>= either (\(_ :: SomeException) -> pure 0) (pure . Binary.decode)
+    -- Recall that the commit index doesn't need to be persisted durably like other parts of the
+    -- Raft state. By using 'writeFile' instead of something more durable, we considerably increase the
+    -- throughput of a Raft cluster (at least 2x on my laptop)
     writeCommitIndexToFile _node = liftIO . IO.writeFile commitIndexFile . Binary.encode
 
     readVotedForFromFile _node term =

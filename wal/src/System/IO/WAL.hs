@@ -9,8 +9,11 @@
 {- HLINT ignore "Functor law" -}
 
 -- |
--- Module      : System.IO.WAL
--- Description : A generic, durable, rotating write-ahead log.
+-- Module:      $module
+-- Copyright:   (c) Laurent P. René de Cotret
+-- License:     BSD 3-Clause
+--
+-- This module implements write-ahead logs, for durable, append-only persistence to disk.
 module System.IO.WAL
   ( -- * Write-ahead log
     withWriteAheadLog,

@@ -7,7 +7,4 @@ Simple linearizability checker based on
     
 as vulgarized by Guanzhou Hu (https://www.josehu.com/technical/2024/07/28/on-line-linearizability-checker.html)
 
-## Build
-
-Run `$ cabal build linearizable` to build the project
-
+See the module documentation for a guide on how to use this package.

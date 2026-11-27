@@ -7,26 +7,51 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 
+-- |
+-- Module:      $module
+-- Copyright:   (c) Laurent P. René de Cotret
+-- License:     BSD 3-Clause
+--
+-- Manage a Raft cluster as an administrator.
+--
+-- === How to use this module
+--
+-- The key piece of information to use this module effectively is that
+-- interactions are done in /sessions/. An admin starts a session
+-- by calling 'withAdminSession', and all requests will have to originate
+-- from within.
+--
+-- Try to keep sessions open as long as possible -- ideally for the length
+-- of an admin's lifetime.
+--
+-- Administrators create requests using 'leaveCluster', 'joinCluster', or other builders.
+-- Requests are then sent using 'sendAdminCommand'. Interacting with a cluster may
+-- require retrying or redirecting requests; reuse requests as much as possible.
+-- To keep the implementation flexible, retrying and redirecting is something
+-- you need to do yourself.
 module Distributed.Consensus.Raft.Admin
-  ( RaftAdminT,
-    AdminImplementation (..),
+  ( -- * Interface
     withAdminSession,
-    AdminError (..),
-    Microseconds,
+    RaftAdminT,
 
-    -- * Available commands
-    sendAdminCommand,
-
-    -- ** Building commands
+    -- ** Creating commands
     leaveCluster,
     joinCluster,
     getClusterConfiguration,
     shutDown,
 
-    -- * Communications between admins and clusters
+    -- ** Sending commands
+    sendAdminCommand,
+    AdminError (..),
+
+    -- ** Configuration
+    AdminImplementation (..),
+
+    -- * Other exports
     SessionId,
     sessionId,
     SequenceNum,
+    Microseconds,
     AdminRequest,
     Request (..),
     AdminResponse,
@@ -72,6 +97,10 @@ import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import Distributed.Consensus.Raft.Timer (Microseconds)
 import Lens.Micro.Platform (makeLenses)
 
+-- | Admin monad transformer to issue administrative commands to a Raft cluster.
+--
+-- The only way to execute an action of type 'RaftAdminT' is with
+-- 'withAdminSession'.
 newtype RaftAdminT node m a
   = MkRaftAdminT (ReaderT (RaftAdminEnv node m) m a)
   deriving (Functor, Applicative, Monad)
@@ -82,6 +111,10 @@ instance MonadTrans (RaftAdminT node) where
 asks :: (Monad m) => (RaftAdminEnv node m -> a) -> RaftAdminT node m a
 asks = MkRaftAdminT . Reader.asks
 
+-- | Implementation of communication between an administrator and a cluster.
+--
+-- See the @raft-consensus-distributed-process@ package for an example
+-- implementation for the Cloud Haskell ecosystem.
 data AdminImplementation node m = AdminImplementation
   { -- | Send an admin request to a node.
     sendAdminRequest :: node -> AdminRequest node -> m (),
@@ -94,6 +127,23 @@ data AdminImplementation node m = AdminImplementation
 -- | Open an admin session, and run an action with a runner for that session.
 --
 -- It is safe to use the runner from several threads concurrently.
+--
+-- The typical way you would use 'withAdminSession' is like so:
+--
+-- @
+-- 'withAdminSession' nodeId $ \\run -> do
+--     req <- run 'shutDown'
+--
+--     let go serverNode =
+--             run ('sendAdminCommand' 1000000 serverNode req) >>= \case
+--                Left _ -> go serverNode -- infinite retries
+--                Right resp -> pure resp
+--
+--     go lastKnownLeader
+-- @
+--
+-- In practice, 'withAdminSession' is usually run in its own thread,
+-- and requests are sent over to that thread using e.g. a 'TQueue'.
 withAdminSession ::
   ( MonadAsync m,
     MonadFork m,
@@ -158,6 +208,10 @@ newCommand entry = do
 
   pure $ MkRequest reqId self entry
 
+-- | Command that a node join a Raft cluster.
+--
+-- This has no effect if the node is already a member of the
+-- cluster.
 joinCluster ::
   (MonadSTM m) =>
   -- | Leader of the cluster to join
@@ -165,6 +219,10 @@ joinCluster ::
   RaftAdminT node m (AdminRequest node)
 joinCluster = newCommand . JoinCluster
 
+-- | Command that a node leave the Raft cluster.
+--
+-- Note that this node will not shut down unless the 'shutDown'
+-- command is also sent to it.
 leaveCluster :: (MonadSTM m) => RaftAdminT node m (AdminRequest node)
 leaveCluster = newCommand LeaveCluster
 
@@ -175,6 +233,7 @@ leaveCluster = newCommand LeaveCluster
 getClusterConfiguration :: (MonadSTM m) => RaftAdminT node m (AdminRequest node)
 getClusterConfiguration = newCommand GetClusterConfiguration
 
+-- | Request that a node shuts down.
 shutDown :: (MonadSTM m) => RaftAdminT node m (AdminRequest node)
 shutDown = newCommand ShutDown
 

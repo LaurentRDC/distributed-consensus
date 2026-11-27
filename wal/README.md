@@ -1,8 +1,9 @@
 # wal
 
-## Build
+Implementation of write-ahead logs in Haskell.
 
-Run `$ cabal build` to build the project
-## Documentation
+Write-ahead logs are append-only durable logs, which are often used for persistence of data in databases or other
+fault-tolerant distributed systems.
 
-Run `$ cabal haddock --open` to generate a reference for the API of the project.
+The implementation in this package features multi-threaded writers, batching, and simultaneous readers, for maximum
+throughput.

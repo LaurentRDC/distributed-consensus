@@ -2,7 +2,8 @@ cabal-version:      3.4
 name:               linearizable
 version:            0.1.0.0
 synopsis:           Linearizability checker
--- description:
+description:        Linearizability checker for experimental event histories. This is useful for testing
+                    the properties of a distributed system given, for example.
 homepage:           https://github.com/LaurentRDC/distributed-consensus
 license:            BSD-3-Clause
 license-file:       LICENSE

@@ -1,19 +1,27 @@
 -----------------------------------------------------------------------------
 
 -- |
--- Module      :  $module
--- Portability :  portable
+-- Module:      $module
+-- Copyright:   (c) Laurent P. René de Cotret
+-- License:     BSD 3-Clause
 --
 -- Simple linearizability checker based on
 --
 --   * M. P. Herlihy and J. M. Wing, \"/Linearizability: a correctness condition for concurrent objects/\",
 --     ACM Transactions on Programming Languages and Systems. Volume 12, issue 3, pages 463 - 492.
 --
--- as vulgarized by Guanzhou Hu (https://www.josehu.com/technical/2024/07/28/on-line-linearizability-checker.html)
+-- as <https://www.josehu.com/technical/2024/07/28/on-line-linearizability-checker.html vulgarized by Guanzhou Hu>.
+--
+-- === How to use this module
+--
+-- The only useful function here is 'linearizable'. The idea is that 'linearizable' checks
+-- whether it is /possible/ that the events fed to it were ever part of a linear history.
 module Control.Concurrent.Linearizable
-  ( Model (..),
+  ( linearizable,
+
+    -- * Modeling
+    Model (..),
     Event (..),
-    linearizable,
   )
 where
 
@@ -27,6 +35,9 @@ import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
 
+-- | Experimental event. Note that, typically, the @operation@ type
+-- parameter tracks both what was the input to the state machine,
+-- as well as what was the result of the input.
 data Event timestamp operation
   = MkEvent
   { timestampReq :: timestamp,
@@ -35,6 +46,34 @@ data Event timestamp operation
   }
   deriving (Show, Eq, Ord)
 
+-- | Model for a state machine.
+--
+-- Consider a state machine that is a single counter. The 'Model' would be:
+--
+-- @
+-- data Command
+--     = Increment
+--     | Decrement
+--
+-- model :: Model Int (Command, Int)
+-- model = Model
+--       { initialState = 0
+--       , apply = \\(op, result) value ->
+--                   let expectedState = case op of
+--                          Increment = succ value
+--                          Decrement = pred value
+--                   in if result == expectation
+--                          then Just expectation
+--                          else Nothing
+--       }
+-- @
+--
+-- Here, the @operation@ type parameter represents both what the input
+-- was (here, @Command@), as well as what the experimental result of that
+-- command was (here, @Int@, the new state of the counter).
+--
+-- In particular, note how the model returns @'Nothing'@ in case the state is
+-- inconsistent with the experimental history.
 data Model state operation
   = MkModel
   { initialState :: state,
@@ -68,8 +107,13 @@ data Checker node state timestamp operation
 -- on a key-value store, you might want to check the
 -- linearizability of events related to each key individually.
 linearizable ::
-  (Ord node, Ord state, Ord timestamp, Ord operation) =>
+  ( Ord node,
+    Ord state,
+    Ord timestamp,
+    Ord operation
+  ) =>
   Model state operation ->
+  -- | Experimental history. The order of events need not be sorted in advance.
   [(node, Event timestamp operation)] ->
   Bool
 linearizable _ [] = True

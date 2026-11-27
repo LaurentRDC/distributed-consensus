@@ -6,24 +6,51 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 
+-- |
+-- Module:      $module
+-- Copyright:   (c) Laurent P. René de Cotret
+-- License:     BSD 3-Clause
+--
+-- Interface to interact with a Raft cluster as a client.
+--
+-- === How to use this module
+--
+-- The key piece of information to use this module effectively is that
+-- interactions are done in /sessions/. A client starts a session
+-- by calling 'withClientSession', and all requests will have to originate
+-- from within.
+--
+-- Try to keep sessions open as long as possible -- ideally for the length
+-- of a client's lifetime.
+--
+-- Clients create requests using 'newRequest', and send those requests
+-- to a cluster via 'sendClientRequest'. Interacting with a cluster may
+-- require retrying or redirecting requests; reuse requests as much as possible.
+-- To keep the implementation flexible, retrying and redirecting is something
+-- you need to do yourself.
 module Distributed.Consensus.Raft.Client
-  ( RaftClientT,
-    ClientImplementation (..),
+  ( -- * Interface
     withClientSession,
+    RaftClientT,
+
+    -- ** Creating requests
+    newRequest,
+
+    -- ** Sending requests
     sendClientRequest,
     ClientError (..),
-    Microseconds,
+
+    -- ** Configuration
+    ClientImplementation (..),
 
     -- ** Session information
     clientSession,
 
-    -- ** Request payloads
-    newRequest,
-
-    -- * Communications between clients and clusters
+    -- * Other exports
     SessionId,
     sessionId,
     SequenceNum,
+    Microseconds,
     ClientRequestId (..),
     ClientRequest,
     Request (..),
@@ -70,15 +97,10 @@ import Distributed.Consensus.Raft.Messaging (Request (..), Response (..))
 import Distributed.Consensus.Raft.Timer (Microseconds)
 import Lens.Micro.Platform (makeLenses)
 
--- | Client monad to make requests to a Raft cluster.
+-- | Client monad transformer to make requests to a Raft cluster.
 --
 -- The only way to execute an action of type 'RaftClientT' is with
 -- 'withClientSession'.
---
--- The only way to construct an action of type 'RaftClientT' is to use
--- 'request'.
---
--- If you must run computations in the base monad, use 'lift'.
 newtype RaftClientT entry node result m a
   = MkRaftClientT (ReaderT (RaftClientEnv entry node result m) m a)
   deriving (Functor, Applicative, Monad)
@@ -86,6 +108,10 @@ newtype RaftClientT entry node result m a
 instance MonadTrans (RaftClientT entry node result) where
   lift = MkRaftClientT . lift
 
+-- | Implementation of communication between a client and a cluster.
+--
+-- See the @raft-consensus-distributed-process@ package for an example
+-- implementation for the Cloud Haskell ecosystem.
 data ClientImplementation entry node result m = ClientImplementation
   { sendRequest :: node -> ClientRequest entry node -> m (),
     receiveResponse :: m (ClientResponse node result),
@@ -96,6 +122,24 @@ data ClientImplementation entry node result m = ClientImplementation
 -- | Open a client session, and run an action with a runner for that session.
 --
 -- It is safe to use the runner from several threads concurrently.
+--
+-- The typical way you would use 'withClientSession' is like so:
+--
+-- @
+-- 'withClientSession' nodeId $ \\run -> do
+--     req <- run ('newRequest' someRequest)
+--
+--     let go serverNode =
+--             run ('sendClientRequest' 1000000 serverNode req) >>= \case
+--                Left ('Redirect' otherServerNode) -> go otherServerNode
+--                Left _ -> go serverNode -- infinite retries
+--                Right resp -> pure resp
+--
+--     go lastKnownLeader
+-- @
+--
+-- In practice, 'withClientSession' is usually run in its own thread,
+-- and requests are sent over to that client thread using e.g. a 'TQueue'.
 withClientSession ::
   ( MonadAsync m,
     MonadFork m,

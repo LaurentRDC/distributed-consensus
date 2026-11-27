@@ -48,13 +48,13 @@ library io-classes-instances
     exposed-modules:  Control.Distributed.Process.Raft.Instances
     build-depends:    base >= 4.18 && <4.23
                     , array
-                    , async
+                    , async >= 2.1 && <2.3
                     , distributed-process ^>=0.7
                     , io-classes ^>=1.11
                     , io-classes:si-timers
-                    , primitive
+                    , primitive >=0.7 && <0.11
                     , stm ^>=2.5
-                    , transformers
+                    , transformers ^>=0.6
     default-language: GHC2021
 
 library client

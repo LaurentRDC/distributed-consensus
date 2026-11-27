@@ -64,6 +64,9 @@ nullTracer :: (Applicative m) => RaftTrace entry node result state -> m ()
 nullTracer _ = pure ()
 
 -- | Networking implementation.
+--
+-- See @raft-consensus-distributed-process@ for an implementation that fits
+-- in the Cloud Haskell ecosystem.
 data Networking entry node result state m = Networking
   { -- | Send a remote procedure call to another Raft node.
     sendRPC :: node -> RPC entry node state -> m (),
@@ -96,7 +99,7 @@ data Networking entry node result state m = Networking
 -- | Persistence implementation.
 --
 -- This is broken out into its own type so that it can be provided cleanly by
--- third-party packages
+-- third-party packages. For example, see the @raft-consensus-wal@ package.
 data Persistence entry node state m = Persistence
   { -- | Read log entries, starting from and including, a given 'LogIndex'
     --

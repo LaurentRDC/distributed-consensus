@@ -1,8 +1,3 @@
 # raft-consensus-wal
 
-## Build
-
-Run `$ cabal build` to build the project
-## Documentation
-
-Run `$ cabal haddock --open` to generate a reference for the API of the project.
+Adapter to the `raft-consensus` library, specifically for persistence using write-ahead logs via the `wal` package.
