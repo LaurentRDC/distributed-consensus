@@ -19,6 +19,16 @@ test target='all':
 
 pre-commit: format lint
 
+gen-docs:
+    cabal haddock --haddock-for-hackage linearizable
+    cabal haddock --haddock-for-hackage wal
+    cabal haddock --haddock-for-hackage raft-consensus
+    cabal haddock --haddock-for-hackage raft-consensus-wal
+    # raft-consensus-distributed-process makes use of public sublibraries, for which
+    # Hackage doesn't support documentation. Therefore, we must be specific
+    # that we want the documentation for the main library
+    cabal haddock --haddock-for-hackage raft-consensus-distributed-process:lib:raft-consensus-distributed-process
+
 [group('example: distfs')]
 distfs-servers n="5" keep-state="false":
     ./examples/distributed-filesystem/run-servers.sh {{n}} {{ if keep-state == "true" { "--keep-state" } else { "" } }}
