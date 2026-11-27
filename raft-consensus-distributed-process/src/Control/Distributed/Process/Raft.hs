@@ -17,6 +17,29 @@ import Control.Monad.IO.Class (liftIO)
 import Data.List.NonEmpty (NonEmpty (..))
 import Distributed.Consensus.Raft (Networking (..))
 
+-- | Provides a 'Networking' implementation suitable for a Cloud Haskell cluster.
+--
+-- For example:
+--
+-- @
+-- runProcess localNode $
+--     raftNetwork <- 'networking'
+--     conf <- simpleConfig =<< getSelfNode
+--     peers <- ...
+--     let implementation = Implementation { networking = raftNetwork
+--                                         , stateMachine = ...
+--                                         , persistence = ...
+--                                         , tracer = ...
+--                                         }
+--     withRaftServer conf peers initialState implementation $ do
+--         ...
+-- @
+--
+-- Persistence must be provided separately, for example via a package
+-- like @raft-consensus-wal@.
+--
+-- There is one caveat: only one Raft server can be created per node.
+-- Failure to uphold this will result in an exception on startup.
 networking ::
   (Serializable entry, Serializable state, Serializable result) =>
   Process (Networking entry NodeId result state Process)
