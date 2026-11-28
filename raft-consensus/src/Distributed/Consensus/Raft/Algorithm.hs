@@ -68,6 +68,7 @@ import Distributed.Consensus.Raft.Transformer
     applySnapshot,
     becomeCandidate,
     becomeFollower,
+    broadcastForPendingReads,
     checkElection,
     clusterConfiguration,
     commandLog,
@@ -268,6 +269,8 @@ handleClientRequest requests = do
         (appendLogEntries . fmap (\c -> (ourTerm, LogEntryCommand c)))
         (NonEmpty.nonEmpty $ NonEmpty.filter isNotReadOnly commands)
 
+      broadcastForPendingReads
+
 handleAppendEntries ::
   ( Ord node,
     MonadMVar m,
@@ -403,6 +406,7 @@ handleAppendEntriesResult (AppendEntriesResult responderTerm responderNode respo
           %= Set.insert responderNode
 
         serveReadOnlyQueries
+        broadcastForPendingReads
 
         applyLogEntries
       else do

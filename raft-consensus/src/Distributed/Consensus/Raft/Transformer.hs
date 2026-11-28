@@ -21,6 +21,8 @@ module Distributed.Consensus.Raft.Transformer
     sendAdminResponse,
     whenRole,
     sendHeartbeat,
+    broadcastAppendEntries,
+    broadcastForPendingReads,
     sendAppendEntriesTo,
     setCommitIndex,
     voteFor,
@@ -196,8 +198,23 @@ sendHeartbeat ::
 sendHeartbeat =
   whenRole Leader $ do
     config <- view configuration
-    peers >>= traverse_ sendAppendEntriesTo
+    broadcastAppendEntries
     view heartBeatTimer >>= lift . resetTimer config.heartBeatTimeout
+
+broadcastAppendEntries :: (Ord node, MonadAsync m) => RaftT entry node result state m ()
+broadcastAppendEntries = do
+  peers >>= traverse_ sendAppendEntriesTo
+  use readOnlySequenceNum >>= assign readOnlySeqBroadcast
+
+-- | Check if we should broadcast an 'AppendEntries' RPC to service
+-- pending reads. This can be used to trigger a heartbeat earlier
+-- than the next regularly-scheduled heartbeat.
+broadcastForPendingReads :: (Ord node, MonadAsync m) => RaftT entry node result state m ()
+broadcastForPendingReads = whenRole Leader $ do
+  broadcasted <- use readOnlySeqBroadcast
+  latest <- use readOnlySequenceNum
+  roundInFlight <- use pendingReadRequests <&> any ((<= broadcasted) . (^. pendingReadSequenceNum))
+  when (latest > broadcasted && not roundInFlight) broadcastAppendEntries
 
 -- | For a given destination node, look up which of the entries
 -- in our log should be replicated, and send an appropriate 'AppendEntries' RPC.
@@ -655,8 +672,7 @@ appendLogEntries entries = do
   -- it's hard to check that the commit index is always <= the last log index
   use commandLog <&> Log.lastLogIndex >>= trace . flip LastLogIndexChangedTo
 
-  whenRole Leader $
-    peers >>= traverse_ sendAppendEntriesTo
+  whenRole Leader broadcastAppendEntries
 
   -- In a single-node cluster, we would already have
   -- quorum to update our commit index
