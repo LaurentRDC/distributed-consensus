@@ -1,6 +1,6 @@
 cabal-version:      3.4
 name:               raft-consensus
-version:            0.1.0.0
+version:            0.1.1.0
 synopsis:           Haskell implementation of the Raft consensus protocol
 -- description:
 homepage:           https://github.com/LaurentRDC/distributed-consensus

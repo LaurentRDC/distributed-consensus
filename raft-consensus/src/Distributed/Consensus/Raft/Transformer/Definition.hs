@@ -39,6 +39,7 @@ module Distributed.Consensus.Raft.Transformer.Definition
     currentClientRequests,
     pendingReadRequests,
     readOnlySequenceNum,
+    readOnlySeqBroadcast,
     snapshotInProgress,
     randomGen,
 
@@ -143,6 +144,9 @@ data RaftState entry node result state = MkRaftState
     -- when a heartbeat counts to acknowledge a read-only request (or was already
     -- in-flight, for example)
     _readOnlySequenceNum :: !ReadOnlySequenceNum,
+    -- | Value of '_readOnlySequenceNum' when an 'AppendEntries' RPC or heartbeat was last
+    -- broadcast.
+    _readOnlySeqBroadcast :: !ReadOnlySequenceNum,
     -- | 'True' if a snapshot is currently being written to storage, which is done asynchronously.
     _snapshotInProgress :: !Bool,
     _randomGen :: !StdGen
@@ -193,6 +197,7 @@ initialRaftState initRole seed clusterConf initialState =
       _currentClientRequests = mempty,
       _pendingReadRequests = mempty,
       _readOnlySequenceNum = 0,
+      _readOnlySeqBroadcast = 0,
       -- We use mkStdGen64 for reproducibility across 32-bit and 64-bit architectures
       _snapshotInProgress = False,
       _randomGen = mkStdGen64 seed
